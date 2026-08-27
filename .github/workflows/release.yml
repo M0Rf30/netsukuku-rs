@@ -81,9 +81,68 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run
         run: cargo publish --workspace --dry-run
 
-      - name: cargo publish --workspace
+      # Resumable publish.
+      #
+      # crates.io rate-limits the creation of *new* crates: a burst of 5, then one per 10
+      # minutes (https://crates.io/docs/rate-limits). A workspace publishing twelve new crates
+      # at once therefore cannot succeed in a single pass — the first release attempt uploaded
+      # five and died on `429 Too Many Requests`, leaving the release half-done.
+      #
+      # So: publish one crate at a time in dependency order, skip anything already on the
+      # registry, and treat a 429 as "wait and retry" rather than as a failure. Skipping makes
+      # the whole job idempotent, which is what lets a partially-completed release simply be
+      # re-run instead of needing a version bump. The limit only applies to brand-new crates;
+      # once all twelve exist, subsequent releases publish new versions at 1/minute and this
+      # loop costs nothing.
+      - name: cargo publish (resumable, rate-limit aware)
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
         # The repository secret is named CRATES_TOKEN; cargo reads CARGO_REGISTRY_TOKEN.
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_TOKEN }}
-        run: cargo publish --workspace
+        run: |
+          set -uo pipefail
+
+          # Dependency order comes from cargo itself, not a hand-rolled topological sort and not
+          # a hardcoded list: a dry run prints one "Uploading <crate>" line per member, already
+          # ordered. Deriving it this way cannot drift when a dependency edge changes. The dry
+          # run also re-verifies that every crate still packages cleanly before anything uploads.
+          order=$(cargo publish --workspace --dry-run 2>&1 \
+            | sed -n 's/^ *Uploading \([A-Za-z0-9_-]*\) .*/\1/p')
+          if [ -z "$order" ]; then
+            echo "::error::could not derive publish order from cargo publish --dry-run"
+            exit 1
+          fi
+
+          echo "publish order: $(echo "$order" | tr "\n" " ")"
+
+          for crate in $order; do
+            ver=$(cargo metadata --no-deps --format-version 1 \
+              | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')
+
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              "https://crates.io/api/v1/crates/${crate}/${ver}")
+            if [ "$code" = "200" ]; then
+              echo "== ${crate} ${ver} already on crates.io, skipping"
+              continue
+            fi
+
+            # Up to 6 attempts: covers five consecutive 10-minute rate-limit windows.
+            for attempt in 1 2 3 4 5 6; do
+              echo "== publishing ${crate} ${ver} (attempt ${attempt})"
+              out=$(cargo publish -p "${crate}" --no-verify 2>&1) && { echo "$out"; break; }
+              echo "$out"
+              if echo "$out" | grep -q "already exists"; then
+                echo "== ${crate} ${ver} raced in, continuing"
+                break
+              fi
+              if echo "$out" | grep -q "429 Too Many Requests"; then
+                echo "== rate limited; sleeping 630s before retrying ${crate}"
+                sleep 630
+                continue
+              fi
+              echo "::error::publishing ${crate} ${ver} failed for a reason other than rate limiting"
+              exit 1
+            done
+          done
+
+          echo "== all workspace crates are on crates.io"
