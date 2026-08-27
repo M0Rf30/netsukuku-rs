@@ -62,6 +62,14 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
+      - name: log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       # Real tag: build each platform standalone and push it to the registry by digest. A
       # manifest list combining the two digests into the version/latest tags is created once,
       # after both matrix legs finish, by the `merge` job below -- this is docker's documented
@@ -78,14 +86,6 @@ jobs:
             NTKD_VERSION=${{ steps.version.outputs.version }}
             NTKD_REVISION=${{ github.sha }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-
-      - name: log in to GHCR
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: export digest
         if: startsWith(github.ref, 'refs/tags/v')
