@@ -10,7 +10,8 @@ Fixes real bugs, unlike 0.1.2. Three defects found while diagnosing a restart-lo
 `ntkd.service` on Arch, all tracing back to one root event: the packaged config shipped a
 placeholder `nics = ["eth0"]`, and the host had no `eth0`. The systemd unit and capability
 changes below live in the Arch packaging repo (`PKGBUILD`), not here — nothing here adds a unit
-file.
+file. A separate four-domain audit before tagging, unrelated to that restart-loop, found two more
+real protocol defects and one broken research-tooling promise; those are below too.
 
 ### Fixed
 
@@ -39,6 +40,49 @@ file.
 Bind failures are diagnosed by interpreting the errno at the bind site, not by a `port < 1024`
 preflight check: `net.ipv4.ip_unprivileged_port_start` can be lowered below 1024, so a static
 pre-check could refuse a bind the kernel would in fact have allowed.
+
+- **A netlink failure mid-batch could wedge routing at the same destination forever.**
+  `RouteInstaller::apply` (`crates/ntkd/src/kernel/routes.rs`) recorded `self.applied` only after
+  an entire batch of route mutations succeeded; a single `add_route`/`change_route` failure
+  partway through a batch left `self.applied` stale against what the kernel already held. The
+  next `apply()` re-diffed from that stale record, re-issued the identical mutation, hit
+  `AlreadyExists` (`RealNetlink::add_route` is a plain `.add()`), and failed the same way forever
+  — every destination ordered after the failing one in the diff never applied again, and one that
+  vanished from a later snapshot before being recorded leaked its kernel route permanently.
+  `self.applied` is now updated one mutation at a time, immediately after each kernel call
+  succeeds, so a partial failure records exactly what landed and the next call retries only the
+  remainder.
+- **A still-hooking node could inject premature routing state into the network.**
+  `handle_inbound_send_etp` (`crates/ntk-qspn/src/manager.rs`) had no bootstrap-phase gate: every
+  inbound ETP was ingested and flooded onward regardless of whether this node had itself finished
+  hooking, unlike upstream's `qspn.vala:2671-2707`, which drops an ETP from outside the hooking
+  g-node outright and holds — never forwards — one with no path yet at the host g-node's level.
+  That gate is now ported: only an ETP that actually qualifies clears bootstrap and
+  ingests/forwards; the rest are ignored or held exactly as upstream does.
+- **The research corpus had no documented way to regenerate.** `research/README.md` claimed the
+  vendored, gitignored `research/impl/`/`research/related/` trees were "regenerable from the
+  clone list" while the file contained no clone list — a fresh clone had no way to restore the
+  corpus every doc comment in the workspace cites by `path:line`. `research/README.md` now
+  carries the verified clone list for all 18 `impl/vala/` repos, the pinned `impl/c/netsukuku`
+  checkout, and `related/`.
+
+### Known broken
+
+- **5 of the 7 real-kernel `mesh.rs` tests fail, and this release does not fix them.** Run
+  serially under `unshare --net --map-root-user -- cargo test -p ntkd --test mesh -- --ignored
+  --test-threads=1`, the suite reports 2 passed / 5 failed in ~500s. Four fail deterministically —
+  `partition_clean_severance_drops_exactly_the_unreachable_destinations`,
+  `partition_signals_split_only_after_the_documented_debounce`,
+  `two_level_gnode_migrates_as_a_unit_into_merged_network`,
+  `two_star_groups_merge_into_one_network` — covering partition detection, g-node migration and
+  network merge. Two more (`chain_of_four_converges_to_exact_multi_hop_routes`,
+  `level1_destination_installs_correct_cidr_route`) swap pass/fail between identical runs, so they
+  are flaky rather than broken. The failures predate this release: re-running the suite with
+  0.1.3's two fixes stashed out produces the same 2/5 split, with the same two flaky tests
+  swapping. They are invisible in CI because the entire privileged tier is `#[ignore]`d and that
+  job has never been observed to pass. Left red and undiagnosed rather than weakened, per the
+  project's convention; `README.md` §6 records the same finding so a reader cannot mistake the
+  green default run for working multi-hop routing.
 
 ## [0.1.2]
 

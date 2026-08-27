@@ -1353,24 +1353,55 @@ impl Actor {
         }
     }
 
+    /// Rejects a message that fails [`check_incoming_message`] by removing
+    /// the sender's arc (`qspn.vala:2660-2669`). Split out of
+    /// [`Self::ingest_incoming_etp`] so [`Self::handle_inbound_send_etp`] can
+    /// run this check before its bootstrap-phase gate
+    /// (`qspn.vala:2671-2707`), exactly the ordering upstream's `send_etp`
+    /// uses: a junk ETP costs the sender its arc even while this node is
+    /// still bootstrapping.
+    fn check_and_remove_on_junk(&mut self, arc: ArcId, etp: &EtpMessage) -> bool {
+        if check_incoming_message(etp, self.state.my_naddr()) {
+            return true;
+        }
+        warn!(?arc, "check_incoming_message failed");
+        self.do_remove_arc(arc, false);
+        false
+    }
+
     /// Shared ingest for a single arc's already-arrived ETP (`revise_etp` ->
     /// `update_map` -> emit -> `update_clusters` -> emit), used by
-    /// `handle_arc_add_fetched` and the `send_etp` skeleton. Purely local —
-    /// no outbound call — so it never needs to be spawned. Returns `None` if
-    /// the message was rejected: malformed input removes the arc; an
-    /// acyclic message is just ignored (matching upstream's differing
-    /// treatment of the two cases, `qspn.vala:2660-2669` vs `2712-2720`).
+    /// `handle_arc_add_fetched`, `handle_bootstrap_etp_fetched`, and
+    /// `handle_exit_bootstrap_gathered`. Purely local — no outbound call —
+    /// so it never needs to be spawned. Runs
+    /// [`Self::check_and_remove_on_junk`] first (`qspn.vala:2660-2669`);
+    /// [`Self::handle_inbound_send_etp`] instead calls that check itself,
+    /// ahead of its own bootstrap gate, then calls
+    /// [`Self::ingest_checked_etp`] directly. Returns `None` if the message
+    /// was rejected: malformed input removes the arc; an acyclic message is
+    /// just ignored (matching upstream's differing treatment of the two
+    /// cases, `qspn.vala:2660-2669` vs `2712-2720`).
     fn ingest_incoming_etp(
         &mut self,
         arc: ArcId,
         etp: EtpMessage,
         is_full: bool,
     ) -> Option<Ingested> {
-        if !check_incoming_message(&etp, self.state.my_naddr()) {
-            warn!(?arc, "check_incoming_message failed");
-            self.do_remove_arc(arc, false);
+        if !self.check_and_remove_on_junk(arc, &etp) {
             return None;
         }
+        self.ingest_checked_etp(arc, etp, is_full)
+    }
+
+    /// The `revise_etp` -> `update_map` -> emit -> `update_clusters` -> emit
+    /// tail of `send_etp` (`qspn.vala:2709-2733`), for a message already
+    /// known to have passed [`check_incoming_message`].
+    fn ingest_checked_etp(
+        &mut self,
+        arc: ArcId,
+        etp: EtpMessage,
+        is_full: bool,
+    ) -> Option<Ingested> {
         let old_peer = self.state.record_peer_naddr(arc, etp.node_address.clone());
         let existing = self.state.paths_via_arc0(arc);
         let revised = match revise_etp(
@@ -1450,6 +1481,22 @@ impl Actor {
 
     /// Inbound `send_etp` skeleton (`qspn.vala:2608-2751`): replies as soon
     /// as the local map is updated; forwarding is spawned separately.
+    ///
+    /// Ports the bootstrap-phase gate this skeleton was previously missing
+    /// (`qspn.vala:2671-2707`): while this identity hasn't finished
+    /// hooking, an inbound ETP is ignored outright — no ingest, no forward,
+    /// no arc removal — unless its sender's divergence level is below
+    /// [`QspnState::guest_gnode_level`] *and* the ETP carries a path whose
+    /// last hop reaches level `host_gnode_level - 1`; such a qualifying ETP
+    /// is ingested (still not forwarded — upstream's "No forward is
+    /// needed", `qspn.vala:2739`) and immediately exits bootstrap via
+    /// [`Self::do_exit_bootstrap`], the same transition
+    /// [`Self::handle_bootstrap_etp_fetched`]'s active-poll path already
+    /// uses. Both "ignore" outcomes return `Ok(())`: upstream's bare
+    /// `return` here (`qspn.vala:2680,2699`) never throws
+    /// `QspnNotAcceptedError` to the RPC caller, so surfacing an `Err`
+    /// would misreport a silently-dropped-but-expected message as a
+    /// protocol violation.
     fn handle_inbound_send_etp(
         &mut self,
         arc: ArcId,
@@ -1459,7 +1506,44 @@ impl Actor {
         if !self.state.contains_arc(arc) {
             return Err(QspnError::NotAnArc);
         }
-        let Some(ingested) = self.ingest_incoming_etp(arc, etp, is_full) else {
+        if !self.check_and_remove_on_junk(arc, &etp) {
+            return Ok(());
+        }
+        if !self.state.is_bootstrap_complete() {
+            let guest_gnode_level = self.state.guest_gnode_level();
+            let host_gnode_level = self
+                .state
+                .host_gnode_level()
+                .expect("is_bootstrap_complete() checked above");
+            let Ok(Some(sender)) = self.state.my_naddr().hcoord(&etp.node_address) else {
+                // Same address as us, or a topology mismatch that
+                // `check_incoming_message` should already have rejected —
+                // either way, nothing sane to gate on. Ignore.
+                return Ok(());
+            };
+            if sender.level >= guest_gnode_level {
+                // The sender is outside my hooking gnode. Ignore it
+                // (qspn.vala:2677-2681).
+                return Ok(());
+            }
+            let has_path_to_into_gnode = etp.paths.iter().any(|p| {
+                p.hops
+                    .last()
+                    .is_some_and(|h| h.level == host_gnode_level - 1)
+            });
+            if !has_path_to_into_gnode {
+                // The sender is inside my hooking gnode, but the ETP has no
+                // destination outside it. Ignore it (qspn.vala:2686-2700).
+                return Ok(());
+            }
+            // The ETP has a destination outside my hooking gnode and
+            // inside the gnode I hook into: ingest, then exit bootstrap. No
+            // forward (qspn.vala:2701-2705,2735-2740).
+            let _ = self.ingest_checked_etp(arc, etp, is_full);
+            self.do_exit_bootstrap();
+            return Ok(());
+        }
+        let Some(ingested) = self.ingest_checked_etp(arc, etp, is_full) else {
             return Ok(());
         };
         let changed = !ingested.all_paths_set.is_empty() || ingested.changed_my_gnodes;
@@ -2159,6 +2243,199 @@ mod bootstrap_publish_tests {
             "the watch-channel snapshot must already carry the peer's g-node the instant \
              is_bootstrap_complete() can first observe true, not only once the redundant \
              exit-bootstrap re-fetch eventually completes: {published:?}"
+        );
+    }
+}
+
+/// Regression coverage for the missing bootstrap-phase gate on the
+/// passive, peer-initiated `send_etp` arrival path (`qspn.vala:2671-2707`)
+/// — `Actor::handle_bootstrap_etp_fetched`'s active-poll counterpart
+/// already enforced an equivalent gate; this path did not.
+#[cfg(test)]
+mod send_etp_bootstrap_gate_tests {
+    use ntk_common::Topology;
+
+    use super::*;
+    use crate::arc::DefaultArcIdSource;
+    use crate::config::FixedThreshold;
+    use crate::fake::FakeQspnStubFactory;
+    use crate::flood::{prepare_full_etp, prepare_new_etp};
+
+    /// Mirrors `bootstrap_publish_tests::entering_actor`, with two arcs
+    /// added by every test below so an incorrectly-not-gated ETP has
+    /// somewhere to be (wrongly) forwarded to.
+    fn entering_actor(
+        guest_gnode_level: usize,
+        host_gnode_level: usize,
+    ) -> (Actor, Naddr, watch::Receiver<Arc<RouteSnapshot>>) {
+        let topology = Topology::new(vec![4u32; 2]).expect("valid topology");
+        let naddr = Naddr::new(topology, vec![0u32; 2]).expect("valid address");
+        let fp = Fingerprint::new(vec![1u8], 0, vec![0u32; 2]);
+        let state = QspnState::new_entering(
+            naddr.clone(),
+            fp,
+            QspnConfig::default(),
+            &[],
+            &[],
+            guest_gnode_level,
+            host_gnode_level,
+            (0, 0),
+            &[],
+        )
+        .expect("valid entering state");
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let (events_tx, _) = broadcast::channel(16);
+        let (snapshot_tx, snapshot_rx) =
+            watch::channel(Arc::new(state.snapshot().unwrap_or_default()));
+        (
+            Actor {
+                state,
+                stub_factory: Arc::new(FakeQspnStubFactory::new()),
+                threshold_calculator: Arc::new(FixedThreshold(Duration::from_millis(1))),
+                arc_id_source: Arc::new(DefaultArcIdSource::default()),
+                events_tx,
+                snapshot_tx,
+                cmd_tx,
+                timers: JoinSet::new(),
+                arc_gather_window: None,
+            },
+            naddr,
+            snapshot_rx,
+        )
+    }
+
+    /// An `EtpPath` whose last hop names `(level, pos)`, with a fingerprint
+    /// climbed to the matching level — the minimum shape
+    /// `check_incoming_message` accepts.
+    fn path_reaching(level: usize, pos: u32) -> EtpPath {
+        let mut fp = Fingerprint::new(vec![9u8], 0, vec![0u32; level]);
+        for _ in 0..level {
+            fp = fp.construct(&[], false).expect("valid champion climb");
+        }
+        EtpPath {
+            hops: vec![HCoord::new(level, pos)],
+            arcs: vec![ArcId::from(99u32)],
+            cost: Cost::Finite(1),
+            fingerprint: fp,
+            nodes_inside: 1,
+            ignore_outside: vec![false; 2],
+        }
+    }
+
+    /// Upstream's bootstrap gate ignores a sender whose divergence level is
+    /// at or above `guest_gnode_level` outright — no ingest, no arc
+    /// removal, no forward — regardless of what paths its ETP carries
+    /// (`qspn.vala:2677-2681`).
+    #[tokio::test]
+    async fn a_sender_at_or_above_guest_gnode_level_is_ignored_during_bootstrap() {
+        let (mut actor, my_naddr, _snapshot_rx) = entering_actor(1, 2);
+        let arc = ArcId::from(1u32);
+        actor.state.add_arc(arc, Cost::Finite(10));
+        actor.state.add_arc(ArcId::from(2u32), Cost::Finite(10));
+
+        // Diverges from `my_naddr` at level 1 == guest_gnode_level: outside
+        // the hooking gnode.
+        let peer_naddr = Naddr::new(my_naddr.topology().clone(), vec![0u32, 1u32]).unwrap();
+        let peer_fp = Fingerprint::new(vec![2u8], 0, vec![0u32; 2]);
+        let peer_state = QspnState::new(peer_naddr, peer_fp, QspnConfig::default());
+        let etp = prepare_full_etp(&peer_state);
+
+        let result = actor.handle_inbound_send_etp(arc, etp, true);
+
+        assert!(
+            result.is_ok(),
+            "an ignored ETP must not surface as an error"
+        );
+        assert!(
+            actor.state.destination(1, 1).is_none(),
+            "the sender's own g-node must not be admitted to the map"
+        );
+        assert!(!actor.state.is_bootstrap_complete());
+        assert!(
+            actor.timers.is_empty(),
+            "nothing must be forwarded or otherwise spawned for an ignored ETP"
+        );
+    }
+
+    /// A sender inside the hooking gnode (divergence level below
+    /// `guest_gnode_level`) whose ETP carries no path reaching
+    /// `host_gnode_level - 1` is also ignored outright (`qspn.vala:2686-2700`).
+    #[tokio::test]
+    async fn an_in_gnode_sender_with_no_qualifying_path_is_ignored_during_bootstrap() {
+        let (mut actor, my_naddr, _snapshot_rx) = entering_actor(1, 2);
+        let arc = ArcId::from(1u32);
+        actor.state.add_arc(arc, Cost::Finite(10));
+        actor.state.add_arc(ArcId::from(2u32), Cost::Finite(10));
+
+        // Diverges from `my_naddr` at level 0 < guest_gnode_level(1):
+        // inside the hooking gnode, but the ETP carries no path at all, so
+        // certainly none reaching host_gnode_level - 1 == 1.
+        let peer_naddr = Naddr::new(my_naddr.topology().clone(), vec![2u32, 0u32]).unwrap();
+        let peer_fp = Fingerprint::new(vec![2u8], 0, vec![0u32; 2]);
+        let peer_state = QspnState::new(peer_naddr, peer_fp, QspnConfig::default());
+        let etp = prepare_new_etp(&peer_state, Vec::new(), Vec::new());
+
+        let result = actor.handle_inbound_send_etp(arc, etp, true);
+
+        assert!(
+            result.is_ok(),
+            "an ignored ETP must not surface as an error"
+        );
+        assert!(
+            actor.state.destination(0, 2).is_none(),
+            "the sender's own position must not be admitted to the map"
+        );
+        assert!(!actor.state.is_bootstrap_complete());
+        assert!(
+            actor.timers.is_empty(),
+            "nothing must be forwarded or otherwise spawned for an ignored ETP"
+        );
+    }
+
+    /// A sender inside the hooking gnode whose ETP carries a path reaching
+    /// `host_gnode_level - 1` qualifies: it is ingested and this node
+    /// exits bootstrap on the spot, but the ETP itself is never forwarded
+    /// (`qspn.vala:2701-2705,2735-2740`).
+    #[tokio::test]
+    async fn a_qualifying_etp_is_ingested_and_exits_bootstrap_without_forwarding() {
+        let (mut actor, my_naddr, mut snapshot_rx) = entering_actor(1, 2);
+        let arc = ArcId::from(1u32);
+        actor.state.add_arc(arc, Cost::Finite(10));
+        actor.state.add_arc(ArcId::from(2u32), Cost::Finite(10));
+        snapshot_rx.borrow_and_update();
+
+        // Diverges from `my_naddr` at level 0 < guest_gnode_level(1):
+        // inside the hooking gnode. Carries a path reaching
+        // host_gnode_level - 1 == 1: qualifies to exit bootstrap.
+        let peer_naddr = Naddr::new(my_naddr.topology().clone(), vec![2u32, 0u32]).unwrap();
+        let peer_fp = Fingerprint::new(vec![2u8], 0, vec![0u32; 2]);
+        let peer_state = QspnState::new(peer_naddr, peer_fp, QspnConfig::default());
+        let etp = prepare_new_etp(&peer_state, vec![path_reaching(1, 3)], Vec::new());
+
+        let result = actor.handle_inbound_send_etp(arc, etp, true);
+
+        assert!(result.is_ok());
+        assert!(
+            actor.state.is_bootstrap_complete(),
+            "a qualifying ETP must exit bootstrap"
+        );
+        assert!(
+            actor.state.destination(0, 2).is_some(),
+            "the qualifying ETP's sender must be admitted to the map"
+        );
+        assert!(
+            snapshot_rx.has_changed().unwrap(),
+            "do_exit_bootstrap must publish the widened snapshot"
+        );
+        // `do_exit_bootstrap` itself unconditionally spawns exactly two
+        // tasks (the periodic full-ETP loop and the exit-bootstrap
+        // re-fetch gather, `Actor::do_exit_bootstrap`); a third spawned
+        // task would mean the gate incorrectly also forwarded the received
+        // ETP.
+        assert_eq!(
+            actor.timers.len(),
+            2,
+            "a qualifying ETP must exit bootstrap without forwarding"
         );
     }
 }

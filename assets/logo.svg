@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 288" role="img"
+     aria-labelledby="ntk-title ntk-desc">
+  <!--
+    netsukuku-rs mark. Anchors (see research/README.md, README.md):
+    - Fractal triangle = recursive g-node addressing (Naddr{pos[],sizes[]}):
+      one level of Sierpinski subdivision, three filled corner triangles
+      leaving the inner triangle hollow.
+    - No dot at the hollow centre = no root, no registry, no central node.
+    - Three accent dots at the outer apexes = peer nodes in a mesh, not a
+      hierarchy: each is a leaf of the same shape, none privileged.
+    - Wordmark + motto quote research/README.md:3 verbatim.
+  -->
+  <title id="ntk-title">netsukuku-rs</title>
+  <desc id="ntk-desc">
+    A filled Sierpinski triangle with an empty centre and three accent dots
+    at its outer points, over the wordmark "netsukuku" and the project
+    motto "Close the world, txEn eht nepO".
+  </desc>
+  <style>
+    .ink { fill: #111827; }
+    .dim { fill: #4b5563; }
+    .accent { fill: #0ea5e9; }
+    @media (prefers-color-scheme: dark) {
+      .ink { fill: #e5e7eb; }
+      .dim { fill: #9ca3af; }
+    }
+  </style>
+
+  <!-- fractal mark: three corner triangles, centre left hollow on purpose -->
+  <g>
+    <path class="ink" d="M160,30 L212.5,110 L107.5,110 Z"/>
+    <path class="ink" d="M55,190 L160,190 L107.5,110 Z"/>
+    <path class="ink" d="M265,190 L212.5,110 L160,190 Z"/>
+    <circle class="accent" cx="160" cy="30" r="8"/>
+    <circle class="accent" cx="55" cy="190" r="8"/>
+    <circle class="accent" cx="265" cy="190" r="8"/>
+  </g>
+
+  <!-- wordmark + motto, generic monospace stack: no embedded font needed,
+       renders identically enough on GitHub's default font set -->
+  <text x="160" y="232" text-anchor="middle" class="ink"
+        textLength="230" lengthAdjust="spacingAndGlyphs"
+        style="font: 700 42px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;">netsukuku</text>
+  <text x="160" y="260" text-anchor="middle" class="dim"
+        textLength="288" lengthAdjust="spacingAndGlyphs"
+        style="font: 500 16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;">- Close the world, txEn eht nepO -</text>
+</svg>

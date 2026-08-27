@@ -24,6 +24,10 @@ struct FakeState {
     addresses: Vec<AddressEntry>,
     routes: HashMap<(u32, Ipv4Net), RouteSpec>,
     rules: Vec<RuleSpec>,
+    /// One-shot route-mutation failures armed by [`FakeNetlink::arm_route_failure`], keyed by
+    /// the destination the next `add_route`/`change_route`/`remove_route` touching it should
+    /// fail with. Empty by default, so a `FakeNetlink` no test arms behaves exactly as before.
+    route_failures: HashMap<Ipv4Net, NetlinkError>,
 }
 
 /// A recording, in-memory implementation of the full [`crate::Netlink`]
@@ -54,6 +58,7 @@ impl FakeNetlink {
                 addresses: Vec::new(),
                 routes: HashMap::new(),
                 rules: Vec::new(),
+                route_failures: HashMap::new(),
             }),
         }
     }
@@ -83,6 +88,18 @@ impl FakeNetlink {
     /// multi-phase test.
     pub fn clear_operations(&self) {
         self.lock().operations.clear();
+    }
+
+    /// Arms a one-shot failure for the next `add_route`, `change_route`, or `remove_route`
+    /// call whose [`RouteSpec::destination`]/[`RouteKey::destination`] equals `destination`.
+    /// The armed failure fires exactly once — consumed on the matching call, which returns
+    /// `error` instead of touching the route model or operation log — then clears itself, so a
+    /// later retry of the same destination succeeds normally. This is the only way to make one
+    /// specific call inside an otherwise-succeeding batch fail, letting tests reproduce a
+    /// mid-batch netlink failure without perturbing every other destination in the same
+    /// [`crate::RouteTable`] batch.
+    pub fn arm_route_failure(&self, destination: Ipv4Net, error: NetlinkError) {
+        self.lock().route_failures.insert(destination, error);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, FakeState> {
@@ -168,6 +185,9 @@ impl RouteTable for FakeNetlink {
     async fn add_route(&self, route: &RouteSpec) -> Result<(), NetlinkError> {
         guard_table(route.table)?;
         let mut state = self.lock();
+        if let Some(error) = state.route_failures.remove(&route.destination) {
+            return Err(error);
+        }
         let key = (route.table, route.destination);
         if state.routes.contains_key(&key) {
             return Err(NetlinkError::AlreadyExists(format!(
@@ -183,6 +203,9 @@ impl RouteTable for FakeNetlink {
     async fn change_route(&self, route: &RouteSpec) -> Result<(), NetlinkError> {
         guard_table(route.table)?;
         let mut state = self.lock();
+        if let Some(error) = state.route_failures.remove(&route.destination) {
+            return Err(error);
+        }
         state
             .routes
             .insert((route.table, route.destination), route.clone());
@@ -193,6 +216,9 @@ impl RouteTable for FakeNetlink {
     async fn remove_route(&self, route: RouteKey) -> Result<(), NetlinkError> {
         guard_table(route.table)?;
         let mut state = self.lock();
+        if let Some(error) = state.route_failures.remove(&route.destination) {
+            return Err(error);
+        }
         state
             .routes
             .remove(&(route.table, route.destination))

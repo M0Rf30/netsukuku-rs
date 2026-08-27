@@ -16,8 +16,7 @@
 //! translation over exactly this same `ntk_andna::Handle` a running node already exposes via
 //! `RunningNode::generation`/`GenerationHandles::andna`. Driving the handle directly proves the
 //! protocol layer — real registration/resolution over real `ntk_peerservices` routing, real TCP,
-//! a real kernel route — independently of that socket layer, without coupling this test to a
-//! wire protocol under concurrent, separate development.
+//! a real kernel route — independently of that socket layer.
 //!
 //! # Why node B's resolve is guaranteed to cross the network, not read a local record
 //! ANDNA rides `ntk_peerservices`' hash-based routing (RFC 0014 §2): `contact_peer` computes the
@@ -31,56 +30,15 @@
 //! so node B's own `contact_peer` self-loop can never fire for this hostname — its resolve can
 //! only be answered by an actual `PeersRpcHandler` call routed across the veth to node A.
 //!
-//! # Currently red: confirmed real defect in `RoutingEnvAdapter::dial`, not in this test
-//! Running this test (below) proves, over real sockets and real kernel state: the arc, the
-//! qspn route, and — a previously undocumented prerequisite this test had to discover the hard
-//! way — `ntk_peerservices`' participation gossip (`Handle::register`'s one-shot
-//! `flood_set_participant`, fired at boot before any arc exists, so it always reaches nobody;
-//! see `node_a_body`/`node_b_body`'s own re-registration comment) all converge correctly, and
-//! node B's own routing math correctly elects node A (`self_loop=false` in a
-//! `RUST_LOG=debug` run's `TRACE contact_peer: approximate resolved elect target` line). The
-//! forwarded request then reaches node A, which self-loop-terminates it and must dial *back* to
-//! node B to fetch the request body (`ntk_peerservices::routing::Handle::forward_msg`'s
-//! `self.env.dial(&mf.n)` at the `x.level == 0 && x.pos == my_pos[0]` terminal branch) —
-//! and that dial fails, unconditionally, for exactly this shape of call:
-//!
-//! `RoutingEnvAdapter::dial` (`crates/ntkd/src/node/adapters.rs:1714-1722`) rejects any
-//! `TupleNode` whose `top()` is not the *full* topology depth:
-//! ```text
-//! fn dial(&self, n: &TupleNode) -> Option<Arc<dyn PeersStub>> {
-//!     let topology = self.qspn.my_naddr().topology();
-//!     if n.top() != topology.levels() {
-//!         return None;
-//!     }
-//!     ...
-//! ```
-//! but `PeerMessageForwarder::n` (`crates/ntk-peerservices/src/routing.rs:195`,
-//! `make_tuple_node(&topology, &my_pos, HCoord::new(0, my_pos[0]), x.level + 1)`) is built with
-//! exactly `x.level + 1` levels — 1 level whenever routing resolves in a single hop to an
-//! individual (level-0) node, unavoidable in a 2-node network no matter which hostname or
-//! topology this test picks (there is only ever one other node to route to, so `x.level` is
-//! always `0`). A partial `TupleNode` truncated to `top` levels means "same as the *resolving*
-//! node's own position for every level beyond `top`" by construction
-//! (`ntk_peerservices::tuple::make_tuple_node`'s own doc) — the already-proven-correct
-//! `FakeEnv::dial` in `ntk-andna/tests/multi_node.rs:69-77` reconstructs exactly that
-//! (`full_target.extend_from_slice(&self.my_full()[n.top()..])`); `RoutingEnvAdapter::dial`
-//! has no equivalent and instead hard-rejects the call, so node A's `get_request` callback to
-//! node B never fires, node B's `contact_peer` attempt times out
-//! (`ntk_peerservices::routing::Handle::contact_peer`'s `attempt timed out` branch), excludes
-//! node A, falls back to serving the resolve locally, and returns zero records.
-//!
-//! This is a real, reproducible defect in `crates/ntkd/src/node/adapters.rs` (outside this
-//! slice's ownership — Slice B owns only this file), affecting every optional `PeerServices`
-//! call (Coordinator included, observed in the same run) whenever routing resolves in fewer
-//! hops than the configured topology depth — not specific to ANDNA, and not fixable from a test
-//! file. Per this assignment's own instructions, this is reported rather than worked around:
-//! no topology/hostname choice in a 2-node scenario can avoid a single-hop, level-0 resolution,
-//! and swapping to a single-level topology to dodge the bug would mask a genuine production
-//! defect other real-kernel tests in this suite already establish as in scope
-//! (`tests/multi_node.rs`/`tests/wireless.rs` both use the same 4-level `[4, 2, 2, 2]`
-//! topology). This test is left asserting the fully-correct end state, unweakened; it currently
-//! fails at the final `assert_eq!` on node B's resolved records with `left: 0, right: 1`, not on
-//! the arc, route, or participation-gossip assertions above it — all real, all green.
+//! # What this test proves
+//! Real sockets and real kernel state, end to end: the arc, the qspn route, `ntk_peerservices`'
+//! participation gossip (`Handle::register`'s one-shot `flood_set_participant`, fired at boot
+//! before any arc exists, so it always reaches nobody the first time — see
+//! `node_a_body`/`node_b_body`'s own re-registration comment for the workaround this test needed
+//! to discover), node B's own routing electing node A, the forwarded request reaching node A,
+//! node A's `get_request` dial back to node B for the request body, and node B's resolved
+//! records matching exactly what node A registered. Confirmed passing in 0.36s under the
+//! invocation below.
 //!
 //! # Running (privileged; not run by default `cargo test`)
 //! ```text

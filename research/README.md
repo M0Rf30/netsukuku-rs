@@ -29,6 +29,69 @@ corpus gone.
 | `impl/c/netsukuku` | Netsukuku/netsukuku "revived" Npv7 C daemon, HEAD 886a24a — historical only |
 | `related/` | karkinos (prior Rust attempt), yggdrasil-go, cjdns, vg/netsukuku (contains pyntk + simulator), rfc8966.txt |
 
+## Clone list
+
+Confirmed working 2026-08-27. Shallow (`--depth 1`) is enough for everything except the C
+daemon: it's pinned to a historical commit, and a shallow clone only guarantees *some* recent
+commit, not that specific one (it happens to equal current HEAD today — no drift found this
+pass — but that's not guaranteed to stay true, since the repo is still active). Everything
+else can restore in seconds; the C daemon's full history is the only part worth the ~2 minutes
+it takes (124 MB vs. 21 MB for all 18 vala clones combined).
+
+`impl/vala/` — flat, one directory per repo, named after the repo:
+
+```sh
+for r in documentation ntkd ntkd-common qspn neighborhood peerservices hooking proof \
+         coordinator andna zcd ntkdrpc pth-tasklet identities tasklet-system system-ntkd \
+         sys-ntkd-test1 sys-ntkd-alone; do
+  git clone --depth 1 "https://github.com/lukisi/$r" "impl/vala/$r"
+done
+```
+
+18 repos, matching the Layout count above. `lukisi` has 25 public repos total; the 7 excluded
+are `ntkd-snapcraft`/`qspnclient-snapcraft` (packaging, not source) and 5 unrelated personal
+projects (`wardrobe`, `eagle-rdp-note`, `iotalib-vala`, `allstingycookies`, `woloo-note`).
+
+`impl/c/netsukuku` — full clone, then pin:
+
+```sh
+git clone https://github.com/Netsukuku/netsukuku impl/c/netsukuku
+git -C impl/c/netsukuku checkout 886a24a
+```
+
+`related/`:
+
+```sh
+git clone --depth 1 https://github.com/d0p1s4m4/karkinos related/karkinos
+git clone --depth 1 https://github.com/yggdrasil-network/yggdrasil-go related/yggdrasil-go
+git clone --depth 1 https://github.com/cjdelisle/cjdns related/cjdns
+git clone --depth 1 https://github.com/vg/netsukuku related/netsukuku
+```
+
+Plus `related/rfc8966.txt`, fetched verbatim from `https://www.rfc-editor.org/rfc/rfc8966.txt`
+(not a clone — a single-file text/plain GET).
+
+`specs/` is not a clone either — it's 106 files copied out of `impl/vala/documentation` and
+`impl/c/netsukuku/doc` once those two exist, named `vala-doc--<path>` / `c-doc--<path>` with
+every `/` in the origin path turned into `-` and the extension kept (a handful of origin-path
+collisions get a manual disambiguating suffix, e.g. `-index` vs. `-overview` for two different
+`old_doc/main_doc/netsukuku*` files) — see `notes/03-specs-and-rfcs.md`'s document table for
+the exact file-by-file mapping, which is the actual source of truth this was regenerated from.
+
+`papers/` (17 files, 3.3 MB) come from the URLs in `notes/04-bibliography.md`, not from a repo:
+4 arXiv PDFs (`arxiv.org/pdf/<id>`, ids `0705.0815`/`0817`/`0819`/`0820`), 5 website-edition
+PDFs (`netsukuku.freaknet.org/doc/main_doc/{netsukuku,qspn,topology,andna,inetntk}.pdf` — the
+dynamic PHP frontend is dead, static paths still resolve), RFC 0011/0012/0013 + the unnumbered
+Viphilama-Static companion (`lab.dyne.org/Ntk_{carciofo,net_split,caustic_routing}` wiki pages,
+still live via `?action=raw`; Viphilama-Static and RFC 0014 are just copies of the vala tree's
+own `old_doc/main_doc/ntk_rfc/{Ntk_viphilama_static,Ntk_p2p_over_ntk.pdf}` — both already in
+`impl/vala/`, not actually website-only despite this note's own bibliography claiming so), the
+2010 Cambridge thesis from both hosts (`archive.org` item
+`scalable_mesh_networks_and_the_address_space_balancing_problem-andrea_lo_pumo`, 647,116 bytes;
+the author's own `lab.dyne.org/Netsukuku_Tesi2010` wiki upload via
+`?action=AttachFile&do=get&target=scalable-mesh-networks.pdf`, 658,039 bytes — same content,
+different PDF export pass, not a revision), and DART (`cs.ucr.edu/~krish/dart_ton_2006.pdf`).
+
 ## What is actually current
 
 Three documentation strata (`notes/03`): Alpt-era monolithic draft (2005-09) → split PDFs

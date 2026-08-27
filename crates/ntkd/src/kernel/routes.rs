@@ -146,7 +146,6 @@ impl<K: Netlink> RouteInstaller<K> {
     /// A no-op, deliberately, while [`Naddr::is_virtual`] — see [`Self::install_identity`]'s
     /// doc for why: [`addressing::gnode_destination`] reads every level above a destination's
     /// own from this identity's `my_naddr`, so a virtual position anywhere in it can corrupt an
-    /// otherwise-real destination's computed CIDR, not merely the identity's own address. Never
     /// silently drops a *previously* applied real route, either — with nothing new to diff
     /// against, the last-known-good `self.applied` set is left exactly as it was rather than
     /// torn down, so a caller must still call [`Self::teardown`] explicitly to remove it.
@@ -162,6 +161,20 @@ impl<K: Netlink> RouteInstaller<K> {
     /// snapshot" path below that already handles a destination going unreachable — a stale route
     /// this update can no longer vouch for (the destination may have moved) is left installed
     /// nowhere rather than left pointing at a CIDR nothing currently corroborates.
+    ///
+    /// `self.applied` is updated one mutation at a time, immediately after the kernel call that
+    /// mutation corresponds to succeeds — never wholesale after the whole batch. This makes the
+    /// invariant "`self.applied` always describes what is actually in the kernel" hold even
+    /// across a mid-batch failure: if a netlink call fails partway through, every earlier
+    /// success in *this* call is already recorded, this call returns `Err` with `self.applied`
+    /// accurately reflecting the ops that did land, and the next call re-diffs from that
+    /// ground truth — retrying only the remainder instead of replaying already-applied
+    /// mutations into `AlreadyExists` forever. It also closes a second-order leak this
+    /// per-batch update previously had: because a *successful* add/change now lands in
+    /// `self.applied` the instant its kernel call returns, a destination can no longer succeed
+    /// in the kernel while staying unrecorded here — so a destination that later vanishes from
+    /// a snapshot is always visible to the `self.applied`-vs-`next` diff and gets its
+    /// `remove_route` issued, instead of being invisible to both sides and orphaned forever.
     ///
     /// # Errors
     /// [`RouteError::Netlink`] if a kernel mutation fails.
@@ -198,31 +211,45 @@ impl<K: Netlink> RouteInstaller<K> {
 
         let mut delta = AppliedDelta::default();
         for (destination, spec) in &next {
-            match self.applied.get(destination) {
-                None => {
-                    self.kernel.add_route(spec).await?;
-                    delta.added += 1;
-                }
-                Some(previous) if previous != spec => {
-                    self.kernel.change_route(spec).await?;
-                    delta.changed += 1;
-                }
-                Some(_) => {}
+            let is_new = self
+                .applied
+                .get(destination)
+                .is_none_or(|previous| previous != spec);
+            if !is_new {
+                continue;
             }
-        }
-        for (destination, previous) in &self.applied {
-            if !next.contains_key(destination) {
-                self.kernel
-                    .remove_route(RouteKey {
-                        destination: previous.destination,
-                        table: previous.table,
-                    })
-                    .await?;
-                delta.removed += 1;
+            if self.applied.contains_key(destination) {
+                self.kernel.change_route(spec).await?;
+                delta.changed += 1;
+            } else {
+                self.kernel.add_route(spec).await?;
+                delta.added += 1;
             }
+            self.applied.insert(*destination, spec.clone());
         }
 
-        self.applied = next;
+        let stale: Vec<HCoord> = self
+            .applied
+            .keys()
+            .filter(|destination| !next.contains_key(destination))
+            .copied()
+            .collect();
+        for destination in stale {
+            let previous = self
+                .applied
+                .get(&destination)
+                .expect("destination came from self.applied's own keys")
+                .clone();
+            self.kernel
+                .remove_route(RouteKey {
+                    destination: previous.destination,
+                    table: previous.table,
+                })
+                .await?;
+            self.applied.remove(&destination);
+            delta.removed += 1;
+        }
+
         Ok(delta)
     }
 
