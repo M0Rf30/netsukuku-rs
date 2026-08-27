@@ -1,0 +1,11 @@
+# Keep the container build context to source + manifests only. Without this, the build context
+# includes `target/` (tens of GB of host build artifacts across every crate/profile ever built
+# here) and the gitignored `research/` corpus (vendored upstream Vala/C sources, papers, specs --
+# real and useful for development, irrelevant to compiling `ntkd`), which is slow at best and can
+# exhaust build-storage disk space at worst.
+target/
+research/
+.git/
+.github/
+contrib/
+*.md

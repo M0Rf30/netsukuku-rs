@@ -1,0 +1,122 @@
+#!/bin/sh /etc/rc.common
+# ntkd has no UCI awareness of its own — it only ever reads `--config <path>` TOML (see
+# crates/ntkd/src/kernel/config.rs's `NtkdConfig`). This script's job is exactly the same one
+# /etc/init.d/nbd-server does for nbd-server.conf: read /etc/config/netsukuku-rs and render it
+# into that TOML file before starting the daemon.
+#
+# Netsukuku is an L3 mesh routing protocol: ntkd programs real kernel routes over netlink
+# (rtnetlink route/address/rule tables) itself. This script MUST NEVER shell out to
+# `ip`/`iptables`/`sysctl` to do that job for it — that would defeat the whole point of a daemon
+# that already speaks netlink directly.
+
+START=90
+STOP=10
+USE_PROCD=1
+
+PROG=/usr/sbin/ntkd
+CONFIGFILE=/var/etc/ntkd.conf
+STATUS_SOCKET=/var/run/ntkd.sock
+
+append_plain() {
+	echo "$1" >>"$CONFIGFILE"
+}
+
+# Renders a UCI list as a quoted TOML string array: append_toml_str_array nics eth0 eth1
+append_toml_str_array() {
+	local name="$1"
+	shift
+	local out="$name = [" first=1
+	for v in "$@"; do
+		[ "$first" = 1 ] || out="$out, "
+		out="$out\"$v\""
+		first=0
+	done
+	append_plain "$out]"
+}
+
+# Renders a UCI list as a bare-integer TOML array: append_toml_int_array gsizes 2 1 1 1
+append_toml_int_array() {
+	local name="$1"
+	shift
+	local out="$name = [" first=1
+	for v in "$@"; do
+		[ "$first" = 1 ] || out="$out, "
+		out="$out$v"
+		first=0
+	done
+	append_plain "$out]"
+}
+
+start_service() {
+	local enabled nics gsizes port andna_key_path node_key_path require_auth log_level
+
+	config_load netsukuku-rs
+	config_get_bool enabled main enabled 0
+	[ "$enabled" = 1 ] || return 0
+
+	config_get nics main nics
+	config_get gsizes main gsizes
+	config_get port main port 269
+	config_get andna_key_path main andna_key_path
+	config_get node_key_path main node_key_path
+	config_get_bool require_auth main require_auth 0
+	config_get log_level main log_level info
+
+	if [ -z "$nics" ]; then
+		echo "netsukuku-rs: at least one 'list nics' entry is required" >&2
+		return 1
+	fi
+	if [ -z "$gsizes" ]; then
+		echo "netsukuku-rs: at least one 'list gsizes' entry is required" >&2
+		return 1
+	fi
+	if [ "$require_auth" = 1 ] && [ -z "$node_key_path" ]; then
+		# Matches NtkdConfig::from_str's own validation (ConfigError::AuthWithoutKey) — a
+		# node that demands authentication must be able to authenticate itself.
+		echo "netsukuku-rs: require_auth needs node_key_path to be set" >&2
+		return 1
+	fi
+
+	mkdir -p "$(dirname "$CONFIGFILE")" "$(dirname "$STATUS_SOCKET")"
+	: >"$CONFIGFILE"
+	append_toml_int_array gsizes $gsizes
+	append_toml_str_array nics $nics
+	append_plain "port = $port"
+	[ -n "$andna_key_path" ] && append_plain "andna_key_path = \"$andna_key_path\""
+	[ -n "$node_key_path" ] && append_plain "node_key_path = \"$node_key_path\""
+	[ "$require_auth" = 1 ] && append_plain "require_auth = true"
+
+	procd_open_instance
+	procd_set_param command "$PROG" run \
+		--config "$CONFIGFILE" \
+		--log-level "$log_level" \
+		--status-socket "$STATUS_SOCKET"
+	procd_set_param file "$CONFIGFILE"
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	# The `dist` build profile ships with panic="abort" (root Cargo.toml) to keep the binary
+	# small; an abort is a crash, not a controlled exit, so procd must bring the mesh node
+	# back rather than leave it dark. 0 max_fail = respawn indefinitely.
+	procd_set_param respawn 3600 5 0
+
+	# ntkd needs CAP_NET_ADMIN (netlink route/address/rule programming) and benefits from
+	# CAP_NET_RAW (its ICMP RTT probe falls back to a raw socket when unprivileged ICMP
+	# datagram sockets are unavailable). Confining it with `procd_add_jail` also puts it in a
+	# new mount namespace, which would need an explicit `procd_add_jail_mount` for every path
+	# this config can name — andna_key_path, node_key_path, and $CONFIGFILE/$STATUS_SOCKET —
+	# and those are arbitrary, admin-chosen paths this package cannot enumerate ahead of time.
+	# A jail that silently breaks the moment someone points a key path outside it is worse
+	# than no jail, so this runs unconfined as root. A downstream integrator with fixed,
+	# known paths for their deployment can add `procd_add_jail`/`procd_set_param capabilities`
+	# plus matching `procd_add_jail_mount` entries on top of this.
+
+	procd_close_instance
+}
+
+stop_service() {
+	rm -f "$STATUS_SOCKET"
+}
+
+service_triggers() {
+	procd_add_reload_trigger "netsukuku-rs"
+}

@@ -1,0 +1,16 @@
+menu "Configuration"
+	depends on PACKAGE_netsukuku-rs
+
+config NETSUKUKU_RS_UPX
+	bool "Compress the ntkd binary with UPX (--best --lzma)"
+	default y
+	help
+	  Shrinks the installed ntkd binary from ~3.90 MiB to ~1.21 MiB at the cost of a one-time
+	  ~69ms self-decompression on every start. Worthwhile here because flash is the scarce
+	  resource on most OpenWrt targets and ntkd is a long-running daemon that pays that cost
+	  once, not per-request. Disable this only if `upx` is unavailable for your target
+	  architecture on the build host, or if you specifically need the binary's pages to be
+	  demand-paged (a UPX image cannot be, so the full decompressed binary stays resident
+	  instead of only the pages actually touched) rather than flash-optimal.
+
+endmenu

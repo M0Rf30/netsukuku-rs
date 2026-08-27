@@ -71,3 +71,22 @@ dbg_macro = "deny"
 
 [profile.release]
 lto = "thin"
+
+# Profile for binaries we ship (packages, OpenWrt, container images). `release` is deliberately
+# left alone so `cargo install` and Arch's own `options=(!lto)` build behave conventionally.
+#
+# Measured on x86_64, `ntkd`, stripped: release baseline 10.44 MiB -> 3.90 MiB here, a 63% cut.
+# Each knob earned its place; `opt-level = "s"` was tried and is *worse* than `"z"` (4.29 MiB).
+#
+# `panic = "abort"` is the one behavioural change: a panic kills the daemon instead of silently
+# killing one tokio task. That is the better failure mode here — this codebase treats a panic as
+# a bug (peer input yields `Err`, never a panic), and an unjoined task's panic being swallowed
+# already hid a real shutdown defect once. It also rules out `cargo test --profile dist`, which
+# needs unwinding; tests run under `dev`/`release` as usual.
+[profile.dist]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

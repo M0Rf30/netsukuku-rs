@@ -1,14 +1,19 @@
 name: Release
 
-# Publishes all twelve crates to crates.io.
+# Publishes all twelve crates to crates.io and attaches static `ntkd` binaries to the GitHub
+# Release.
 #
 # Trigger is a `v*` tag (e.g. `v0.1.0`), or a manual run. A manual run defaults to a dry run,
 # so the safe action is also the default one: `workflow_dispatch` with nothing changed uploads
-# nothing. Only a tag push, or a manual run with `dry_run: false`, actually publishes.
+# nothing to crates.io. Only a tag push, or a manual run with `dry_run: false`, actually
+# publishes. The binaries job builds and verifies on every trigger (harmless: it's local
+# compilation, not a registry write) but only attaches to a GitHub Release on a tag push, since
+# `workflow_dispatch` has no release to attach to.
 #
 # Publishing is irreversible: a version can be yanked but never deleted or reused. The full
-# CI gate therefore runs *in this workflow* before the upload step, rather than trusting that
-# the tagged commit happened to be green on `main`.
+# CI gate therefore runs *in this workflow*, in its own `test` job, before either the publish
+# or the binaries job, rather than trusting that the tagged commit happened to be green on
+# `main`.
 on:
   push:
     tags: ["v*"]
@@ -25,15 +30,23 @@ env:
   # so no `protobuf-compiler` package is installed anywhere in this workflow.
   RUST_TOOLCHAIN: "1.98.0"
 
-# Two concurrent releases would race each other onto the registry index.
+# Two concurrent releases would race each other onto the registry index (and onto the same
+# GitHub Release's asset list).
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: verify and publish to crates.io
+  # The same gate `ci.yml` enforces. Duplicated deliberately: a tag can point at any commit,
+  # including one that never passed CI, and an unpublish is not available as a remedy. Both
+  # `publish` and `binaries` depend on this job and not on each other, so a crates.io rate
+  # limit in `publish` can never block a user from getting a binary, and a slow binary build
+  # can never delay publishing.
+  test:
+    name: build, test, lint
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v5
 
@@ -44,8 +57,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The same gate `ci.yml` enforces. Duplicated deliberately: a tag can point at any commit,
-      # including one that never passed CI, and an unpublish is not available as a remedy.
       - name: cargo build --workspace --all-targets
         run: cargo build --workspace --all-targets
 
@@ -58,6 +69,15 @@ jobs:
       - name: cargo fmt --all --check
         run: cargo fmt --all --check
 
+      # Resolved once here and shared via job output, so neither `publish`'s dry-run nor
+      # `binaries`' tarball naming has to re-derive it from `cargo metadata`.
+      - name: resolve ntkd version
+        id: version
+        run: |
+          ver=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "ntkd") | .version')
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
       # On a tag build, refuse to publish a version the tag does not name. Catches the common
       # mistake of tagging `v0.2.0` while the manifests still say `0.1.0`, which would otherwise
       # silently re-publish (and fail on) the old version.
@@ -65,13 +85,25 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          manifest=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "ntkd") | .version')
+          manifest="${{ steps.version.outputs.version }}"
           if [ "$tag" != "$manifest" ]; then
             echo "::error::tag ${GITHUB_REF_NAME} does not match ntkd version ${manifest}"
             exit 1
           fi
           echo "tag ${GITHUB_REF_NAME} matches version ${manifest}"
+
+  publish:
+    name: publish to crates.io
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
 
       # `cargo publish --workspace` (stable since 1.90) resolves the twelve crates' dependency
       # order itself and waits for each to appear in the registry index before publishing the
@@ -152,3 +184,97 @@ jobs:
           done
 
           echo "== all workspace crates are on crates.io"
+
+  binaries:
+    name: static binary (${{ matrix.target }})
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    # Only this job writes anything (release assets); every other job keeps the default
+    # (read-only) GITHUB_TOKEN.
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # Native runners instead of cross-compilation: ubuntu-24.04-arm is a GitHub-hosted
+        # aarch64 runner (available to public repos), so the aarch64 leg is a same-arch build
+        # exactly like the x86_64 leg — no cross linker, no cross C toolchain for build-script
+        # C/asm dependencies, nothing to get subtly wrong.
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    env:
+      VERSION: ${{ needs.test.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # `musl-tools` provides `musl-gcc`, the linker driver cargo needs to produce a musl
+      # binary. Since the runner's own arch always matches the target here (see the matrix
+      # comment above), the native `musl-tools` package is enough — no per-target linker
+      # override in `.cargo/config.toml` is required.
+      - name: install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: cargo build --profile dist --target ${{ matrix.target }}
+        run: cargo build --profile dist --locked --target ${{ matrix.target }} -p ntkd
+
+      # A "static" musl binary that turns out to be dynamically linked (e.g. because linking
+      # silently fell through to the host's glibc `cc`) breaks `FROM scratch` containers and
+      # the OpenWrt/Arch `-bin` payloads, both of which assume no runtime linker is present.
+      # Caught here, at build time, instead of downstream in a container that just won't start.
+      - name: verify static linking
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/dist/ntkd"
+          info=$(file "$bin")
+          echo "$info"
+          case "$info" in
+            *"statically linked"*) ;;
+            *)
+              echo "::error::${bin} is not statically linked: ${info}"
+              exit 1
+              ;;
+          esac
+
+      - name: package tarball
+        run: |
+          set -euo pipefail
+          stage=$(mktemp -d)
+          cp "target/${{ matrix.target }}/dist/ntkd" "$stage/ntkd"
+          cp LICENSE "$stage/LICENSE"
+          cp README.md "$stage/README.md"
+          tarball="ntkd-${VERSION}-${{ matrix.target }}.tar.gz"
+          tar -C "$stage" -czf "$tarball" ntkd LICENSE README.md
+          sha256sum "$tarball" > "$tarball.sha256"
+          echo "TARBALL=$tarball" >> "$GITHUB_ENV"
+
+      # Tag pushes attach to the GitHub Release for that tag (auto-created by this action if it
+      # doesn't exist yet). `workflow_dispatch` runs, dry-run or not, have no release to attach
+      # to, so they fall back to a plain workflow artifact instead of failing the job.
+      - name: attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.TARBALL }}
+            ${{ env.TARBALL }}.sha256
+
+      - name: upload workflow artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntkd-${{ matrix.target }}
+          path: |
+            ${{ env.TARBALL }}
+            ${{ env.TARBALL }}.sha256
