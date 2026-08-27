@@ -29,7 +29,7 @@
 //! that must strictly increase per signer (`record.rs:16-20`), and a
 //! length-prefixed canonical signing encoding distinct from the protobuf
 //! wire format (`record.rs:124-128`). One thing this module does that
-//! precedent does not: [`DOMAIN_TAG`] domain-separates the signature so it
+//! precedent does not: `DOMAIN_TAG` domain-separates the signature so it
 //! can never be replayed into a different protocol context. ANDNA's own
 //! `signing_bytes` has no such separator — an oversight this module does
 //! not repeat.
@@ -59,11 +59,11 @@ const SIGNATURE_LEN: usize = 64;
 /// never an `unwrap`.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AuthError {
-    /// `Auth::signer_key` was not exactly [`VERIFYING_KEY_LEN`] bytes.
+    /// `Auth::signer_key` was not exactly `VERIFYING_KEY_LEN` bytes.
     #[error("signer_key must be {VERIFYING_KEY_LEN} bytes, got {0}")]
     BadKeyLength(usize),
 
-    /// `Auth::signature` was not exactly [`SIGNATURE_LEN`] bytes.
+    /// `Auth::signature` was not exactly `SIGNATURE_LEN` bytes.
     #[error("signature must be {SIGNATURE_LEN} bytes, got {0}")]
     BadSignatureLength(usize),
 

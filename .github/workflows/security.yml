@@ -1,0 +1,64 @@
+name: Security
+
+# Two things are checked here that the normal CI gate cannot catch:
+#
+#  1. `cargo deny` — RustSec advisories, GPL-3 license compatibility, banned/wildcard
+#     dependencies, and source provenance. Config and the reasoning behind each rule: deny.toml.
+#  2. Dependency review on pull requests — flags a newly introduced vulnerable or
+#     license-incompatible dependency at review time, before it is merged.
+#
+# The weekly schedule is the important part and is not redundant with the push trigger: a new
+# advisory can be published against a dependency this repository has not touched in months. Only
+# a time-based run finds that. A routing daemon that manages kernel state is not somewhere to
+# learn about a vulnerability late.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Mondays 07:00 UTC, an hour after Dependabot opens its PRs, so an advisory that Dependabot
+    # already has a fix for shows up alongside that fix rather than as an orphan failure.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-deny:
+    name: advisories, licenses, bans, sources
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # `all` runs advisories + bans + licenses + sources. Verified locally against the real
+          # dependency tree (222 crates): all four pass.
+          command: check all
+
+  dependency-review:
+    name: dependency review
+    # Only meaningful on a PR — it diffs the dependency manifest against the base branch.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: low
+          comment-summary-in-pr: on-failure
+          # Mirrors deny.toml's allow list. Kept in sync by hand because the two tools take
+          # different formats; deny.toml is the authoritative one and runs on every push.
+          allow-licenses: >-
+            Apache-2.0, BSD-1-Clause, BSD-2-Clause, BSD-3-Clause, CC0-1.0,
+            GPL-3.0-or-later, MIT, MIT-0, Unicode-3.0, Unlicense, Zlib

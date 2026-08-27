@@ -14,26 +14,26 @@
 //! them by delegating to those real crates.
 //!
 //! # Layout
-//! - [`domain`] — `TupleGNode` and every other hooking payload type
+//! - `domain` — `TupleGNode` and every other hooking payload type
 //!   (`serializables.vala`), plus the tuple helper functions
 //!   (`structs.vala:76-165`).
-//! - [`merge`] — the pure size-based merge-direction heuristic
+//! - `merge` — the pure size-based merge-direction heuristic
 //!   (`arc_handler.vala:150-214`).
-//! - [`search`] — `execute_search`/`execute_explore`/`execute_delete_reserve`/
+//! - `search` — `execute_search`/`execute_explore`/`execute_delete_reserve`/
 //!   `execute_mig` and the `find_shortest_mig` BFS (`hooking.vala:156-490`),
 //!   decoupled from the wire via [`search::SearchRouter`].
-//! - [`routing`] — [`routing::MessageRouting`], the real `SearchRouter` plus
+//! - `routing` — [`routing::MessageRouting`], the real `SearchRouter` plus
 //!   the inbound `route_*` handlers (`message_routing.vala`).
-//! - [`arc`] — `ArcId` and the per-arc handler task
+//! - `arc` — `ArcId` and the per-arc handler task
 //!   (`arc_handler.vala:62-359`).
-//! - [`manager`] — the actor ([`manager::spawn`], [`manager::HookingHandle`]).
-//! - [`view`]/[`coordinator`]/[`stub`] — the three dependency-inverted
-//!   traits this crate declares, plus [`fake`]'s in-memory implementations.
-//! - [`rpc`] — inbound [`ntk_rpc::RpcHandler`] for the 10 `hooking_*`
+//! - `manager` — the actor ([`manager::spawn`], [`manager::HookingHandle`]).
+//! - `view`/`coordinator`/`stub` — the three dependency-inverted
+//!   traits this crate declares, plus `fake`'s in-memory implementations.
+//! - `rpc` — inbound [`ntk_rpc::RpcHandler`] for the 10 `hooking_*`
 //!   methods.
-//! - [`wire`] — `proto/hooking.proto` <-> domain type conversions.
-//! - [`config`] — every injectable timer/backoff.
-//! - [`events`]/[`snapshot`] — the `broadcast` event stream and `watch`
+//! - `wire` — `proto/hooking.proto` <-> domain type conversions.
+//! - `config` — every injectable timer/backoff.
+//! - `events`/`snapshot` — the `broadcast` event stream and `watch`
 //!   snapshot.
 
 mod arc;

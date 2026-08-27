@@ -15,14 +15,14 @@
 //! Every identity bootstraps [`ntk_hooking::HookingOrigin::CreateNet`] — its own trivial
 //! network-of-one, at its own random `network_id`, at its own position: an explicit
 //! [`NodeInputs::initial_position`] (multi-node test harnesses only) is authoritative and never
-//! renegotiated; production (`initial_position` `None`, [`SteadyStateCtx::negotiated`]) instead
-//! derives one via [`derive_initial_position`], salted with this identity's own stable
+//! renegotiated; production (`initial_position` `None`, `SteadyStateCtx::negotiated`) instead
+//! derives one via `derive_initial_position`, salted with this identity's own stable
 //! [`ntk_neighborhood::NodeId`] — the same reasoning as every other cross-node-unique value in
 //! this daemon (`linklocal_allocator`/`synthetic_mac`'s docs): two independently started
 //! daemons get different `my_id`s and so, overwhelmingly likely, distinct starting positions.
 //! Two nodes nonetheless colliding (or simply meeting, at any distinct positions) is exactly
 //! what `ntk-hooking`'s own per-arc merge protocol (wired below, `on_neighborhood_event`'s
-//! `ArcAdded` arm calling [`HookingHandle::add_arc`]) exists to resolve.
+//! `ArcAdded` arm calling [`ntk_hooking::HookingHandle::add_arc`]) exists to resolve.
 //!
 //! **Why not `HookingOrigin::Joining`.** An earlier version of this bootstrap started production
 //! identities `Joining` (unhooked) at the all-zero address, on the theory that `mark_entered`'s
@@ -37,22 +37,22 @@
 //! anyway. (2) Two `Joining` identities both starting at the *same* all-zero address broke
 //! `ntk-qspn`'s own ETP exchange outright (`"ETP claims to originate from my own address"`) the
 //! moment they discovered each other — a self-inflicted address collision, not a library defect
-//! (confirmed once every identity instead gets its own [`derive_initial_position`]-derived,
+//! (confirmed once every identity instead gets its own `derive_initial_position`-derived,
 //! near-certainly-distinct address: real per-arc merge negotiation completes end to end).
 //!
-//! **The real trigger: `HookingEvent::DoFinishEnter`.** [`ntk_hooking::arc::run_arc_handler`]'s
+//! **The real trigger: `HookingEvent::DoFinishEnter`.** `ntk_hooking::arc::run_arc_handler`'s
 //! own arc-handler task calls `ctx.coord.finish_enter(...)` immediately before `mark_entered`
 //! when *this* identity's own merge negotiation resolves it as the guest that must enter a
 //! bigger network (`arc_handler.vala:336-357`, "propagate prepare_enter/finish_enter to my own
 //! current g-node") — Coordinator propagates that back to this same process
 //! (`crate::node::adapters::PropagationHandlerAdapter`), surfacing as
 //! [`HookingEvent::DoFinishEnter`] on hooking's *event* stream (unconditional — unlike
-//! `mark_entered`'s snapshot update, nothing gates this on `hooked`). [`rehook`] reacts to it:
+//! `mark_entered`'s snapshot update, nothing gates this on `hooked`). `rehook` reacts to it:
 //! `entry_data.pos` covers levels `[guest_gnode_level, topology.levels())` only — the levels
 //! the negotiation actually resolved (`ntk_hooking::ChosenAddress`'s own doc). At
 //! `guest_gnode_level == 0` (the single-previously-unhooked-node case this daemon's own
 //! bootstrap always produces) that happens to be the whole address, since a level-0 g-node has
-//! exactly one member and nothing below it to retain. [`rehook`] combines it with this
+//! exactly one member and nothing below it to retain. `rehook` combines it with this
 //! identity's own currently-held positions at levels below `guest_gnode_level` (see "Coordinated
 //! multi-member migration" below) before discarding the old position and rebuilding every OTHER
 //! generation-scoped actor (qspn, peerservices/coordinator/andna, the installed kernel routes)
@@ -66,14 +66,14 @@
 //! `rehook` runs any number of times over the process's life — a member's own g-node forms
 //! once, then may merge into successively bigger networks, each merge driving another
 //! `DoFinishEnter`/`rehook` cycle for every member ("Coordinated multi-member migration" below).
-//! There is accordingly no one-shot latch: [`SteadyStateCtx::migration_in_progress`] only ever
+//! There is accordingly no one-shot latch: `SteadyStateCtx::migration_in_progress` only ever
 //! blocks a second `DoFinishEnter` from starting while an earlier one's synchronous
 //! teardown/rebuild is still in flight — never a legitimate repeat migration once that work has
-//! completed — and [`rehook`] separately drops a `DoFinishEnter` naming the position this
+//! completed — and `rehook` separately drops a `DoFinishEnter` naming the position this
 //! identity already holds (a stale re-delivery of an already-applied propagation), so the
 //! invariant is: **at most one migration in flight per identity, serialized; a completed
 //! migration is idempotent against its own stale replay.** This still applies only to a
-//! negotiated identity ([`SteadyStateCtx::negotiated`]) — an explicit test position
+//! negotiated identity (`SteadyStateCtx::negotiated`) — an explicit test position
 //! (`tests/multi_node.rs`'s `spawn_real_node`/`spawn_node`) is authoritative and therefore never
 //! a candidate, exactly as already documented on [`NodeInputs::initial_position`].
 //!
@@ -82,11 +82,11 @@
 //! already share, standing in for several nodes whose g-node a real Coordinator already formed
 //! before this process existed. Unlike `initial_position`, `preformed` leaves `negotiated`
 //! `true`: `negotiated` is computed from `initial_position.is_none()` alone, so a `preformed`
-//! identity — like the production default — can still [`migrate`] into a bigger network later.
+//! identity — like the production default — can still `migrate` into a bigger network later.
 //! The two are mutually exclusive; [`run`] rejects both being `Some`. An earlier attempt tried
 //! to isolate a multi-member merge with `initial_position` alone, at a shared level-1 coordinate
 //! across several nodes; it failed even though every node visibly shared that coordinate to
-//! `ntk-qspn`, because `network_id` was still [`random_i64`] per node (invisible to
+//! `ntk-qspn`, because `network_id` was still `random_i64` per node (invisible to
 //! `merge_direction`/`merge_tiebreak`, which read only `network_id` and `n_nodes`, never
 //! positions) *and* `initial_position: Some(_)` freezes `negotiated` regardless —
 //! `crates/ntkd/tests/mesh.rs`'s own
@@ -103,20 +103,20 @@
 //! wire shape already carries the full negotiated `EntryData` end to end
 //! (`ntk_hooking::FinishEnterData::entry_data`, `crate::node::adapters::CoordinatorClientAdapter`,
 //! `crate::node::codec::encode_finish_enter_data`) — the only piece that was missing was *using*
-//! it as such at the receiving end, which [`on_hooking_event`]'s `DoFinishEnter` arm now does:
+//! it as such at the receiving end, which `on_hooking_event`'s `DoFinishEnter` arm now does:
 //! every member, negotiator and silent sibling alike, combines the identical propagated upper
-//! levels with its own distinct, unaffected lower levels and calls [`rehook`] — so a g-node's
+//! levels with its own distinct, unaffected lower levels and calls `rehook` — so a g-node's
 //! members always end up sharing the new upper position while keeping their own separate
 //! identity below it, regardless of which one of them actually ran the negotiation.
 //!
 //! **Gated to `guest_gnode_level >= 1` implicitly, not by a level check.** A level-0 g-node has
 //! exactly one member, so `entry_data.pos` already spans the whole address there and the "combine
 //! with retained lower levels" step degenerates to concatenating an empty prefix — byte-for-byte
-//! the same address [`rehook`] would have built before this section existed. `guest_gnode_level
+//! the same address `rehook` would have built before this section existed. `guest_gnode_level
 //! == 0` behavior is therefore unchanged, not specially preserved.
 //!
 //! **A member already mid-negotiation when the propagation lands is let finish, not aborted.**
-//! [`ntk_hooking::arc::run_arc_handler`] gains one extra check, gated to `ask_lvl >= 1`
+//! `ntk_hooking::arc::run_arc_handler` gains one extra check, gated to `ask_lvl >= 1`
 //! (unreachable at `ask_lvl == 0` for the same one-member reason above): if this identity's own
 //! network id already matches the target by the time its own `search_migration_path` resolves —
 //! a sibling's propagation landed first — it aborts its own now-redundant reservation instead of
@@ -131,16 +131,16 @@
 //! like an unrelated later merge would.
 //!
 //! # Scope boundary: no true concurrent fork, no third-network re-fork
-//! [`rehook`] always does the same simple thing regardless of how many times it runs: fork the
+//! `rehook` always does the same simple thing regardless of how many times it runs: fork the
 //! identity, tear down the previous generation, rebuild at the combined position. It never
 //! models upstream's *connectivity identity* (`make_connectivity`/`check_connectivity`,
 //! `identities.vala:441-577`) — a bridge kept alive so a still-migrating g-node's external arcs
 //! stay reachable throughout, with the guest re-hooking concurrently rather than after a
-//! synchronous teardown. [`migrate`]'s own "Why not a true concurrent fork" section gives the two
+//! synchronous teardown. `migrate`'s own "Why not a true concurrent fork" section gives the two
 //! structural reasons this daemon cannot do that today regardless of `guest_gnode_level` (one
 //! live dispatcher target per process; never two identities simultaneously reachable, so
 //! either bridging call would violate its own concurrent-fork precondition before
-//! `guest_gnode_level` is even relevant — see [`migrate`]'s own doc for the detail).
+//! `guest_gnode_level` is even relevant — see `migrate`'s own doc for the detail).
 //! `ntk_hooking::HookingEvent::DoPrepareMigration`/`DoFinishMigration` are wired to
 //! [`ntk_identities::Handle::prepare_migration`]/`migrate` — real, working identity-registry
 //! bookkeeping — but this daemon does not spin up a second full protocol stack for the identity
@@ -278,7 +278,7 @@ impl Dialer for TcpDialer {
 /// available at both call sites once threaded through this function's signature instead:
 /// - two independently started daemons (the production case this bug broke) get different
 ///   `my_id`s and so, overwhelmingly likely, different addresses for their first NIC;
-/// - every NIC on the *same* node gets a provably distinct address (see [`derive_linklocal`]'s
+/// - every NIC on the *same* node gets a provably distinct address (see `derive_linklocal`'s
 ///   doc: NICs are enumerated as an exact permutation of the valid address space, not hashed
 ///   independently);
 /// - the same `(my_id, index)` pair — i.e. the same NIC, re-derived within one process's
@@ -288,7 +288,7 @@ impl Dialer for TcpDialer {
 /// # Residual collision risk
 /// This is a hash-based pseudo-random pick, not RFC 3927's own probe-and-defend (ARP) collision
 /// resolution — implementing that is out of scope here. Two daemons' *first* NIC collide only
-/// if their `my_id`s hash into the same starting slot of the [`LINKLOCAL_SPACE`]-sized valid
+/// if their `my_id`s hash into the same starting slot of the `LINKLOCAL_SPACE`-sized valid
 /// range: roughly a 1-in-65,024 chance for any specific pair, growing with the number of daemons
 /// starting simultaneously on one broadcast domain (birthday bound: ~1% at ~36 concurrent
 /// daemons). Acceptable for this daemon's actual deployment shape — small numbers of
@@ -381,7 +381,7 @@ fn virtual_placeholder(topology: &Topology) -> Naddr {
 /// [`NodeInputs::preformed`]'s doc for the full distinction from [`NodeInputs::initial_position`].
 #[derive(Clone, Debug)]
 pub struct PreformedNetwork {
-    /// Seeds [`NetworkInfo::new`] directly, instead of [`random_i64`] — shared by every other
+    /// Seeds [`NetworkInfo::new`] directly, instead of `random_i64` — shared by every other
     /// member of the same pre-formed g-node so their mutual arcs resolve
     /// [`ntk_hooking::QspnView::note_same_network`], not `note_foreign`.
     pub network_id: i64,
@@ -402,8 +402,8 @@ pub struct NodeInputs<K> {
     pub routing_kernel: Arc<K>,
     pub dialer: Arc<dyn Dialer>,
     /// This identity's position at each topology level, innermost first. `None` (production
-    /// default, see [`crate::node::transport::start`]) derives a per-[`NodeId`] position via
-    /// [`derive_initial_position`] — this identity is still its own network-of-one at that
+    /// default, see [`crate::node::transport::start`]) derives a per-[`ntk_neighborhood::NodeId`] position via
+    /// `derive_initial_position` — this identity is still its own network-of-one at that
     /// position (`ntk_hooking::HookingOrigin::CreateNet`, its own random `network_id`), exactly
     /// like upstream's `create_net`; the module doc's "Negotiated re-address" section covers
     /// what happens when it then discovers a bigger network. A multi-node test harness composing
@@ -415,9 +415,9 @@ pub struct NodeInputs<K> {
     pub initial_position: Option<Vec<u32>>,
     /// This identity starts already a member of a real, shared network rather than its own
     /// network-of-one: `preformed.position` seeds [`Naddr`] exactly like `initial_position`
-    /// does, but `preformed.network_id` seeds [`NetworkInfo`] instead of [`random_i64`], and —
+    /// does, but `preformed.network_id` seeds [`NetworkInfo`] instead of `random_i64`, and —
     /// the entire point of this field — `negotiated` stays `true` (it is computed from
-    /// `initial_position.is_none()` alone, unaffected by this field), so [`migrate`] is never
+    /// `initial_position.is_none()` alone, unaffected by this field), so `migrate` is never
     /// blocked the way it is for `initial_position`. Modeled after a real g-node that formed
     /// before this process existed: several nodes sharing this same `network_id` at a shared
     /// upper-level position, with distinct lower-level positions, is what makes them one
@@ -429,7 +429,7 @@ pub struct NodeInputs<K> {
     /// This identity's own stable Neighborhood discovery id — must be exactly the same
     /// [`ntk_neighborhood::NodeId`] the caller passed as `NeighborhoodConfig::my_id` when
     /// spawning `neighborhood`. See `crate::node::registry::encode_caller_id`'s doc for why
-    /// this (not a peer-decodable [`LinkId`]) is what outbound qspn calls embed.
+    /// this (not a peer-decodable [`crate::node::registry::LinkId`]) is what outbound qspn calls embed.
     pub my_id: ntk_neighborhood::NodeId,
 }
 
@@ -449,9 +449,9 @@ impl<K: std::fmt::Debug> std::fmt::Debug for NodeInputs<K> {
     }
 }
 
-/// The four identity-generation-scoped handles that change together on every [`rehook`]: torn
-/// down and rebuilt as a unit, exactly like [`Generation`]'s own bundle (`identities`/`hooking`
-/// are excluded for the same reason [`Generation`] excludes/carries them — see the module doc's
+/// The four identity-generation-scoped handles that change together on every `rehook`: torn
+/// down and rebuilt as a unit, exactly like `Generation`'s own bundle (`identities`/`hooking`
+/// are excluded for the same reason `Generation` excludes/carries them — see the module doc's
 /// "Negotiated re-address" section and [`crate::node::services::HookingProvenance`]'s doc).
 ///
 /// # Bug this fixes
@@ -467,18 +467,18 @@ impl<K: std::fmt::Debug> std::fmt::Debug for NodeInputs<K> {
 ///
 /// # `rehooked`: why a dedicated flag, not "did the position change"
 /// The obvious external proxy for "did this identity rehook" — comparing
-/// `qspn.my_naddr().positions()` before and after — is unsound: [`rehook`] can legitimately
+/// `qspn.my_naddr().positions()` before and after — is unsound: `rehook` can legitimately
 /// negotiate a position that numerically coincides with this identity's own pre-migration
 /// position (the Coordinator reserves whatever slot is free in the *other* network, which has
 /// no relationship to the slot this identity happened to hold before). Confirmed by a captured
 /// stress-test failure of `tests/multi_node.rs`'s
 /// `real_netns_two_daemons_negotiate_a_shared_network`: the guest's own trace log showed the
 /// full `AnotherNetwork` -> `finish_enter` -> `rehook` sequence complete successfully, yet its
-/// reserved position ([0]) happened to equal its own discarded starting position ([0],
+/// reserved position (`[0]`) happened to equal its own discarded starting position (`[0]`,
 /// deterministic from that test's hardcoded `NodeId`), so a position-comparison heuristic
 /// reported "not rehooked" for an identity that, per the daemon's own internal state,
 /// definitely had. `rehooked` instead mirrors whether [`Self::migrations`] is nonzero — the
-/// authoritative count [`rehook`] itself maintains — so external observers never have to
+/// authoritative count `rehook` itself maintains — so external observers never have to
 /// (unsoundly) reconstruct it. `rehook` is not one-shot (module doc's "Coordinated multi-member
 /// migration" section), so `rehooked` means "has migrated at least once", not "did the one
 /// allowed migration happen" — existing readers of this field (`tests/multi_node.rs`,

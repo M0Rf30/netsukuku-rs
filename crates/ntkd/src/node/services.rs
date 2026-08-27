@@ -2,7 +2,7 @@
 //! the piece that actually registers `CoordinatorService`/`AndnaService`/`CounterService` on the
 //! one `ntk_peerservices::Manager`, and resolves the Hooking<->Coordinator initialization cycle
 //! (Hooking's constructor needs a `CoordinatorClient`; Coordinator's `PropagationHandler` needs
-//! a `HookingHandle` — see [`adapters::PropagationHandlerAdapter`]'s doc comment for how).
+//! a `HookingHandle` — see [`crate::node::adapters::PropagationHandlerAdapter`]'s doc comment for how).
 
 use std::sync::Arc;
 

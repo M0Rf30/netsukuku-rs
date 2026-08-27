@@ -3,6 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.97"
 license = "GPL-3.0-or-later"
@@ -15,17 +16,17 @@ authors = ["netsukuku-rs contributors"]
 # Each sibling carries an explicit `version` alongside `path`: cargo resolves the path locally,
 # but crates.io REJECTS a published crate whose dependency has no version requirement. Keep the
 # version in lockstep with each crate's own `[package] version`.
-ntk-common = { path = "crates/ntk-common", version = "0.1.0" }
-ntk-proto = { path = "crates/ntk-proto", version = "0.1.0" }
-ntk-rpc = { path = "crates/ntk-rpc", version = "0.1.0" }
-ntk-netlink = { path = "crates/ntk-netlink", version = "0.1.0" }
-ntk-identities = { path = "crates/ntk-identities", version = "0.1.0" }
-ntk-neighborhood = { path = "crates/ntk-neighborhood", version = "0.1.0" }
-ntk-qspn = { path = "crates/ntk-qspn", version = "0.1.0" }
-ntk-peerservices = { path = "crates/ntk-peerservices", version = "0.1.0" }
-ntk-hooking = { path = "crates/ntk-hooking", version = "0.1.0" }
-ntk-coordinator = { path = "crates/ntk-coordinator", version = "0.1.0" }
-ntk-andna = { path = "crates/ntk-andna", version = "0.1.0" }
+ntk-common = { path = "crates/ntk-common", version = "0.1.1" }
+ntk-proto = { path = "crates/ntk-proto", version = "0.1.1" }
+ntk-rpc = { path = "crates/ntk-rpc", version = "0.1.1" }
+ntk-netlink = { path = "crates/ntk-netlink", version = "0.1.1" }
+ntk-identities = { path = "crates/ntk-identities", version = "0.1.1" }
+ntk-neighborhood = { path = "crates/ntk-neighborhood", version = "0.1.1" }
+ntk-qspn = { path = "crates/ntk-qspn", version = "0.1.1" }
+ntk-peerservices = { path = "crates/ntk-peerservices", version = "0.1.1" }
+ntk-hooking = { path = "crates/ntk-hooking", version = "0.1.1" }
+ntk-coordinator = { path = "crates/ntk-coordinator", version = "0.1.1" }
+ntk-andna = { path = "crates/ntk-andna", version = "0.1.1" }
 
 tokio = "1.53"
 tokio-util = "0.7"
@@ -68,6 +69,15 @@ unsafe_code = "deny"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+
+# These render as *dead links* on docs.rs: a link to a private item silently degrades to plain
+# text, and an unresolved one is simply broken. Both are invisible in a normal build, so they
+# accumulated to 181 across the workspace before anyone looked. Denied rather than warned, and
+# `cargo doc` runs in CI, so they cannot come back.
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+redundant_explicit_links = "deny"
 
 [profile.release]
 lto = "thin"

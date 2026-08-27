@@ -70,7 +70,7 @@ pub trait RouteTable {
 }
 
 /// Policy-routing rule management (`ip rule add|del|show`), requiring
-/// `CONFIG_IP_MULTIPLE_TABLES` — see [`crate::capability`].
+/// `CONFIG_IP_MULTIPLE_TABLES` — see [`crate::KernelCapabilities`].
 #[allow(async_fn_in_trait)]
 pub trait RuleTable {
     /// `ip rule add ...`. Fails if an identical rule already exists.

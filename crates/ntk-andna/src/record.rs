@@ -67,7 +67,7 @@ pub struct RegisterRequest {
     /// `owner_key` — this request's replay-protection token.
     pub sequence: u64,
     /// Informational client clock reading; never trusted for TTL/rate-limit accounting (see
-    /// [`crate::actor::unix_now`]'s doc comment).
+    /// `crate::actor::unix_now`'s doc comment).
     pub timestamp_unix: u64,
     /// Priority of the zero (service-0) record.
     pub zero_priority: u8,
@@ -76,7 +76,7 @@ pub struct RegisterRequest {
     /// Additional SNSD records (NTK_RFC 0009). MUST NOT contain a `service == 0` entry — the
     /// zero record is `owner_naddr`/`zero_priority`/`zero_weight` instead.
     pub snsd_records: Vec<SnsdRecord>,
-    /// Ed25519 signature over [`RegisterRequest::signing_bytes`].
+    /// Ed25519 signature over `RegisterRequest::signing_bytes`.
     pub signature: Signature,
 }
 

@@ -1,0 +1,58 @@
+# cargo-deny configuration. Run with `cargo deny check`.
+#
+# Covers four things `cargo audit` alone does not: license compatibility, banned/duplicate
+# crates, and source provenance, alongside the RustSec advisories.
+
+[graph]
+# This is a Linux-only project (AGENTS.md); checking Windows/macOS-only dependency branches
+# would flag crates that are never actually built here.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-unknown-linux-musl" },
+    { triple = "aarch64-unknown-linux-musl" },
+]
+
+[advisories]
+# Fail on any RustSec advisory. `yanked = "deny"` is deliberate and has already earned its place:
+# it caught `chacha20 0.10.1` (pulled in via rand) sitting yanked in the lockfile.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# The workspace is GPL-3.0-or-later, so every dependency must be GPL-3-compatible. This list is
+# not aspirational -- it is exactly the set present in the tree, enumerated from `cargo metadata`.
+# Anything new shows up as a build failure, which is the point.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "GPL-3.0-or-later",   # this workspace's own twelve crates
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+# Note on copyleft: `r-efi` offers "MIT OR Apache-2.0 OR LGPL-2.1-or-later". The OR means the
+# permissive arms are available, so LGPL is deliberately NOT in the allow list above -- if a
+# future dependency offers LGPL as its *only* option, that should fail and be looked at, not pass
+# silently on the strength of this one crate's alternatives.
+
+[bans]
+multiple-versions = "warn"   # warn, not deny: transitive duplicates are common and not our bug
+wildcards = "deny"           # a `*` version requirement is unreviewable
+allow = []
+deny = []
+
+[sources]
+# Everything must come from crates.io. A git or unknown-registry dependency slipping into a
+# routing daemon is a supply-chain question, not a convenience.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

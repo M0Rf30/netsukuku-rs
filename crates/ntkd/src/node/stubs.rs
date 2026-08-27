@@ -55,7 +55,7 @@ fn malformed(msg: impl Into<String>) -> RpcError {
 
 /// Implements [`ntk_neighborhood::NeighborhoodStubFactory`]: `broadcast(dev)` wraps this NIC's
 /// bound [`ntk_rpc::UdpBroadcaster`] (via [`ntk_neighborhood::BroadcastRpcClient`]); `unicast(arc)`
-/// returns a [`LazyLinkClient`] over the arc's [`LinkId`] — see that type's doc comment for why
+/// returns a `LazyLinkClient` over the arc's [`LinkId`] — see that type's doc comment for why
 /// this stub factory, alone among this daemon's stub factories, must be able to *open* a
 /// connection to a brand-new neighbour rather than only ever look one up in [`PeerLinks`].
 #[derive(Debug)]

@@ -37,12 +37,12 @@
 //! So this uses [`NEIGHBOR_ROUTE_TABLE`] — a second, dedicated fixed table, outside both
 //! [`ntk_netlink::DEFAULT_MAIN_TABLE_ID`] and [`ntk_netlink::DEFAULT_PEER_TABLE_RANGE`] (so it
 //! can never collide with a future real per-peer `fwmark` table allocation from that pool) —
-//! with its own unconditional `Any` rule at [`NEIGHBOR_RULE_PRIORITY`], installed lazily and
-//! idempotently by [`ensure_neighbor_rule`] the first time [`RealIpRouteManager::add_neighbor`]
+//! with its own unconditional `Any` rule at `NEIGHBOR_RULE_PRIORITY`, installed lazily and
+//! idempotently by `ensure_neighbor_rule` the first time [`RealIpRouteManager::add_neighbor`]
 //! runs (there is no per-node startup hook this type could use instead — [`RealIpRouteManager`]
 //! is constructed as a plain struct literal by several call sites this crate does not own, so
 //! it cannot gain a new field to remember "already installed" and must re-check idempotently;
-//! see [`ensure_neighbor_rule`]'s own doc). Priority `10_001` is chosen only to sit clear of
+//! see `ensure_neighbor_rule`'s own doc). Priority `10_001` is chosen only to sit clear of
 //! [`ntk_netlink::TableAllocator`]'s peer-priority pool (`9_949..10_000` under the default
 //! range) and of `251`'s own `10_000` — evaluation order between the two `Any` rules does not
 //! matter, since each table only ever holds routes for a disjoint destination range (`10.0.0.0/8`
@@ -58,11 +58,11 @@
 //! `add_neighbor`/`remove_neighbor` only ever run from inside `ntk_neighborhood::Manager`'s
 //! command loop, reacting to a `here_i_am`/`request_arc`/arc-removal *message*, and that loop
 //! processes commands strictly one at a time — so two concurrent `add_neighbor` calls racing
-//! [`ensure_neighbor_rule`]'s own check-then-add against each other cannot happen for a single
+//! `ensure_neighbor_rule`'s own check-then-add against each other cannot happen for a single
 //! node's one `RealIpRouteManager`.
 //!
 //! `add_address`'s widened-to-`/16` rationale is unaffected by any of the above — see
-//! [`linklocal_net`]'s own doc.
+//! `linklocal_net`'s own doc.
 
 use futures::future::BoxFuture;
 use ntk_neighborhood::{IpRouteManager, NeighborhoodError};

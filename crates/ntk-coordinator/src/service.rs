@@ -114,7 +114,7 @@ impl CoordinatorService {
     /// callers of this method are, by construction, already running as this key's elected
     /// servant (either because `exec` below is answering the DHT request that resolved *to*
     /// this node, or because a caller reached this same node's own [`Handle`] directly, e.g.
-    /// [`ntkd`]'s `EnterArbiter`, which only ever runs inside the `EvaluateEnterRequest`
+    /// `ntkd`'s `EnterArbiter`, which only ever runs inside the `EvaluateEnterRequest`
     /// handler for this exact `CoordinatorKey`).
     pub async fn hooking_memory_locally(&self, top: usize) -> Option<TypedValue> {
         self.handle.hooking_memory(top).await

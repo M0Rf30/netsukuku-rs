@@ -160,7 +160,7 @@ impl CoordinatorClient {
     }
 
     /// `get_n_nodes` (`peer_service.vala:173-207`): always targets the whole network
-    /// (`CoordinatorKey(levels)`), i.e. *this node's own* network — see [`Self::call`]'s own doc
+    /// (`CoordinatorKey(levels)`), i.e. *this node's own* network — see `call`'s own doc
     /// for `exclude`.
     ///
     /// # Errors
@@ -182,7 +182,7 @@ impl CoordinatorClient {
     }
 
     /// `evaluate_enter` (`peer_service.vala:216-239`) — always targets a candidate host network;
-    /// see [`Self::call_entering`]'s own doc.
+    /// see `call_entering`'s own doc.
     ///
     /// # Errors
     /// See [`ProxyError`].
@@ -204,7 +204,7 @@ impl CoordinatorClient {
         }
     }
 
-    /// `begin_enter` (`peer_service.vala:241-264`) — see [`Self::call_entering`]'s own doc.
+    /// `begin_enter` (`peer_service.vala:241-264`) — see `call_entering`'s own doc.
     ///
     /// # Errors
     /// See [`ProxyError`].
@@ -226,7 +226,7 @@ impl CoordinatorClient {
         }
     }
 
-    /// `completed_enter` (`peer_service.vala:266-289`) — see [`Self::call_entering`]'s own doc.
+    /// `completed_enter` (`peer_service.vala:266-289`) — see `call_entering`'s own doc.
     ///
     /// # Errors
     /// See [`ProxyError`].
@@ -248,7 +248,7 @@ impl CoordinatorClient {
         }
     }
 
-    /// `abort_enter` (`peer_service.vala:291-314`) — see [`Self::call_entering`]'s own doc.
+    /// `abort_enter` (`peer_service.vala:291-314`) — see `call_entering`'s own doc.
     ///
     /// # Errors
     /// See [`ProxyError`].
@@ -278,7 +278,7 @@ impl CoordinatorClient {
     /// (`ntk_hooking::search::execute_search`, reached only via `ntk_hooking::rpc`'s
     /// `search_migration_path` server handler and `ntk_hooking::routing`'s hop-forwarding, never
     /// directly from `ntk_hooking::arc`) runs as the *servant* granting a slot from its own
-    /// hierarchy to whichever guest asked — the guest itself never calls this. See [`Self::call`]'s
+    /// hierarchy to whichever guest asked — the guest itself never calls this. See `call`'s
     /// own doc for `exclude`.
     ///
     /// # Errors
@@ -330,7 +330,7 @@ impl CoordinatorClient {
     }
 
     /// `get_hooking_memory` (`coord.vala:181-188`) — targets *this node's own* network; see
-    /// [`Self::call`]'s own doc.
+    /// `call`'s own doc.
     ///
     /// # Errors
     /// See [`ProxyError`].

@@ -8,7 +8,7 @@
 //!   (`research/impl/vala/qspn/api.vala:114-119`); this crate only ever
 //!   carries an opaque [`ArcId`] plus a cost the caller supplies, and
 //!   delegates "which arc did this RPC call arrive on" to an injectable
-//!   [`rpc::ArcResolver`] — see [`arc`] for the full rationale.
+//!   [`rpc::ArcResolver`] — see `arc` for the full rationale.
 //!
 //! Everything else — ETP revision, path admission, disjoint-path selection,
 //! fingerprint/split handling, flooding, the `enter_net` migration/
@@ -29,13 +29,13 @@
 //!   `qspn.vala:2226-2448`).
 //! - [`revise_etp`] — ETP grouping/acyclic-check/implicit-withdrawal
 //!   (`qspn.vala:1074-1232`).
-//! - [`flood`] — outgoing ETP construction and the `ignore_outside` pruning
+//! - `flood` — outgoing ETP construction and the `ignore_outside` pruning
 //!   pass (`etp_message.vala`).
-//! - [`manager`] — the actor ([`manager::spawn`]/[`manager::spawn_entering`],
+//! - `manager` — the actor ([`manager::spawn`]/[`manager::spawn_entering`],
 //!   [`manager::QspnHandle`]).
-//! - [`stub`]/[`fake`] — the outbound RPC seam and its in-memory fake.
-//! - [`rpc`] — inbound [`ntk_rpc::RpcHandler`] for the 4 `qspn_*` methods.
-//! - [`wire`] — `proto/qspn.proto` <-> domain type conversions.
+//! - `stub`/`fake` — the outbound RPC seam and its in-memory fake.
+//! - `rpc` — inbound [`ntk_rpc::RpcHandler`] for the 4 `qspn_*` methods.
+//! - `wire` — `proto/qspn.proto` <-> domain type conversions.
 
 mod arc;
 mod config;

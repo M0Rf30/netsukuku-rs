@@ -36,8 +36,8 @@ get a process that appears to work and does nothing.
 ## Build
 
 ```sh
-podman build -t ntkd:0.1.0 \
-  --build-arg NTKD_VERSION=0.1.0 \
+podman build -t ntkd:0.1.1 \
+  --build-arg NTKD_VERSION=0.1.1 \
   --build-arg NTKD_REVISION="$(git rev-parse --short HEAD)" \
   -f Containerfile .
 # or: docker build ...
@@ -56,7 +56,7 @@ podman run -d --name ntkd \
   --cap-add=NET_ADMIN --cap-add=NET_RAW \
   --network host \
   -v /path/to/ntkd.toml:/etc/ntkd/config.toml:ro \
-  ghcr.io/m0rf30/netsukuku-rs:0.1.0
+  ghcr.io/m0rf30/netsukuku-rs:0.1.1
 # or: docker run ... (identical flags)
 ```
 
@@ -66,7 +66,7 @@ The image ships no config (there is no sane default topology to bake in) — mou
 ```sh
 podman run --rm --cap-add=NET_ADMIN --network host \
   -v /path/to/ntkd.toml:/etc/ntkd.toml:ro \
-  ghcr.io/m0rf30/netsukuku-rs:0.1.0 \
+  ghcr.io/m0rf30/netsukuku-rs:0.1.1 \
   run --config /etc/ntkd.toml --nic wlan0 --log-level debug
 ```
 

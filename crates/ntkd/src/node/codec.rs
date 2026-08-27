@@ -151,7 +151,7 @@ pub struct ElectionRecord {
 /// (`CoordGnodeMemory.hooking_memory: Object?`,
 /// `research/impl/vala/coordinator/serializables.vala:182-201`) — this daemon's single opaque
 /// blob for *every* piece of Hooking-owned per-network state its elected Coordinator persists,
-/// not merge decisions alone: [`crate::node::adapters::CoordinatorClientAdapter::decide_merge`]'s
+/// not merge decisions alone: [`ntk_hooking::CoordinatorClient::decide_merge`]'s
 /// verdicts and [`crate::node::adapters::EnterArbiter`]'s own enter elections, each keyed
 /// independently so one writer's read-modify-write round trip never clobbers the other's
 /// portion (both still race each other on the write itself — see `decide_merge`'s own doc on

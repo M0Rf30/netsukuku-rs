@@ -1,0 +1,63 @@
+name: Dependabot auto-merge
+
+# Auto-merges Dependabot's minor and patch updates once CI is green. Major updates are never
+# auto-merged -- they need a human to read a changelog.
+#
+# ┌─ PREREQUISITE, and the whole safety argument rests on it ────────────────────────────────┐
+# │ `gh pr merge --auto` only *queues* the merge behind required status checks. If the branch │
+# │ has no protection rule (or ruleset) marking CI as required, GitHub has nothing to wait    │
+# │ for and merges IMMEDIATELY -- turning this into "merge every dependency bump unread".     │
+# │                                                                                            │
+# │ So, on `main`, both of these must be set or this workflow is unsafe:                       │
+# │   - Settings -> General -> "Allow auto-merge" enabled                                      │
+# │   - A branch protection rule / ruleset requiring the CI checks                             │
+# │     ("build, test, lint, fmt" and "privileged tests") to pass                              │
+# └────────────────────────────────────────────────────────────────────────────────────────────┘
+#
+# Second hazard, specific to Rust: for a `0.x` crate, cargo treats `0.7 -> 0.8` as BREAKING, but
+# Dependabot still labels it `version-update:semver-minor`. Several dependencies here are 0.x
+# (rtnetlink, socket2, netlink-packet-route, wl-nl80211, genetlink...). Such a bump is auto-merged
+# only because a breaking change fails to compile and CI blocks the merge -- which is precisely
+# why the required-checks prerequisite above is load-bearing rather than a nicety.
+#
+# `pull_request_target` is used so the token can approve and merge (a `pull_request` run from
+# Dependabot gets a read-only token). This is safe here ONLY because the job never checks out or
+# executes the PR's code -- it reads metadata and calls the API. Do not add a checkout step.
+
+on: pull_request_target
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    name: approve and queue minor/patch updates
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      - name: fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: approve and enable auto-merge
+        if: |
+          steps.meta.outputs.update-type == 'version-update:semver-minor' ||
+          steps.meta.outputs.update-type == 'version-update:semver-patch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr review --approve "$PR_URL"
+          gh pr merge --auto --squash "$PR_URL"
+
+      - name: leave major updates for a human
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr comment "$PR_URL" --body \
+            "Major version bump — not auto-merged. Read the upstream changelog before merging."

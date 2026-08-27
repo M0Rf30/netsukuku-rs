@@ -18,11 +18,11 @@
 //! [`ntk_hooking::QspnView::my_eldership`]/`eldership` are synchronous ("every method here must
 //! be answerable from already-known local state", per that trait's own doc), but the real
 //! source of truth (`QspnHandle::my_eldership`/`eldership`, both `async fn(..) -> Result<Option<Option<u32>>,
-//! QspnError>`) is not. [`EldershipCache`] bridges the two: a background task refreshes it on
+//! QspnError>`) is not. `EldershipCache` bridges the two: a background task refreshes it on
 //! every [`ntk_qspn::QspnEvent`], and [`QspnViewAdapter`]'s sync methods only ever read the
 //! cache. Mapping `Result<Option<Option<u32>>, _>` to the plain `i32` `QspnView` demands, without
 //! collapsing "virtual/null claim" and "unknown" into the same value: a real claim `n` maps to
-//! `n` itself, [`FingerprintParts`]'s virtual/null case (`Ok(Some(None))`) maps to `-1`
+//! `n` itself, `FingerprintParts`'s virtual/null case (`Ok(Some(None))`) maps to `-1`
 //! (matching this codebase's own established `-1` "not yet known" sentinel convention, e.g.
 //! `ntk_hooking::TupleGNode::eldership`), and "unknown" (`Ok(None)`, an actor error, or simply
 //! not cached yet) maps to `i32::MAX` — deliberately distinct from `-1` and chosen so an unknown
@@ -38,7 +38,7 @@
 //! positioned *unrelated* networks pass the guard by accident — confirmed by direct
 //! reproduction of `crates/ntkd/tests/mesh.rs`'s `two_star_groups_merge_into_one_network` at
 //! `816d52c`: node `a0` (`NodeId(601)`) and node `a2` (`NodeId(603)`) both hash to level-0
-//! position `3` under [`crate::node::lifecycle::derive_initial_position`]'s own algorithm
+//! position `3` under `crate::node::lifecycle::derive_initial_position`'s own algorithm
 //! (topology `gsizes=[8]`), so `a2`'s own `check_propagation` matched `a0`'s propagated
 //! `positions=[3]`/`fp_id=0` against its *own* `my_pos(0)==3`/`fp_id(0)==0` and wrongly accepted
 //! `a0`'s resolved position as its own.
@@ -60,7 +60,7 @@
 //! it eventually agrees for two real siblings
 //! (`ntk_qspn::manager`'s own `fingerprint_id_agrees_across_members_of_the_same_gnode` pins
 //! this). But "eventually" is the residual gap: a real-kernel run of the same scenario still
-//! stranded a sibling (`a1`) because [`check_propagation`] never retries a rejection —
+//! stranded a sibling (`a1`) because `check_propagation` never retries a rejection —
 //! `handle_execute_finish_enter` fans a `propagation_id` out exactly once, and a sibling whose
 //! own qspn view has not yet finished re-converging its *local* champion computation at the
 //! instant the fan-out arrives rejects it for good, with no second delivery to catch up on.
@@ -73,7 +73,7 @@
 //! **The fix**: `fp_id` now returns [`NetworkInfo::network_id`] directly — the plain identity of
 //! the network this identity currently belongs to, which every real sibling shares
 //! *unconditionally* and *immediately* (no qspn convergence involved at all) for exactly as long
-//! as [`check_propagation`]'s guard ever needs it: every one of the five propagation kinds this
+//! as `check_propagation`'s guard ever needs it: every one of the five propagation kinds this
 //! guard covers only ever fans out within the sender's *own current* g-node/network, so sender
 //! and receiver share `network_id` by construction at propagation time, migrated or not. Combined
 //! with the existing `positions` check (which still disambiguates *which* g-node within a shared
@@ -115,7 +115,7 @@ use crate::node::registry::{LinkId, LinkRegistry};
 
 /// This identity's own network-scoped facts `ntk-qspn` does not track on the daemon's behalf:
 /// just the network id it joined/founded. See the module doc's "Fixed: `fp_id`" section for
-/// where the per-g-node fingerprint identity lives now ([`FingerprintCache`], not here).
+/// where the per-g-node fingerprint identity lives now (`FingerprintCache`, not here).
 #[derive(Debug)]
 pub struct NetworkInfo {
     network_id: AtomicI64,
@@ -175,7 +175,7 @@ impl NetworkInfo {
     }
 
     /// See [`ntk_hooking::QspnView::note_same_network`]'s doc. Sticky: recorded in
-    /// [`Self::same_network`], never merely subtracted from [`Self::foreign`] — a later
+    /// `Self::same_network`, never merely subtracted from `Self::foreign` — a later
     /// (arc-handler ordering is not guaranteed) [`Self::note_foreign`] call naming the same
     /// `(level, pos)` from an unrelated foreign peer must not re-poison a position this
     /// identity's own negotiation already confirmed.
@@ -187,9 +187,9 @@ impl NetworkInfo {
     }
 
     /// `pos` at `level` is foreign iff *some* arc reported it foreign and *no* arc has ever
-    /// confirmed it as my own network — [`Self::same_network`] always wins, regardless of call
+    /// confirmed it as my own network — `Self::same_network` always wins, regardless of call
     /// order, over a merely coincidental numeric collision with an unrelated foreign peer (see
-    /// [`Self::foreign`]'s own doc for the real-kernel run that found this). A position this
+    /// `Self::foreign`'s own doc for the real-kernel run that found this). A position this
     /// identity's own arc negotiation confirmed is a *fact* about my own network's structure;
     /// nothing an unrelated foreign peer reports can outweigh it.
     #[must_use]
@@ -210,7 +210,7 @@ impl NetworkInfo {
 
     /// Every `(level, pos)` this identity currently believes is foreign — [`Self::is_foreign`]'s
     /// own set logic, enumerated rather than asked about one position at a time. Feeds
-    /// [`foreign_exclusions`], which turns these into the
+    /// `foreign_exclusions`, which turns these into the
     /// [`ntk_peerservices::TupleGNode`] exclusion list every `ntk_coordinator::CoordinatorClient`
     /// DHT round trip now seeds — see [`ntk_coordinator::CoordinatorClient::reserve`]'s own doc
     /// for the misroute this closes: without it, `target_for`'s elect-key (matched by raw
@@ -228,7 +228,7 @@ impl NetworkInfo {
             .collect()
     }
 
-    /// Latches [`ntk_qspn::QspnEvent::BootstrapComplete`] — see [`QspnViewAdapter::is_bootstrapped`].
+    /// Latches [`ntk_qspn::QspnEvent::BootstrapComplete`] — see [`Self::is_bootstrapped`].
     pub fn set_bootstrapped(&self) {
         self.bootstrapped.store(true, Ordering::Relaxed);
     }
@@ -565,9 +565,9 @@ impl ntk_hooking::QspnView for QspnViewAdapter {
 // ---------------------------------------------------------------------------
 
 /// Implements [`ntk_hooking::CoordinatorClient`]: DHT round trips
-/// ([`ntk_coordinator::client::CoordinatorClient`]) for `evaluate_enter`/`begin_enter`/
+/// ([`ntk_coordinator::CoordinatorClient`]) for `evaluate_enter`/`begin_enter`/
 /// `completed_enter`/`abort_enter`/`reserve`/`delete_reserve`/`n_nodes`, and local-instance
-/// propagation fanout ([`ntk_coordinator::actor::Handle`]) for `prepare_migration`/
+/// propagation fanout ([`ntk_coordinator::Handle`]) for `prepare_migration`/
 /// `finish_migration`/`prepare_enter`/`finish_enter` — see `ntk_hooking::coordinator`'s own
 /// module doc for why these are two different transports, not one.
 #[derive(Debug)]
@@ -575,7 +575,7 @@ pub struct CoordinatorClientAdapter {
     pub dht: ntk_coordinator::CoordinatorClient,
     pub local: ntk_coordinator::Handle,
     /// This identity's own qspn handle and network-scoped facts — used only to compute
-    /// [`Self::foreign_exclusions`] before every `self.dht` DHT round trip. See
+    /// `Self::foreign_exclusions` before every `self.dht` DHT round trip. See
     /// [`ntk_coordinator::CoordinatorClient::reserve`]'s own doc for why this is required, not
     /// an optional hardening: without it, `target_for`'s elect-key can resolve to a physically
     /// reachable but logically foreign node.
@@ -657,9 +657,9 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
     /// `hooking_helpers.vala:245` (`identity_data.coord_mgr.evaluate_enter(levels, ...)`) always
     /// targets `CoordinatorKey(levels)`, never a level derived from the request payload itself
     /// (`req.min_lvl` only ever travels *inside* `data`, consulted by the election algorithm on
-    /// the servant side — [`EnterHandlersAdapter::evaluate_enter`] — not by DHT routing here).
+    /// the servant side — [`ntk_coordinator::EvaluateEnterHandler::evaluate_enter`] — not by DHT routing here).
     /// A prior version of this method mistakenly used `req.min_lvl + 1` as the DHT target: for
-    /// this daemon's own [`crate::node::adapters::QspnViewAdapter::subnetlevel`] (always `0`,
+    /// this daemon's own `crate::node::adapters::QspnViewAdapter::subnetlevel` (always `0`,
     /// "no subnetting") that coincidentally equalled `levels` only for a single-level topology,
     /// masking the bug until a `gsizes = [8]` two-node merge test exposed it.
     fn evaluate_enter(
@@ -703,7 +703,7 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
     /// degenerate target (`top` must be `1..=levels`), so this keeps `lvl + 1` here — routing to
     /// `CoordinatorKey(1)` ("coordinator of my own level-0 g-node") instead of literally myself.
     /// This is not merely a tolerated approximation: `lvl == 0` is reachable exactly when
-    /// [`EnterHandlersAdapter::evaluate_enter`] echoed back a `req.min_lvl` of `0`, and
+    /// [`ntk_coordinator::EvaluateEnterHandler::evaluate_enter`] echoed back a `req.min_lvl` of `0`, and
     /// `QspnViewAdapter::subnetlevel` is unconditionally `0` in this daemon (see its own doc), so
     /// every reachable `lvl == 0` call already means "no other member exists anywhere in my own
     /// hierarchy" — `CoordinatorKey(1)`'s DHT lookup falls back to exactly the same node (myself,
@@ -833,7 +833,7 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
     /// conclusions.
     ///
     /// Reuses per [`MergeArbitrationRequest::neighbor_network_id`] for at most
-    /// [`Self::merge_decision_ttl`], first checking this process's own cache, then the
+    /// `Self::merge_decision_ttl`, first checking this process's own cache, then the
     /// g-node's elected Coordinator's shared
     /// [`ntk_coordinator::CoordinatorClient::hooking_memory`] at `top = levels()` — the same
     /// DHT target [`Self::n_nodes`] already uses for "the whole network" — so every member,
@@ -962,7 +962,7 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
 // ---------------------------------------------------------------------------
 
 /// Implements [`ntk_coordinator::CoordinatorMap`] over the real [`QspnHandle`] plus
-/// [`NetworkInfo`] — see the module doc's "Fixed: `fp_id`" section for why [`Self::fp_id`]
+/// [`NetworkInfo`] — see the module doc's "Fixed: `fp_id`" section for why [`ntk_coordinator::CoordinatorMap::fp_id`]
 /// returns [`NetworkInfo::network_id`] rather than a per-g-node fingerprint.
 #[derive(Debug)]
 pub struct CoordinatorMapAdapter {
@@ -1121,7 +1121,7 @@ const ELECTED_TTL: Duration = Duration::from_millis(60_000);
 /// `evaluate_enter -> Accepted -> reserve -> finish_enter` episode for the *same* merge,
 /// splitting the entering group between them (confirmed live: two members `t=51.163s` and
 /// `t=56.251s` apart, ~5 seconds, each fanning `finish_enter` out to a different subset of the
-/// same entering trio). [`Self::decide`] now consults and persists into the Coordinator's own
+/// same entering trio). `Self::decide` now consults and persists into the Coordinator's own
 /// replicated `hooking_memory` record (`CoordGnodeMemory.hooking_memory`,
 /// `research/impl/vala/coordinator/serializables.vala:182-201`) — the same replicated store
 /// `reserve_list` already lives in, reached through the exact same `hooking_memory`/
@@ -1144,7 +1144,7 @@ const ELECTED_TTL: Duration = Duration::from_millis(60_000);
 /// on a local miss, against the Coordinator's replicated record before granting anything new.
 /// Kept alive across `completed_enter` (which no longer touches it at all, matching upstream)
 /// and released — both locally and in the replicated record — only by `abort_enter` (the
-/// elected candidate itself giving up) or after [`ELECTED_TTL`] with no `abort_enter`. A
+/// elected candidate itself giving up) or after `ELECTED_TTL` with no `abort_enter`. A
 /// different id asking about the *same* `network_id` while `elected` is live is refused with
 /// `IgnoreNetwork`; a different `network_id` is told to ask again later rather than starting a
 /// second, concurrent election at the same level.
@@ -1291,19 +1291,17 @@ impl EnterArbiter {
 #[derive(Debug)]
 pub struct EnterHandlersAdapter {
     pub arbiter: Arc<EnterArbiter>,
-    /// This g-node's own live topology/positions — needed to compute [`Self::chosen_lvl`]
+    /// This g-node's own live topology/positions — needed to compute `Self::chosen_lvl`
     /// rather than always echoing back the caller's own `min_lvl` (always `0` in this daemon,
     /// `QspnViewAdapter::subnetlevel`'s own doc). A fresh instance is built for every identity
-    /// generation (`crate::node::services::spawn`, never carried across a [`rehook`]), so this
+    /// generation (`crate::node::services::spawn`, never carried across a `rehook`), so this
     /// is always the *current* generation's own qspn — never the staleness
     /// [`ntk_hooking::HookingHandle`]'s own carried-across-generations view has.
-    ///
-    /// [`rehook`]: crate::node::lifecycle::rehook
     pub qspn: ntk_qspn::QspnHandle,
     pub net: Arc<NetworkInfo>,
     /// This identity's own [`ntk_coordinator::CoordinatorService`] — reached directly (never
     /// through `contact_peer`) for [`EnterArbiter`]'s replicated election record; see
-    /// [`EnterArbiter::decide`]'s own doc for why. A `watch` channel because
+    /// `EnterArbiter::decide`'s own doc for why. A `watch` channel because
     /// `CoordinatorService` is constructed *after* [`ntk_coordinator::Manager::new`], which
     /// this adapter is itself a constructor argument of (same cycle
     /// [`PropagationHandlerAdapter::hooking`]'s own doc explains for Hooking/Coordinator).
@@ -1371,7 +1369,7 @@ fn chosen_lvl_from_snapshot(snapshot: &RouteSnapshot, net: &NetworkInfo, levels:
 }
 
 impl ntk_coordinator::EvaluateEnterHandler for EnterHandlersAdapter {
-    /// Keys [`EnterArbiter`] by [`Self::chosen_lvl`] — the same logical entry level echoed back
+    /// Keys [`EnterArbiter`] by `Self::chosen_lvl` — the same logical entry level echoed back
     /// as `chosen_lvl` and later passed to `completed_enter`/`abort_enter` as `lvl` (their own
     /// handlers below key by `top.saturating_sub(1)`, and their `top` is always `lvl + 1`, so
     /// their effective key is that same `lvl`) — not the caller's own `req.min_lvl` (always `0`
@@ -1381,14 +1379,14 @@ impl ntk_coordinator::EvaluateEnterHandler for EnterHandlersAdapter {
     /// # Bug this fixes: every entry was evaluated as if solitary
     /// Used to echo `req.min_lvl` straight back as `chosen_lvl`, always `0` — so every merge
     /// negotiation, regardless of how many real members its own g-node had, was told to enter
-    /// individually rather than as a unit: [`Self::chosen_lvl`]'s doc names this the actual
+    /// individually rather than as a unit: `Self::chosen_lvl`'s doc names this the actual
     /// mechanism this daemon needed to make a coordinated g-node migration's destination
     /// collective (this crate's module doc, "Coordinated multi-member migration"). Also
     /// resolves a related, previously separate key-mismatch bug: keying by the DHT *routing*
     /// level (always `topology().levels()`, `api.vala:63`'s "proxied to the coordinator of the
     /// whole network") let `evaluate_enter` accept an id under a level that
     /// `completed_enter`/`abort_enter` (keyed by the *negotiated* level) never released for any
-    /// topology deeper than one level — [`Self::chosen_lvl`] and this method now agree on
+    /// topology deeper than one level — `Self::chosen_lvl` and this method now agree on
     /// exactly the same value.
     fn evaluate_enter(
         &self,
@@ -1712,13 +1710,13 @@ impl RoutingEnv for RoutingEnvAdapter {
     }
 
     /// `n` is often a *partial* tuple — `top()` less than this topology's full depth — built by
-    /// [`ntk_peerservices::tuple::make_tuple_node`] inside a shared-ancestor g-node scope: every
+    /// `ntk_peerservices::tuple::make_tuple_node` inside a shared-ancestor g-node scope: every
     /// node inside that scope, this receiver included, shares the identical position at every
     /// level `>= n.top()` (`make_tuple_node`'s own doc: levels above the overridden one "keep my
     /// own position" — the *constructing* node's, which by the scope invariant is also this
-    /// node's). [`dial_target`] does that widening and is the exact production analogue of
-    /// upstream's own partial-tuple contract: `i_peers_get_tcp_inside`'s doc records "positions[0]
-    /// is pos[0] ... of level positions.size" (`research/impl/vala/peerservices/peers.vala:90-93`),
+    /// node's). `dial_target` does that widening and is the exact production analogue of
+    /// upstream's own partial-tuple contract: `i_peers_get_tcp_inside`'s doc records "`positions[0]`
+    /// is `pos[0]` ... of level positions.size" (`research/impl/vala/peerservices/peers.vala:90-93`),
     /// and `get_stub_main_identity_unicast_inside_gnode`'s real implementation
     /// (`research/impl/vala/ntkd/rpc/stub_factory.vala:69-85`) receives exactly such a prefix —
     /// "levels from 0 to the level just below the common g-node's level"

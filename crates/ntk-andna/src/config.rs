@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 /// Tuning knobs every domain function ([`crate::record::Cache::register`],
-/// [`crate::counter::CounterCache::try_reserve`], ...) takes explicitly rather than reading a
+/// `crate::counter::CounterCache::try_reserve`, ...) takes explicitly rather than reading a
 /// global — construct via [`Config::default`] for this crate's own documented values, or
 /// override individual fields for tests/deployments that need different numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,7 +96,7 @@ pub struct Config {
     /// existing key is exhausted. Fully overridable per deployment.
     pub max_hosted_records: usize,
     /// Hard cap on how many distinct registrant identities a single node's `Counter` role
-    /// ([`crate::counter::CounterCache`]) will track at once.
+    /// (`crate::counter::CounterCache`) will track at once.
     ///
     /// **Why this exists**: [`Config::max_hostnames_per_registrant`] bounds how many hostnames
     /// *one* registrant may hold, but not how many *registrants* this node tracks — and the

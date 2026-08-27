@@ -60,7 +60,7 @@ impl Handle {
     /// (`participate_tasklet`, `research/impl/vala/peerservices/map_handler.vala:331-362`). This
     /// crate models that as a single fixed cadence instead of upstream's exact schedule: set
     /// [`crate::Config::participation_reannounce_interval`] and the owning
-    /// [`crate::actor::Manager`] repeats this flood (via [`reannounce_participation`]) for every
+    /// [`crate::actor::Manager`] repeats this flood (via `reannounce_participation`) for every
     /// locally-registered optional service every such interval. Left `None` (the default), no
     /// re-announce ever fires, matching this crate's original hand-off behavior.
     pub async fn register(&self, service: Arc<dyn PeerService>) {

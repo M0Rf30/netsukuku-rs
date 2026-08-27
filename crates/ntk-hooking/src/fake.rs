@@ -428,7 +428,7 @@ impl HookingStub for ScriptedHookingStub {
 
 /// In-memory [`HookingStubFactory`]: `arc_stub`/`gateway_stub` return
 /// whatever was registered, either a [`ScriptedHookingStub`] or a
-/// [`crate::rpc::LocalHookingStub`] wrapping a real peer
+/// `crate::rpc::LocalHookingStub` wrapping a real peer
 /// [`HookingRpcHandler`] (for a full in-memory multi-node simulation, the
 /// same role `ntk_qspn::FakeQspnStubFactory` plays for QSPN).
 #[derive(Default)]

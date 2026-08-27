@@ -49,7 +49,7 @@ pub enum DomainDecodeError {
     #[error("value {0} does not fit in the target integer width")]
     IntegerOutOfRange(u64),
 
-    /// [`from_typed_value`] was given a [`v1::TypedValue`]-shaped message
+    /// [`from_typed_value`] was given a [`crate::v1::TypedValue`]-shaped message
     /// (`crate::v1::TypedValue`) whose `type_tag` did not match what the
     /// caller expected.
     #[error("TypedValue type_tag mismatch: expected {expected:?}, got {actual:?}")]

@@ -17,7 +17,7 @@ const MAX_MODE: u32 = 0o600;
 /// Everything that can go wrong loading or generating the ANDNA signing key.
 #[derive(Debug, thiserror::Error)]
 pub enum KeyError {
-    /// The key file exists but its permissions are wider than [`MAX_MODE`].
+    /// The key file exists but its permissions are wider than `MAX_MODE`.
     #[error("key file {path} has permissions {mode:o}, wider than the required 0600")]
     TooPermissive { path: PathBuf, mode: u32 },
     /// The key file's contents are not exactly 32 bytes.

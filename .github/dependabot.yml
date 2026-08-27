@@ -1,0 +1,53 @@
+version: 2
+
+updates:
+  # Cargo. Grouped aggressively on purpose: this workspace has 222 transitive dependencies, and
+  # ungrouped Dependabot would open a PR per crate per week, each burning a full CI run (the
+  # privileged tier spins real network namespaces). One grouped PR per risk class keeps the
+  # signal and drops the noise.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    groups:
+      # Patch and minor together: these are what `dependabot-automerge.yml` merges unattended
+      # once CI is green. Kept in one PR so a green run vouches for the whole set.
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+      # Major stays separate and is never auto-merged -- it needs a human to read a changelog.
+      cargo-major:
+        update-types: ["major"]
+    # `rust-version = 1.97` is pinned in the manifests. Dependabot cannot see that constraint and
+    # will happily propose a dependency requiring a newer toolchain; CI catches it, but ignoring
+    # nothing here is deliberate -- we want the failing PR as the signal rather than silence.
+
+  # The workflows pin action versions, and a stale pinned action is a supply-chain liability as
+  # much as a stale crate.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]
+      actions-major:
+        update-types: ["major"]
+
+  # The Containerfile pins `rust:<version>-bookworm` for the builder stage.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    commit-message:
+      prefix: "container"

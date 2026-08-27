@@ -21,7 +21,7 @@ use std::time::Duration;
 pub type GlobalTimeoutFn = Arc<dyn Fn(u64) -> Duration + Send + Sync>;
 
 /// Upstream's own ladder (`hooking.vala:51-56`), reproduced verbatim as the
-/// default — see [`GlobalTimeoutFn`]'s docs for why this is not normative.
+/// default — see `GlobalTimeoutFn`'s docs for why this is not normative.
 #[must_use]
 pub fn default_global_timeout(size: u64) -> Duration {
     let ms = if size < 5 {
@@ -52,7 +52,7 @@ pub struct HookingConfig {
     /// or a tiebreak favored me) (`arc_handler.vala:209-214`).
     pub merge_reject_wait: Duration,
 
-    /// `get_global_timeout(n)` — see [`GlobalTimeoutFn`]'s docs. Defaults to
+    /// `get_global_timeout(n)` — see `GlobalTimeoutFn`'s docs. Defaults to
     /// [`default_global_timeout`].
     pub global_timeout: GlobalTimeoutFn,
 

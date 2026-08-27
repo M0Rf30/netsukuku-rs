@@ -55,7 +55,7 @@ pub struct Config {
     /// nodes, which have the closest IP to `m`"). Upstream's own port keeps this a per-call
     /// parameter rather than a global (`research/notes/02-vala-services-daemon.md` §3,
     /// "Replication factor `q` is a per-call param... not global") — this field is only the
-    /// *default* a caller may use; [`crate::hashnode::replicate`] still takes `q` explicitly.
+    /// *default* a caller may use; [`crate::Handle::replicate`] still takes `q` explicitly.
     pub default_replication_factor: u32,
     /// How often the owning [`crate::actor::Manager`] re-floods its own optional-service
     /// participation facts as insurance against a lost delivery — a periodic repeat of exactly

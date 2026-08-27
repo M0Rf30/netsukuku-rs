@@ -261,9 +261,9 @@ impl Destination {
     /// cheapest path carrying it (`Destination.evaluate`/`best_path`/
     /// `nodes_inside`/`fingerprint`, `destinations.vala:77-146`). At level 0
     /// "best" is simply lowest total cost; above level 0, the elder-seed
-    /// winning fingerprint is selected first ([`winning_fingerprint`]) and
+    /// winning fingerprint is selected first (`winning_fingerprint`) and
     /// its cheapest path breaks ties — equivalent to upstream's single-pass
-    /// fold (see [`winning_fingerprint`] docs for why the split is safe).
+    /// fold (see `winning_fingerprint` docs for why the split is safe).
     ///
     /// # Panics
     /// If `self.paths` is empty — a [`Destination`] is never stored that way

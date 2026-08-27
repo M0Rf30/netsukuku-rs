@@ -83,7 +83,7 @@ impl NtkdConfig {
         Ok(config)
     }
 
-    /// Validates and builds the [`Topology`] described by [`NtkdConfig::gsizes`].
+    /// Validates and builds the [`Topology`] described by `NtkdConfig::gsizes`.
     ///
     /// # Errors
     /// [`ConfigError::Topology`] — see [`Topology::new`] for the exact validation rules.

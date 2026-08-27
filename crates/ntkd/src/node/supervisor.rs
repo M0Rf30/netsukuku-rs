@@ -44,7 +44,7 @@ const ABORT_REAP_WINDOW: Duration = Duration::from_secs(2);
 ///
 /// Past `timeout` this stops waiting cooperatively, calls [`JoinSet::abort_all`] (best-effort:
 /// it only takes effect the next time an aborted task's own poll actually yields, which the
-/// pathological case above never does), then gives the `JoinSet` [`ABORT_REAP_WINDOW`] to reap
+/// pathological case above never does), then gives the `JoinSet` `ABORT_REAP_WINDOW` to reap
 /// whatever actually responds, and returns — reporting how many tasks never joined rather than
 /// hanging indefinitely. Every 5s of cooperative waiting also logs the still-outstanding count,
 /// so a merely slow (not wedged) shutdown is observable while in progress, not only diagnosed

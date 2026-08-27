@@ -6,7 +6,7 @@
 //! exists so integration tests can `use ntkd::...` directly instead of re-including source
 //! files with `#[path]` — the previous approach compiled `kernel`/`node` as an entirely separate
 //! crate per test binary, which made every test-only accessor (e.g.
-//! [`kernel::routes::RouteInstaller::kernel_ref`]) look dead to `cargo clippy`'s per-crate
+//! `kernel::routes::RouteInstaller::kernel_ref`) look dead to `cargo clippy`'s per-crate
 //! dead-code analysis when only the bin target was checked.
 
 pub mod kernel;

@@ -354,7 +354,7 @@ impl QspnHandle {
     /// claims are pairwise distinct (the ordinary case — claims are randomly
     /// assigned per node), but a coincidental tie can make this value
     /// disagree for that one aggregation, which only ever fails a
-    /// [`ntk_coordinator`] `check_propagation` guard *closed* (the
+    /// `ntk_coordinator` `check_propagation` guard *closed* (the
     /// propagation is dropped as "not my g-node", never misapplied to the
     /// wrong one) — no worse than upstream's own untied assumption
     /// (`assert_not_reached()` on a tie, `serializables.vala:260`), and

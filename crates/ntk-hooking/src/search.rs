@@ -53,7 +53,7 @@ pub struct SearchStepResult {
 /// hop to run [`execute_search`]/[`execute_explore`] locally and report
 /// back — `MessageRouting.send_search_request`/`send_explore_request`
 /// (`message_routing.vala:93-164,487-545`) collapsed to their essential
-/// request/response shape. A real implementation ([`crate::routing`]) picks
+/// request/response shape. A real implementation ([`crate::MessageRouting`]) picks
 /// "run locally" vs. "route over the wire" based on whether the caller is
 /// already inside the target g-node; a test oracle can just answer directly
 /// from a hand-built topology.

@@ -418,7 +418,7 @@ impl Handle {
     /// landing on the same node. Serial `q` attempts at up to `timeout_exec` each is still
     /// unbounded in `q` (ANDNA's own `q = 31` could serialize to ~155s for one registration —
     /// the audit finding this fixes), so the whole call is additionally capped at
-    /// `timeout_exec * `[`Config::replicate_deadline_multiplier`], independent of `q`. Once that
+    /// `timeout_exec * `[`crate::Config::replicate_deadline_multiplier`], independent of `q`. Once that
     /// deadline passes, this method returns whatever replicas it already has — the same
     /// "partial results are a valid outcome" contract `next_replica` already has, just also
     /// reachable by wall clock instead of only by routing exhaustion.

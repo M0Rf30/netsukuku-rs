@@ -46,7 +46,7 @@ pub enum Event {
 }
 
 /// Configuration to [`Manager::spawn`]. Generic over `K` so callers stay
-/// generic over [`crate::interface_state::InterfaceState`] rather than a
+/// generic over `InterfaceState` rather than a
 /// concrete implementation (`ntk-netlink`'s own convention,
 /// `research/notes/06-rust-stack.md` "Trait boundary is load-bearing for
 /// simulation coverage") — `K` is `ntk_netlink::RealNetlink` in production,
@@ -81,7 +81,7 @@ pub struct NeighborhoodConfig<K> {
     /// doc): this one proves transport identity, not hostname ownership.
     pub signing_key: Option<SigningKey>,
     /// Reject inbound neighbourhood calls that carry no valid, verified `ntk_proto::auth`
-    /// block — see [`Manager::authenticate`]'s doc for exactly what this gates. Defaults to
+    /// block — see `Manager::authenticate`'s doc for exactly what this gates. Defaults to
     /// `false` (matching [`crate::NeighborhoodConfig::signing_key`]'s own default), the only
     /// setting interoperable with an unmodified/unauthenticated peer.
     pub require_auth: bool,

@@ -1,10 +1,10 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=netsukuku-rs
-PKG_VERSION:=0.1.0
+PKG_VERSION:=0.1.1
 PKG_RELEASE:=1
 
-# All 12 workspace crates are published on crates.io at 0.1.0, but `ntkd` is a workspace member
+# All 12 workspace crates are published on crates.io at 0.1.1, but `ntkd` is a workspace member
 # with path deps on its 11 siblings plus a checked-in root Cargo.lock (`cargo install --locked`
 # needs both) — a crates.io tarball of `ntkd` alone has neither, so this builds straight from the
 # tagged git commit instead of a release tarball.

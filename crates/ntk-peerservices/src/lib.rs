@@ -2,19 +2,19 @@
 //! `ntk-andna` register on (`research/notes/02-vala-services-daemon.md` §3; RFC 0014,
 //! "P2P over Netsukuku").
 //!
-//! - [`tuple`] — [`TupleNode`]/[`TupleGNode`] position tuples and the Chord-like
+//! - `tuple` — [`TupleNode`]/[`TupleGNode`] position tuples and the Chord-like
 //!   `dist`/`approximate` geometry: the key→g-node mapping (RFC 0014 §2).
-//! - [`hashnode`] — [`hash_to_tuple`], the hashing half of that mapping.
-//! - [`routing`] — [`Handle::contact_peer`], [`Handle::replicate`] (RFC 0014 §2.2 step 5's
+//! - `hashnode` — [`hash_to_tuple`], the hashing half of that mapping.
+//! - `routing` — [`Handle::contact_peer`], [`Handle::replicate`] (RFC 0014 §2.2 step 5's
 //!   31-node redundancy rule), and the server-side `forward_msg` hop-by-hop counterpart.
-//! - [`participation`]/[`gossip`] — participation-map flood-gossip and its `retrieved_below_level`
+//! - `participation`/`gossip` — participation-map flood-gossip and its `retrieved_below_level`
 //!   freshness rule.
-//! - [`service`] — the [`PeerService`] registration trait and [`ServiceId`].
-//! - [`config`] — [`Config`], every timing/redundancy constant, injectable.
-//! - [`actor`] — the single-owner [`Manager`] actor and its [`Handle`].
-//! - [`stub`]/[`wire`] — the outbound [`PeersStub`] seam and its real ([`RpcPeersStub`]) and
+//! - `service` — the [`PeerService`] registration trait and [`ServiceId`].
+//! - `config` — [`Config`], every timing/redundancy constant, injectable.
+//! - `actor` — the single-owner [`Manager`] actor and its [`Handle`].
+//! - `stub`/`wire` — the outbound [`PeersStub`] seam and its real ([`RpcPeersStub`]) and
 //!   test (`ntk_rpc::FakeRpcClient`-backed) transports.
-//! - [`handler`] — [`PeersRpcHandler`], the inbound dispatch for the 12
+//! - `handler` — [`PeersRpcHandler`], the inbound dispatch for the 12
 //!   `MethodCall::peers_*` methods.
 //!
 //! **Scope**: models an always-fully-hooked node (no virtual/mid-migration addressing, no
@@ -37,7 +37,7 @@ mod wire;
 
 /// Generated protobuf types for this module's own payloads (`proto/peerservices.proto`, package
 /// `ntk.peerservices.v1`). These travel inside `ntk_proto::v1::TypedValue` payloads; nothing
-/// outside [`wire`](self::wire) constructs them directly.
+/// outside `wire` constructs them directly.
 #[allow(clippy::doc_markdown)]
 pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/ntk.peerservices.v1.rs"));

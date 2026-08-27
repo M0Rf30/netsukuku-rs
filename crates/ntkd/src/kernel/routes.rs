@@ -101,7 +101,7 @@ impl<K: Netlink> RouteInstaller<K> {
         self.arc_endpoints.remove(&arc);
     }
 
-    /// Installs this identity's own address (on [`IDENTITY_ADDRESS_INTERFACE`]) and its
+    /// Installs this identity's own address (on `IDENTITY_ADDRESS_INTERFACE`) and its
     /// catch-all [`RuleSelector::Any`] rule at `rule_priority`.
     ///
     /// A no-op, deliberately, while [`Naddr::is_virtual`] — a migrating identity holds a
@@ -113,7 +113,7 @@ impl<K: Netlink> RouteInstaller<K> {
     /// the packed accumulator) or a right-looking one that stops being right the moment a real
     /// position is finally assigned. Suppressing here rather than erroring keeps a caller that
     /// constructs a [`RouteInstaller`] before a position resolves working exactly as if it had
-    /// waited to construct one at all — [`Self::identity_address`] simply stays `None` until a
+    /// waited to construct one at all — `Self::identity_address` simply stays `None` until a
     /// caller re-invokes this once [`Naddr::is_virtual`] is false (a fresh, real [`Naddr`]).
     ///
     /// # Errors

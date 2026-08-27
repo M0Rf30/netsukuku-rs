@@ -4,22 +4,22 @@
 //! (upstream `coordinator/Makefile.am:39,45`, the only core module with a real library
 //! dependency).
 //!
-//! - [`domain`] — [`Booking`], [`GnodeMemory`] (the fixed-keys record itself),
+//! - `domain` — [`Booking`], [`GnodeMemory`] (the fixed-keys record itself),
 //!   [`Reservation`]/[`ReserveError`], [`Snapshot`], [`Event`], [`HandOff`] (the migration
 //!   hand-off protocol), [`PropagationArgs`].
-//! - [`traits`] — the capabilities Coordinator needs from the rest of the daemon, declared as
+//! - `traits` — the capabilities Coordinator needs from the rest of the daemon, declared as
 //!   its own traits rather than a dependency on `ntk-qspn`/`ntk-hooking`: [`CoordinatorMap`],
 //!   the four enter-protocol handlers bundled in [`EnterHandlers`], [`PropagationHandler`], and
 //!   the outbound seam [`CoordinatorStub`]/[`CoordinatorStubFactory`].
-//! - [`config`] — [`Config`], every timing/redundancy constant, injectable.
-//! - [`actor`] — the single-owner [`Manager`] actor and its [`Handle`] (the servant role: runs
+//! - `config` — [`Config`], every timing/redundancy constant, injectable.
+//! - `actor` — the single-owner [`Manager`] actor and its [`Handle`] (the servant role: runs
 //!   the fixed-keys database and this node's own propagation orchestration).
-//! - [`client`] — [`CoordinatorClient`], the DHT-routed proxy to whichever node is currently
+//! - `client` — [`CoordinatorClient`], the DHT-routed proxy to whichever node is currently
 //!   elected servant for a level.
-//! - [`service`] — [`CoordinatorService`], the [`ntk_peerservices::PeerService`] registration.
-//! - [`handler`] — [`CoordinatorRpcHandler`], the inbound dispatch for the 5
+//! - `service` — [`CoordinatorService`], the [`ntk_peerservices::PeerService`] registration.
+//! - `handler` — [`CoordinatorRpcHandler`], the inbound dispatch for the 5
 //!   `MethodCall::coordinator_execute_*` methods.
-//! - [`fake`] — [`FakeCoordinatorStubFactory`], the in-memory test double for the outbound seam;
+//! - `fake` — [`FakeCoordinatorStubFactory`], the in-memory test double for the outbound seam;
 //!   [`RpcCoordinatorStub`] is the real-transport counterpart.
 //!
 //! **Election, not an invented algorithm**: per level `l`, "the Coordinator" is whichever node
@@ -40,7 +40,7 @@ mod wire;
 
 /// Generated protobuf types for this module's own payloads (`proto/coordinator.proto`, package
 /// `ntk.coordinator.v1`). These travel inside `ntk_proto::v1::TypedValue` payloads; nothing
-/// outside [`wire`](self::wire) constructs them directly.
+/// outside `wire` constructs them directly.
 #[allow(clippy::doc_markdown)]
 pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/ntk.coordinator.v1.rs"));
