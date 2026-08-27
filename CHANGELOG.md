@@ -4,6 +4,42 @@ All notable changes to this project are documented here. Versions follow [Semant
 Versioning](https://semver.org/spec/v2.0.0.html); the twelve `ntk-*` crates and `ntkd` are
 released in lockstep, so they always share a version even when only some of them changed.
 
+## [0.1.3]
+
+Fixes real bugs, unlike 0.1.2. Three defects found while diagnosing a restart-looping
+`ntkd.service` on Arch, all tracing back to one root event: the packaged config shipped a
+placeholder `nics = ["eth0"]`, and the host had no `eth0`. The systemd unit and capability
+changes below live in the Arch packaging repo (`PKGBUILD`), not here — nothing here adds a unit
+file.
+
+### Fixed
+
+- **A missing network interface produced an unattributable error.** `SO_BINDTODEVICE` against a
+  nonexistent `eth0` returned ENODEV, which surfaced only as `ntkd: error: i/o error: No such
+  device (os error 19)` — naming neither the interface nor the cause. `kernel::preflight` now
+  checks interface *existence* (a down link is legitimate, a missing one is permanent) before any
+  socket bind, in `node/transport.rs::start`. The same failure now reads: `configured interface
+  "eth0" does not exist; available interfaces: enp0s31f6, lo, tailscale0, wlan0 — fix `nics` in
+  the ntkd config`.
+- **A permanently misconfigured host restarted forever.** `Restart=on-failure` with
+  `RestartSec=3` never tripped systemd's default rate limit (5 starts/10s — 3s spacing only fits
+  about 4), so the ENODEV above respawned indefinitely; the observed restart counter reached 69.
+  The unit now sets `StartLimitIntervalSec=60` and `StartLimitBurst=5` (packaging only).
+- **The daemon could not bind its own default port.** `port = 269` is a privileged port, and under
+  `DynamicUser=yes` `AmbientCapabilities` is an explicit allow-list that named only
+  `CAP_NET_ADMIN CAP_NET_RAW`. Bind failed with `i/o error: Permission denied (os error 13)`.
+  Confirmed by varying only the port: 269 fails at bind with EPERM, 26900 binds and proceeds to
+  netlink. `CAP_NET_BIND_SERVICE` is now in both `AmbientCapabilities` and
+  `CapabilityBoundingSet` (packaging), and a shared `describe_bind_failure` helper in
+  `node/transport.rs` — used by both the UDP and TCP bind sites — now reports: `failed to bind UDP
+  broadcast socket on "enp0s31f6" port 269: Permission denied (os error 13) — ports below 1024 are
+  privileged; grant CAP_NET_BIND_SERVICE (AmbientCapabilities in the systemd unit) or set a port
+  >= 1024 in the ntkd config`.
+
+Bind failures are diagnosed by interpreting the errno at the bind site, not by a `port < 1024`
+preflight check: `net.ipv4.ip_unprivileged_port_start` can be lowered below 1024, so a static
+pre-check could refuse a bind the kernel would in fact have allowed.
+
 ## [0.1.2]
 
 Fixes what 0.1.1 shipped wrong. No Rust code changed: `git diff v0.1.1..v0.1.2 -- 'crates/**/*.rs'`
@@ -97,6 +133,7 @@ them over native netlink, never by shelling out to `ip`.
 Only five of the twelve crates reached crates.io under this version, for the rate-limit reason
 described under 0.1.1. Use 0.1.2 instead.
 
+[0.1.3]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/M0Rf30/netsukuku-rs/releases/tag/v0.1.0
