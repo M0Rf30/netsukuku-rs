@@ -4,12 +4,46 @@ All notable changes to this project are documented here. Versions follow [Semant
 Versioning](https://semver.org/spec/v2.0.0.html); the twelve `ntk-*` crates and `ntkd` are
 released in lockstep, so they always share a version even when only some of them changed.
 
+## [0.1.2]
+
+Fixes what 0.1.1 shipped wrong. No Rust code changed: `git diff v0.1.1..v0.1.2 -- 'crates/**/*.rs'`
+is empty.
+
+### Fixed
+
+- **Every crates.io page rendered empty.** No README, no keywords, no categories on any of the
+  twelve crates — `GET /crates/<name>/0.1.1/readme` returned 403 across the board. The cause is
+  that `readme` resolves relative to a crate's own directory, so a path to the workspace-root
+  README is simply never packaged. Each crate now carries its own `README.md`, plus keywords and
+  categories chosen per crate for discovery rather than a shared generic set.
+- The container release never pushed: the build job ran `docker/login-action` *after*
+  `build-push-action`, so buildx authenticated anonymously and GHCR answered 403. The image built
+  correctly on both architectures — it was purely step order, and it surfaced only on the first
+  tag build to reach the push path.
+- The static-linking guard rejected a valid binary. It grepped `file` output for
+  "statically linked" and a correct static PIE is described as "static-pie linked" — wording that
+  varies by `file` version and architecture, which is why the aarch64 leg passed while x86_64
+  failed on the same kind of binary. It now tests for an ELF `INTERP` segment: a static binary has
+  none, a dynamic one always has exactly one naming its loader.
+
+### Added
+
+- `homepage` on all twelve crates.
+
+### Note on the `ntkd` docs page
+
+`ntkd` declares a `[lib]` and a `[[bin]]` both named `ntkd`, so rustdoc documents the library and
+drops the binary — `docs.rs/ntkd/latest/src/ntkd/main.rs.html` is a 404 while `lib.rs.html` is not.
+Nothing is lost: `src/main.rs` is six lines delegating to `ntkd::node::main()`. But it does mean
+the rendered docs show a library API and no CLI, which is why the new `ntkd` README documents the
+command line. The full source remains browsable at `docs.rs/crate/ntkd/<version>/source/`.
+
 ## [0.1.1]
 
-**No crate code changed in this release.** `git diff v0.1.0..v0.1.1 -- crates/` is empty: the
-published library and daemon sources are byte-identical to 0.1.0. The version exists so the
-workspace stays in lockstep and so a tag can carry the first binary and container artifacts,
-which 0.1.0 never produced.
+**No Rust code changed in this release.** The only changes under `crates/` are doc comments and
+the twelve manifests switching to workspace version inheritance; every `.rs` change is a comment.
+The version exists so the workspace stays in lockstep and so a tag can carry the first binary and
+container artifacts, which 0.1.0 never produced.
 
 ### Added
 
@@ -61,7 +95,8 @@ An L3 routing protocol, not a TUN overlay: the daemon owns real kernel routing t
 them over native netlink, never by shelling out to `ip`.
 
 Only five of the twelve crates reached crates.io under this version, for the rate-limit reason
-described under 0.1.1. Use 0.1.1 instead.
+described under 0.1.1. Use 0.1.2 instead.
 
+[0.1.2]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/M0Rf30/netsukuku-rs/releases/tag/v0.1.0

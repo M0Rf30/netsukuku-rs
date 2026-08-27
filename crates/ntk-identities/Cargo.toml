@@ -6,7 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
 description = "Multi-identity per node: identity registry, identity-arcs, and the duplication handshake behind live g-node migration during hooking."
+keywords = ["netsukuku", "mesh", "identity", "migration", "gnode"]
+categories = ["network-programming", "data-structures"]
 
 [lints]
 workspace = true

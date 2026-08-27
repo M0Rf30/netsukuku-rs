@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Link/arc discovery and liveness monitoring for netsukuku-rs (the Rust port of the Vala neighborhood module)."
+readme = "README.md"
+homepage.workspace = true
+keywords = ["netsukuku", "mesh", "neighbor-discovery", "liveness", "rtt"]
+categories = ["network-programming", "os::linux-apis", "algorithms"]
 
 [lints]
 workspace = true

@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "ANDNA: the distributed hostname service, built as two PeerServices instances (RFC 0014) rather than bespoke routing."
+readme = "README.md"
+homepage.workspace = true
+keywords = ["netsukuku", "mesh", "dns", "hostname", "dht"]
+categories = ["network-programming", "authentication"]
 
 [lints]
 workspace = true

@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Protobuf wire schema for the netsukuku-rs inter-node RPC protocol."
+readme = "README.md"
+homepage.workspace = true
+keywords = ["netsukuku", "mesh", "protobuf", "rpc", "ed25519"]
+categories = ["network-programming", "encoding", "cryptography", "authentication"]
 # Publishes an empty native library marker so cargo propagates `DEP_NTK_PROTO_PROTO_INCLUDE`
 # (set in build.rs) to any crate that directly depends on this one — the mechanism sibling
 # module crates use to locate this crate's `proto/domain.proto` for cross-crate imports without

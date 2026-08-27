@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "QSPN v2 routing core: ETP propagation, path admission, and split/merge detection."
+readme = "README.md"
+homepage.workspace = true
+keywords = ["netsukuku", "mesh", "routing", "qspn", "mesh-network"]
+categories = ["network-programming", "algorithms", "data-structures"]
 
 [lints]
 workspace = true

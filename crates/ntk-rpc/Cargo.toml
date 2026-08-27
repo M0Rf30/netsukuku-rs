@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Transport and dispatch for the netsukuku-rs inter-node RPC protocol."
+readme = "README.md"
+homepage.workspace = true
+keywords = ["netsukuku", "mesh", "rpc", "transport", "tcp"]
+categories = ["network-programming", "asynchronous"]
 
 [lints]
 workspace = true

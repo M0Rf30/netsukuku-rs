@@ -3,11 +3,12 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.97"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/M0Rf30/netsukuku-rs"
+homepage = "https://github.com/M0Rf30/netsukuku-rs"
 authors = ["netsukuku-rs contributors"]
 
 # Versions verified against crates.io max_stable_version on 2026-08-23.
@@ -16,17 +17,17 @@ authors = ["netsukuku-rs contributors"]
 # Each sibling carries an explicit `version` alongside `path`: cargo resolves the path locally,
 # but crates.io REJECTS a published crate whose dependency has no version requirement. Keep the
 # version in lockstep with each crate's own `[package] version`.
-ntk-common = { path = "crates/ntk-common", version = "0.1.1" }
-ntk-proto = { path = "crates/ntk-proto", version = "0.1.1" }
-ntk-rpc = { path = "crates/ntk-rpc", version = "0.1.1" }
-ntk-netlink = { path = "crates/ntk-netlink", version = "0.1.1" }
-ntk-identities = { path = "crates/ntk-identities", version = "0.1.1" }
-ntk-neighborhood = { path = "crates/ntk-neighborhood", version = "0.1.1" }
-ntk-qspn = { path = "crates/ntk-qspn", version = "0.1.1" }
-ntk-peerservices = { path = "crates/ntk-peerservices", version = "0.1.1" }
-ntk-hooking = { path = "crates/ntk-hooking", version = "0.1.1" }
-ntk-coordinator = { path = "crates/ntk-coordinator", version = "0.1.1" }
-ntk-andna = { path = "crates/ntk-andna", version = "0.1.1" }
+ntk-common = { path = "crates/ntk-common", version = "0.1.2" }
+ntk-proto = { path = "crates/ntk-proto", version = "0.1.2" }
+ntk-rpc = { path = "crates/ntk-rpc", version = "0.1.2" }
+ntk-netlink = { path = "crates/ntk-netlink", version = "0.1.2" }
+ntk-identities = { path = "crates/ntk-identities", version = "0.1.2" }
+ntk-neighborhood = { path = "crates/ntk-neighborhood", version = "0.1.2" }
+ntk-qspn = { path = "crates/ntk-qspn", version = "0.1.2" }
+ntk-peerservices = { path = "crates/ntk-peerservices", version = "0.1.2" }
+ntk-hooking = { path = "crates/ntk-hooking", version = "0.1.2" }
+ntk-coordinator = { path = "crates/ntk-coordinator", version = "0.1.2" }
+ntk-andna = { path = "crates/ntk-andna", version = "0.1.2" }
 
 tokio = "1.53"
 tokio-util = "0.7"

@@ -6,7 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
 description = "The Netsukuku routing daemon: composes the ntk-* library crates into a running node."
+keywords = ["netsukuku", "mesh", "routing", "netlink", "daemon"]
+categories = ["network-programming", "os::linux-apis", "command-line-utilities"]
 
 [lints]
 workspace = true

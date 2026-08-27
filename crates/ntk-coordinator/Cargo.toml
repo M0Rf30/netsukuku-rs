@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Coordinator: per-level reserved-position allocator and DHT-hash-based election, implemented as a PeerService over ntk-peerservices."
+readme = "README.md"
+homepage.workspace = true
+keywords = ["netsukuku", "mesh", "election", "dht", "routing"]
+categories = ["network-programming", "algorithms"]
 
 [lints]
 workspace = true

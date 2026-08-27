@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Generic distributed-service substrate (DHT-over-topology) that Coordinator and ANDNA register on."
+readme = "README.md"
+homepage.workspace = true
+keywords = ["netsukuku", "mesh", "dht", "p2p", "routing"]
+categories = ["network-programming", "algorithms", "data-structures"]
 
 [lints]
 workspace = true

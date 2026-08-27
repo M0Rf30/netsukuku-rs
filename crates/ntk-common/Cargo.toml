@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Shared base types for netsukuku-rs: topology, hierarchical addressing, fingerprints, path cost."
+readme = "README.md"
+homepage.workspace = true
+keywords = ["netsukuku", "mesh", "hierarchical", "addressing", "topology"]
+categories = ["data-structures", "network-programming", "algorithms"]
 
 [dependencies]
 thiserror = { workspace = true }
