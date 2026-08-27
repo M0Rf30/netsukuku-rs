@@ -1,0 +1,143 @@
+syntax = "proto3";
+
+// Hooking module payload types
+// (research/impl/vala/hooking/serializables.vala). Travel inside
+// ntk.rpc.v1.TypedValue via typed_value/from_typed_value with
+// type_tag = "hooking.<TypeName>" — see ntk_proto::domain for the helpers
+// and ntk-proto's proto/ntk.proto:248-258 for the 10 hooking_* MethodCall
+// arms these messages are the arguments/returns of.
+//
+// Unlike qspn/peers, this file does NOT import ntk-proto's domain.proto:
+// none of these messages embed a validated Naddr/HCoord/Fingerprint/Cost.
+// TupleGNode is a *relative* position/eldership tuple private to the
+// migration-path search algorithm (BFS over candidate host g-nodes before
+// any of them is a resolved network address), not an ntk_common::Naddr.
+package ntk.hooking.v1;
+
+// Relative position/eldership tuple naming one g-node: pos[0]/eldership[0]
+// name the innermost level the tuple covers, the last entry names the
+// outermost (root) level (serializables.vala:559-612, structs.vala:74-87).
+// `eldership` carries upstream's `-1` "not yet known" sentinel
+// (arc_handler.vala:446-448), hence a signed type.
+message TupleGNode {
+  repeated uint32 pos = 1;
+  repeated int32 eldership = 2;
+}
+
+// PathHop (serializables.vala:614-671): one step of the routing envelope a
+// SearchMigrationPathRequest/ExploreGNodeRequest carries so a recipient can
+// tell whether it must route further or already hosts `visiting_gnode`.
+message PathHop {
+  TupleGNode visiting_gnode = 1;
+  // Absent = null upstream (only the very first hop, the BFS root, has no
+  // previous_migrating_gnode).
+  TupleGNode previous_migrating_gnode = 2;
+}
+
+// PairTupleGNodeInt (serializables.vala:769-779): one adjacent g-node found
+// via IHookingMapPaths.adjacent_to_my_gnode, plus the real position of my
+// own border g-node that borders it (the position a migrating chain would
+// record as its `previous_migrating_gnode`'s new head).
+message PairTupleGNodeInt {
+  TupleGNode gnode = 1;
+  uint32 border_real_pos = 2;
+}
+
+// INetworkData (serializables.vala:23-100): `retrieve_network_data`'s
+// return value.
+message NetworkData {
+  int64 network_id = 1;
+  uint64 neighbor_n_nodes = 2;
+  uint32 neighbor_min_level = 3;
+  repeated uint32 gsizes = 4;
+  repeated uint32 neighbor_pos = 5;
+}
+
+// IEntryData (serializables.vala:451-509): the resolved new address chain,
+// returned by `search_migration_path` and carried inside
+// FinishEnterData/FinishMigrationData.
+message EntryData {
+  int64 network_id = 1;
+  repeated uint32 pos = 2;
+  repeated int32 elderships = 3;
+}
+
+// SearchMigrationPathRequest (serializables.vala:673-761).
+message SearchMigrationPathRequest {
+  int32 pkt_id = 1;
+  TupleGNode origin = 2;
+  TupleGNode caller = 3;
+  repeated PathHop path_hops = 4;
+  uint32 max_host_lvl = 5;
+  int32 reserve_request_id = 6;
+}
+
+// SearchMigrationPathErrorPkt (serializables.vala:763-767).
+message SearchMigrationPathErrorPkt {
+  int32 pkt_id = 1;
+  TupleGNode origin = 2;
+}
+
+// SearchMigrationPathResponse (serializables.vala:781-888). Upstream
+// initializes final_host_lvl/real_new_pos/real_new_eldership/
+// new_conn_vir_pos/new_eldership to -1 as a "not set" sentinel
+// (serializables.vala:793-801); this schema keeps that exact convention
+// rather than adding proto3 `optional` presence tracking on five fields.
+message SearchMigrationPathResponse {
+  int32 pkt_id = 1;
+  TupleGNode origin = 2;
+  uint32 min_host_lvl = 3;
+  repeated PairTupleGNodeInt set_adjacent = 4;
+  int32 final_host_lvl = 5;
+  int32 real_new_pos = 6;
+  int32 real_new_eldership = 7;
+  int32 new_conn_vir_pos = 8;
+  int32 new_eldership = 9;
+}
+
+// ExploreGNodeRequest (serializables.vala:890-969).
+message ExploreGNodeRequest {
+  int32 pkt_id = 1;
+  TupleGNode origin = 2;
+  repeated PathHop path_hops = 3;
+  uint32 requested_lvl = 4;
+}
+
+// ExploreGNodeResponse (serializables.vala:971-976).
+message ExploreGNodeResponse {
+  int32 pkt_id = 1;
+  TupleGNode origin = 2;
+  TupleGNode result = 3;
+}
+
+// DeleteReservationRequest (serializables.vala:978-982).
+message DeleteReservationRequest {
+  TupleGNode dest_gnode = 1;
+  int32 reserve_request_id = 2;
+}
+
+// RequestPacketType (structs.vala:241-245).
+enum MigOp {
+  MIG_OP_UNSPECIFIED = 0;
+  PREPARE_MIGRATION = 1;
+  FINISH_MIGRATION = 2;
+}
+
+// RequestPacket (serializables.vala:984-995).
+message RequestPacket {
+  int32 pkt_id = 1;
+  TupleGNode dest = 2;
+  TupleGNode src = 3;
+  MigOp operation = 4;
+  int32 migration_id = 5;
+  int32 conn_gnode_pos = 6;
+  TupleGNode host_gnode = 7;
+  int32 real_new_pos = 8;
+  int32 real_new_eldership = 9;
+}
+
+// ResponsePacket (serializables.vala:997-1001).
+message ResponsePacket {
+  int32 pkt_id = 1;
+  TupleGNode dest = 2;
+}

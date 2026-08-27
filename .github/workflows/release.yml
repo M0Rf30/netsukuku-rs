@@ -1,0 +1,89 @@
+name: Release
+
+# Publishes all twelve crates to crates.io.
+#
+# Trigger is a `v*` tag (e.g. `v0.1.0`), or a manual run. A manual run defaults to a dry run,
+# so the safe action is also the default one: `workflow_dispatch` with nothing changed uploads
+# nothing. Only a tag push, or a manual run with `dry_run: false`, actually publishes.
+#
+# Publishing is irreversible: a version can be yanked but never deleted or reused. The full
+# CI gate therefore runs *in this workflow* before the upload step, rather than trusting that
+# the tagged commit happened to be green on `main`.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Package and verify without uploading"
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # As in `ci.yml`: prost code is generated at build time by `protox` (a pure-Rust protoc),
+  # so no `protobuf-compiler` package is installed anywhere in this workflow.
+  RUST_TOOLCHAIN: "1.98.0"
+
+# Two concurrent releases would race each other onto the registry index.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: verify and publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The same gate `ci.yml` enforces. Duplicated deliberately: a tag can point at any commit,
+      # including one that never passed CI, and an unpublish is not available as a remedy.
+      - name: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      - name: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+
+      # On a tag build, refuse to publish a version the tag does not name. Catches the common
+      # mistake of tagging `v0.2.0` while the manifests still say `0.1.0`, which would otherwise
+      # silently re-publish (and fail on) the old version.
+      - name: tag matches crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "ntkd") | .version')
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match ntkd version ${manifest}"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches version ${manifest}"
+
+      # `cargo publish --workspace` (stable since 1.90) resolves the twelve crates' dependency
+      # order itself and waits for each to appear in the registry index before publishing the
+      # crates that depend on it. That ordering is therefore NOT hardcoded here — a hand-written
+      # crate list is exactly the thing that rots when a dependency edge changes.
+      - name: cargo publish --workspace (dry run)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: cargo publish --workspace --dry-run
+
+      - name: cargo publish --workspace
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
+        # The repository secret is named CRATES_TOKEN; cargo reads CARGO_REGISTRY_TOKEN.
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_TOKEN }}
+        run: cargo publish --workspace

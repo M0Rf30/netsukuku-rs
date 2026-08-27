@@ -1,0 +1,122 @@
+syntax = "proto3";
+
+// Wire types for ANDNA (`research/notes/02-vala-services-daemon.md` §4;
+// `research/specs/vala-doc--rfc-Ntk_SNSD`; `research/impl/c/netsukuku/src/andna.h`). Upstream's
+// own `ntkdrpc` interface declares no `AndnaManager` module at all (§4) — these payloads never
+// travel as `ntk_proto::v1::MethodCall` arms; they are ANDNA's own request/reply schema, carried
+// as `TypedValue` payloads over `ntk-peerservices`' generic `PeerService::exec` request path
+// (`ntk-andna/src/service.rs`), exactly as RFC 0014 intends a registered P2P service to define
+// its own message types.
+package ntk.andna.v1;
+
+import "domain.proto";
+
+// Wraps a singular `ntk.domain.v1.Naddr` for use as a `oneof` arm. Protobuf forbids `repeated`
+// fields inside a `oneof`, and a *singular* extern-mapped message field used directly as a
+// oneof arm trips a `prost-build` 0.14 panic in its Copy/Eq auto-derive analysis (it looks up
+// the extern type's own descriptor in a message graph that never contains it, since the type is
+// only referenced via `.extern_path`, never compiled here). A `repeated` field of exactly one
+// element, inside a message this crate defines locally, sidesteps the bug entirely — repeated
+// fields short-circuit that analysis before it ever needs the extern descriptor. See
+// `ntk-andna/build.rs`'s doc comment for the full explanation and the non-oneof case
+// (`RegisterRequest.owner_naddr` below), which sidesteps the same bug by being `repeated`
+// directly rather than needing this wrapper.
+message AndnaAddress {
+  repeated ntk.domain.v1.Naddr value = 1;
+}
+
+// One SNSD record (NTK_RFC 0009): an alias/backup entry scoped to a `service` number (a port
+// number; 0 is the reserved "zero record" naming the registrant's own address). `target` is
+// either a `Naddr` (a normal address record, wrapped in `AndnaAddress`) or another hostname (an
+// SNSD alias chain hop — the RFC's own text describes following one such hop as the *caller's*
+// job, a second plain `Resolve`, not a server-side chain walk; see `ntk-andna/src/snsd.rs`).
+message SnsdRecord {
+  uint32 service = 1;
+  uint32 priority = 2;
+  uint32 weight = 3;
+  oneof target {
+    AndnaAddress address = 4;
+    string hostname = 5;
+  }
+}
+
+// A signed registration or renewal of `hostname` (ANDNA's "register_node" role,
+// `andna_reg_pkt`, `research/impl/c/netsukuku/src/andna.h:101-116`). `signature` covers a
+// deterministic domain-level encoding of every other field (`ntk-andna/src/record.rs`'s
+// `signing_bytes`), not this protobuf encoding itself — any node can verify ownership from the
+// request alone, without a prior side channel to the registrant.
+//
+// The "zero SNSD record" (service 0, the registrant's own address) is not carried inside
+// `snsd_records` — `owner_naddr`/`zero_priority`/`zero_weight` are its dedicated fields, mirroring
+// NTK_RFC 0009's own rule that the zero record's *address* can never be reassigned to a foreign
+// target, only its priority/weight tuned. `snsd_records` MUST NOT contain a `service == 0` entry.
+//
+// `owner_naddr` is `repeated` holding exactly one element — see `AndnaAddress`'s doc comment
+// above for why a singular extern-mapped `Naddr` field can't be used directly here either.
+message RegisterRequest {
+  string hostname = 1;
+  bytes owner_key = 2;
+  repeated ntk.domain.v1.Naddr owner_naddr = 3;
+  uint64 sequence = 4;
+  uint64 timestamp_unix = 5;
+  uint32 zero_priority = 6;
+  uint32 zero_weight = 7;
+  repeated SnsdRecord snsd_records = 8;
+  bytes signature = 9;
+}
+
+
+// A successfully accepted registration or renewal.
+message RegisterAccepted {
+  uint64 expires_at_unix = 1;
+  bool renewed = 2;
+}
+
+// An application-level rejection (collision, stale sequence, SNSD cap, ...) — `reason` is
+// human-readable only; see `ntk-andna/src/record.rs::RegisterRejected` for the structured form
+// this crate itself reasons over locally.
+message RegisterRejectedReply {
+  string reason = 1;
+}
+
+// Reply to a `RegisterRequest`, delivered as an ordinary successful `PeerService::exec` result —
+// a rejected registration is an application-level outcome the correctly-routed hash node
+// answers definitively, not a routing-layer refusal that should send the caller elsewhere
+// (`ntk-andna/src/service.rs`).
+message RegisterReply {
+  oneof outcome {
+    RegisterAccepted accepted = 1;
+    RegisterRejectedReply rejected = 2;
+  }
+}
+
+// Looks up `hostname`'s SNSD records for `service` (0 = the plain hostname->address mapping).
+message ResolveRequest {
+  string hostname = 1;
+  uint32 service = 2;
+}
+
+// `records` is empty when `hostname` is unknown or expired, otherwise every enabled record for
+// `service` (falling back to service 0 if nothing was registered under `service`), grouped by
+// descending priority and weight-randomized within each priority tier
+// (`ntk-andna/src/snsd.rs::resolve`).
+message ResolveReply {
+  repeated SnsdRecord records = 1;
+}
+
+// The Counter service's request (NTK_RFC 0007): reserve one slot of the requester's 256-hostname
+// quota for `hostname_hash`. The requester's identity is *not* a field here — it is the
+// `client_tuple` `ntk-peerservices` routing already attaches to `PeerService::exec`, which is
+// derived from actual DHT routing rather than a self-declared, spoofable payload value.
+message CounterRequest {
+  bytes hostname_hash = 1;
+}
+
+// `reserved_count` is this requester's live reservation count *after* this call (reserving an
+// already-held hash is idempotent and refreshes its own TTL without incrementing the count).
+message CounterReply {
+  oneof outcome {
+    uint32 reserved_count = 1;
+    string denied_reason = 2;
+  }
+}

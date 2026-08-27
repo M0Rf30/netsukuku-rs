@@ -1,0 +1,150 @@
+syntax = "proto3";
+
+// Wire types for the Coordinator module (research/notes/01-vala-core-routing.md §7): the
+// per-g-node-level fixed-keys database (research/impl/vala/coordinator/fk_database.vala)
+// registered as an `ntk_peerservices::PeerService`, plus the propagation envelope payload for
+// the 5 `MethodCall::coordinator_execute_*` arms already declared in
+// `ntk-proto/proto/ntk.proto` (`CoordinatorExecuteArgs.tuple`/`.data`).
+//
+// `CoordinatorRequest`/`CoordinatorResponse` never appear as a `MethodCall` arm themselves:
+// routing to whichever node is elected servant for a level is entirely PeerServices' generic
+// DHT machinery (`contact_peer`/`forward_msg`), so these travel as the opaque request/response
+// `ntk.rpc.v1.TypedValue` that `ntk_peerservices::PeerService::exec` already carries.
+package ntk.coordinator.v1;
+
+import "ntk.proto";
+
+// research/impl/vala/coordinator/serializables.vala:23-46 (`TupleGnode.tuple`): the positions,
+// from a propagation's originating (0-indexed) level up to (but not including) the topology's
+// top level, naming which g-node this propagation concerns. Wraps `CoordinatorExecuteArgs.tuple`.
+message PropagationTuple {
+  repeated uint32 positions = 1;
+}
+
+// --- fk_database.vala request/response surface, carried inside PeerService::exec ---
+
+message NumberOfNodesRequest {}
+message NumberOfNodesResponse {
+  uint64 n_nodes = 1;
+}
+
+message EvaluateEnterRequest {
+  uint32 top = 1;
+  ntk.rpc.v1.TypedValue data = 2;
+}
+message EvaluateEnterResponse {
+  ntk.rpc.v1.TypedValue data = 1;
+}
+
+message BeginEnterRequest {
+  uint32 top = 1;
+  ntk.rpc.v1.TypedValue data = 2;
+}
+message BeginEnterResponse {
+  ntk.rpc.v1.TypedValue data = 1;
+}
+
+message CompletedEnterRequest {
+  uint32 top = 1;
+  ntk.rpc.v1.TypedValue data = 2;
+}
+message CompletedEnterResponse {
+  ntk.rpc.v1.TypedValue data = 1;
+}
+
+message AbortEnterRequest {
+  uint32 top = 1;
+  ntk.rpc.v1.TypedValue data = 2;
+}
+message AbortEnterResponse {
+  ntk.rpc.v1.TypedValue data = 1;
+}
+
+message GetHookingMemoryRequest {
+  uint32 top = 1;
+}
+message GetHookingMemoryResponse {
+  ntk.rpc.v1.TypedValue data = 1;
+}
+
+message SetHookingMemoryRequest {
+  uint32 top = 1;
+  ntk.rpc.v1.TypedValue data = 2;
+}
+message SetHookingMemoryResponse {}
+
+message ReserveEnterRequest {
+  uint32 top = 1;
+  int64 reserve_request_id = 2;
+}
+message Reservation {
+  uint32 new_pos = 1;
+  uint64 new_eldership = 2;
+}
+message ReserveEnterResponse {
+  // Absent `reservation` mirrors upstream's `ReserveEnterErrorResponse`
+  // (fk_database.vala:504-505): a normal, non-exceptional "cannot reserve right now" answer,
+  // never a routing-level refusal.
+  Reservation reservation = 1;
+}
+
+message DeleteReserveEnterRequest {
+  uint32 top = 1;
+  int64 reserve_request_id = 2;
+}
+message DeleteReserveEnterResponse {}
+
+message Booking {
+  int64 reserve_request_id = 1;
+  uint32 new_pos = 2;
+  uint64 new_eldership = 3;
+  // Remaining milliseconds until this booking expires, computed relative to "now" at encode
+  // time — the wire analogue of upstream's `SerTimer.msec_ttl` getter
+  // (research/impl/vala/coordinator/serializables.vala:118-154).
+  int64 timeout_remaining_ms = 4;
+}
+
+message GnodeMemory {
+  repeated Booking reserve_list = 1;
+  uint32 max_virtual_pos = 2;
+  uint64 max_eldership = 3;
+  optional uint64 n_nodes = 4;
+  optional int64 n_nodes_timeout_remaining_ms = 5;
+  ntk.rpc.v1.TypedValue hooking_memory = 6;
+}
+
+message ReplicaRequest {
+  uint32 top = 1;
+  GnodeMemory memory = 2;
+}
+message ReplicaResponse {}
+
+message CoordinatorRequest {
+  oneof body {
+    NumberOfNodesRequest number_of_nodes = 1;
+    EvaluateEnterRequest evaluate_enter = 2;
+    BeginEnterRequest begin_enter = 3;
+    CompletedEnterRequest completed_enter = 4;
+    AbortEnterRequest abort_enter = 5;
+    GetHookingMemoryRequest get_hooking_memory = 6;
+    SetHookingMemoryRequest set_hooking_memory = 7;
+    ReserveEnterRequest reserve_enter = 8;
+    DeleteReserveEnterRequest delete_reserve_enter = 9;
+    ReplicaRequest replica = 10;
+  }
+}
+
+message CoordinatorResponse {
+  oneof body {
+    NumberOfNodesResponse number_of_nodes = 1;
+    EvaluateEnterResponse evaluate_enter = 2;
+    BeginEnterResponse begin_enter = 3;
+    CompletedEnterResponse completed_enter = 4;
+    AbortEnterResponse abort_enter = 5;
+    GetHookingMemoryResponse get_hooking_memory = 6;
+    SetHookingMemoryResponse set_hooking_memory = 7;
+    ReserveEnterResponse reserve_enter = 8;
+    DeleteReserveEnterResponse delete_reserve_enter = 9;
+    ReplicaResponse replica = 10;
+  }
+}

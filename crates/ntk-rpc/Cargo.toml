@@ -1,0 +1,34 @@
+[package]
+name = "ntk-rpc"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Transport and dispatch for the netsukuku-rs inter-node RPC protocol."
+
+[lints]
+workspace = true
+
+[dependencies]
+ntk-proto.workspace = true
+tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "macros", "time"] }
+tokio-util = { workspace = true, features = ["codec"] }
+futures.workspace = true
+bytes.workspace = true
+socket2.workspace = true
+prost.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = [
+  "net",
+  "rt",
+  "rt-multi-thread",
+  "sync",
+  "macros",
+  "time",
+  "test-util",
+] }

@@ -1,0 +1,60 @@
+name: Mirror to Codeberg
+
+# Keeps https://codeberg.org/M0Rf30/netsukuku-rs in step with this repository.
+#
+# Codeberg has disabled *pull* mirrors site-wide ("the site administrator has disabled the
+# creation of new pull mirrors"), so the mirror cannot track us on its own — the sync has to be
+# pushed from here. A local dual-push remote covers pushes made from a configured working copy;
+# this workflow covers every other case (a push from another clone, a web edit, a tag pushed by
+# automation), which is precisely when a mirror would otherwise drift unnoticed.
+#
+# Requires a repository secret CODEBERG_TOKEN: a Codeberg access token with `write:repository`.
+# Without it the job no-ops instead of failing, so a fork or an unconfigured clone stays green.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: mirror-codeberg
+  cancel-in-progress: true
+
+jobs:
+  mirror:
+    name: push main and tags to Codeberg
+    runs-on: ubuntu-latest
+    steps:
+      - name: check the token is configured
+        id: gate
+        env:
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+        run: |
+          if [ -z "${CODEBERG_TOKEN}" ]; then
+            echo "CODEBERG_TOKEN is not set — skipping the mirror push."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Full history: a shallow clone cannot be pushed to another remote.
+      - uses: actions/checkout@v5
+        if: steps.gate.outputs.enabled == 'true'
+        with:
+          fetch-depth: 0
+
+      # `--force` because this repository's history may be rewritten (it starts from a single
+      # foundational commit) and the mirror must follow rather than reject the update. Branches
+      # and tags are pushed as two explicit refspecs instead of `--mirror`, so the push can never
+      # delete a ref on Codeberg that simply does not exist here.
+      - name: push to Codeberg
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+        run: |
+          git config --global credential.helper ""
+          git remote add codeberg "https://codeberg.org/M0Rf30/netsukuku-rs.git"
+          git -c "http.https://codeberg.org/.extraheader=Authorization: token ${CODEBERG_TOKEN}" \
+            push --force codeberg "HEAD:refs/heads/main"
+          git -c "http.https://codeberg.org/.extraheader=Authorization: token ${CODEBERG_TOKEN}" \
+            push --force --tags codeberg

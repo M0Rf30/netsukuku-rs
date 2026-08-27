@@ -1,0 +1,38 @@
+[package]
+name = "ntk-proto"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Protobuf wire schema for the netsukuku-rs inter-node RPC protocol."
+# Publishes an empty native library marker so cargo propagates `DEP_NTK_PROTO_PROTO_INCLUDE`
+# (set in build.rs) to any crate that directly depends on this one — the mechanism sibling
+# module crates use to locate this crate's `proto/domain.proto` for cross-crate imports without
+# hardcoding a `../ntk-proto` relative path that breaks once each crate is packaged standalone
+# for crates.io.
+links = "ntk_proto"
+
+[lints]
+workspace = true
+
+[dependencies]
+prost.workspace = true
+bytes.workspace = true
+ntk-common.workspace = true
+thiserror.workspace = true
+ed25519-dalek.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "codec"
+harness = false
+
+[build-dependencies]
+prost-build.workspace = true
+protox.workspace = true

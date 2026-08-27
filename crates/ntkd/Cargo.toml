@@ -1,0 +1,60 @@
+[package]
+name = "ntkd"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The Netsukuku routing daemon: composes the ntk-* library crates into a running node."
+
+[lints]
+workspace = true
+
+[lib]
+name = "ntkd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ntkd"
+path = "src/main.rs"
+
+[features]
+# Exposes test-only accessors (e.g. `RouteInstaller::kernel_ref`) to integration tests in
+# `tests/`, which build against this crate as an ordinary lib dependency and therefore never see
+# plain `#[cfg(test)]` items (those only apply to this crate's own `cargo test` build).
+test-util = []
+
+[dependencies]
+ntk-common.workspace = true
+ntk-proto.workspace = true
+ntk-rpc.workspace = true
+ntk-netlink.workspace = true
+ntk-identities.workspace = true
+ntk-neighborhood.workspace = true
+ntk-qspn.workspace = true
+ntk-peerservices.workspace = true
+ntk-hooking.workspace = true
+ntk-coordinator.workspace = true
+ntk-andna.workspace = true
+ed25519-dalek.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "time", "signal", "net", "io-util", "fs", "process"] }
+tokio-util.workspace = true
+futures.workspace = true
+serde = { workspace = true, features = ["derive"] }
+toml.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+clap = { workspace = true, features = ["derive"] }
+rand.workspace = true
+
+[dev-dependencies]
+ntkd = { path = ".", features = ["test-util"] }
+proptest.workspace = true
+nix = { workspace = true, features = ["sched"] }
+rtnetlink.workspace = true
+wl-nl80211.workspace = true
+netlink-packet-core = "0.9"
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "time", "signal", "net", "io-util", "fs", "process", "test-util"] }

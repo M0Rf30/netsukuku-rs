@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+// QSPN v2 module payload types
+// (research/impl/vala/qspn/serializables.vala:25-217). Reuses
+// ntk.domain.v1's Naddr/HCoord/Fingerprint/Cost rather than redeclaring them
+// (see ntk-proto's domain.proto header comment for the contract). Travels
+// inside ntk.rpc.v1.TypedValue via typed_value/from_typed_value with
+// type_tag = "qspn.<TypeName>" (get_full_etp's bare-Naddr argument reuses
+// ntk.domain.v1.Naddr directly under tag "qspn.Naddr" rather than adding a
+// single-field wrapper message for it).
+package ntk.qspn.v1;
+
+import "domain.proto";
+
+// One path to one destination inside an ETP (EtpPath,
+// serializables.vala:116-123).
+message EtpPath {
+  repeated ntk.domain.v1.HCoord hops = 1;
+  // One local/foreign arc id per hop, same length as hops (qspn.vala:1129;
+  // see ntk-qspn's ArcId docs on why arcs[1..] are foreign ids carried
+  // through unchanged).
+  repeated uint32 arcs = 2;
+  ntk.domain.v1.Cost cost = 3;
+  ntk.domain.v1.Fingerprint fingerprint = 4;
+  uint32 nodes_inside = 5;
+  // Per-level "this path fact is not valid outside level i" pruning flags,
+  // length = topology levels (etp_message.vala:37-116).
+  repeated bool ignore_outside = 6;
+}
+
+// The full ETP message (serializables.vala:25-31).
+message EtpMessage {
+  ntk.domain.v1.Naddr node_address = 1;
+  // Sender's own fingerprint per level, index 0 = level 0, length =
+  // levels + 1.
+  repeated ntk.domain.v1.Fingerprint fingerprints = 2;
+  // Sender's own nodes_inside per level, same indexing as fingerprints.
+  repeated uint32 nodes_inside = 3;
+  // G-node coordinates the message has traversed so far (qspn.vala:1094).
+  repeated ntk.domain.v1.HCoord hops = 4;
+  repeated EtpPath paths = 5;
+}

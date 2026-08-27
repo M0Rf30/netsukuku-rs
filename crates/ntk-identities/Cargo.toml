@@ -1,0 +1,31 @@
+[package]
+name = "ntk-identities"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Multi-identity per node: identity registry, identity-arcs, and the duplication handshake behind live g-node migration during hooking."
+
+[lints]
+workspace = true
+
+[dependencies]
+ntk-common.workspace = true
+ntk-proto.workspace = true
+ntk-rpc.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tokio-util.workspace = true
+futures.workspace = true
+prost.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+protox.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

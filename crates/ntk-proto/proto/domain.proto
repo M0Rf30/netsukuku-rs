@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+// Wire schema for the `ntk-common` domain vocabulary shared by every
+// phase-2 protocol module: `Topology`, `Naddr`, `HCoord`, `Fingerprint`,
+// `Cost`. Compiled alongside proto/ntk.proto by the same build.rs, into the
+// same generated-code output directory. Module-owned `proto/<module>.proto`
+// files MUST `import "domain.proto";` and reuse these messages rather than
+// redeclaring their own Naddr/HCoord/Fingerprint/Cost — see
+// crates/ntk-proto/src/domain.rs for the `From`/`TryFrom` glue that converts
+// to/from `ntk_common`'s validated in-memory representation. `From` domain ->
+// wire is infallible; `TryFrom` wire -> domain revalidates through
+// `ntk_common`'s own constructors, never trusting a peer's positions/gsizes.
+package ntk.domain.v1;
+
+// A network's shape: levels() and per-level gsize() (`ntk_common::Topology`).
+// `gsizes[i]` is the g-node size at level `i`, index 0 being the innermost
+// level.
+message Topology {
+  repeated uint32 gsizes = 1;
+}
+
+// A hierarchical Netsukuku address (`ntk_common::Naddr`). Carries its own
+// `Topology` rather than relying on out-of-band context, mirroring
+// `Naddr`'s own owned-`Topology` field — a decoder can revalidate every
+// position against its g-node size without trusting the sender.
+message Naddr {
+  Topology topology = 1;
+  repeated uint32 pos = 2;
+}
+
+// A bare (level, position) coordinate naming one g-node
+// (`ntk_common::HCoord`). `level` is `uint64` on the wire because proto3 has
+// no native `usize`; see `crates/ntk-proto/src/domain.rs` for the fallible
+// narrowing back to `usize`.
+message HCoord {
+  uint64 level = 1;
+  uint32 pos = 2;
+}
+
+// A QSPN path cost (`ntk_common::Cost`), modeled as an explicit oneof rather
+// than a magic sentinel integer. `null`/`dead` carry no data of their own —
+// which oneof arm is set *is* the payload — `finite` carries the additive
+// magnitude.
+message Cost {
+  oneof value {
+    bool null = 1;
+    uint64 finite = 2;
+    bool dead = 3;
+  }
+}
+
+// One entry of a `Fingerprint`'s eldership trail, or its own current-level
+// claim: `value` absent is `ntk_common`'s internal `-1` "virtual/null
+// eldership" sentinel, never a raw negative number on the wire. proto3 gives
+// no per-element optionality inside a `repeated` field, so each
+// `elderships_seed` entry is one of these single-field wrapper messages.
+message OptionalEldership {
+  optional uint32 value = 1;
+}
+
+// A g-node identity fingerprint. `id` is opaque bytes — the wire
+// instantiation of `ntk_common::Fingerprint<Id>` is always
+// `Fingerprint<Vec<u8>>`. Field layout mirrors
+// `ntk_common::FingerprintParts` exactly; see
+// `crates/ntk-proto/src/domain.rs` for the validating conversion.
+message Fingerprint {
+  bytes id = 1;
+  uint64 level = 2;
+  optional uint32 eldership = 3;
+  repeated uint32 pending_elderships = 4;
+  repeated OptionalEldership elderships_seed = 5;
+}

@@ -1,0 +1,397 @@
+syntax = "proto3";
+
+// Wire schema for the netsukuku-rs inter-node RPC protocol. This replaces
+// two upstream layers in one shot: `zcd`'s JSON envelope (transport framing +
+// {typename,value} polymorphism, research/impl/vala/zcd/json_handling.vala)
+// and `ntkdrpc`'s IDL-driven stub/skeleton codegen (the single method surface
+// declared in research/impl/vala/ntkdrpc/build_sources/interfaces.rpcidl).
+//
+// Wire compatibility with the Vala daemon is an explicit non-goal (we
+// implement the specs, not zcd's JSON accidents) — this schema is designed
+// fresh, only the *method surface* and *error semantics* are transcribed
+// faithfully. See research/notes/02-vala-services-daemon.md §1 for the
+// zcd behavior this schema is modeled on, and notes/01 §2 for the method
+// table.
+package ntk.rpc.v1;
+
+// ---------------------------------------------------------------------------
+// Envelope
+// ---------------------------------------------------------------------------
+
+// Two-part protocol version. `major` changes are wire-breaking; `minor`
+// changes are additive (new oneof arms, new optional fields) and MUST remain
+// decodable by an older `minor` peer on the same `major` — this is the
+// forward-compatibility contract protobuf field numbering gives us for free,
+// made explicit here so peers can fail fast on a `major` mismatch instead of
+// hitting confusing per-field decode errors deep in a call.
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+// Root message for every byte sequence that crosses the wire, framed
+// separately per transport (length-delimited on TCP, one packet = one
+// Envelope on UDP — see ntk-rpc). `version` lets a receiver reject an
+// incompatible peer before attempting to interpret `body`.
+//
+// `auth` is OPTIONAL sender authentication (see `Auth` below), unset by
+// default. This keeps the wire-compatibility property proto3 gives every
+// additive field for free: an old peer that has never heard of `auth`
+// silently skips it on decode (unknown-field skipping), and a new peer
+// talking to an unauthenticated one simply never sets it. Only *requiring*
+// `auth` to be present and valid is a deployment's opt-in enforcement
+// policy — this schema stays interoperable either way.
+message Envelope {
+  ProtocolVersion version = 1;
+  oneof body {
+    Request request = 2;
+    Response response = 3;
+    BroadcastRequest broadcast_request = 4;
+    BroadcastAck broadcast_ack = 5;
+  }
+  Auth auth = 6;
+}
+
+// Sender-authentication block, proving who actually produced the request
+// this `Envelope` carries (not merely who dialed the TCP connection or
+// relayed the packet). Shape mirrors the reviewed precedent in
+// `ntk_andna::record::RegisterRequest`: a self-asserted public key
+// traveling with the message so ownership is provable from the request
+// alone, with no side channel required (`crates/ntk-andna/src/record.rs:
+// 150-151`), plus a `sequence` replay-protection token (`record.rs:
+// 168-169`, strictly-increasing-per-signer policy). Unlike that precedent,
+// the byte encoding this signature covers is domain-separated — see
+// `ntk_proto::auth`'s module doc for why and the exact encoding, and
+// `ntk_proto::auth::sign`/`verify`/`SequenceGuard` for the Rust API. This
+// message only carries bytes; it has no opinion on when a receiver
+// requires it to be present or how many signers to track.
+message Auth {
+  // Signer's 32-byte ed25519 public key. Named `signer_key`, not ANDNA's
+  // `owner_key`: this is the identity of whoever produced *this* message,
+  // not necessarily a persistent resource owner.
+  bytes signer_key = 1;
+  // Strictly increasing per `signer_key` — see `ntk_proto::auth::SequenceGuard`.
+  uint64 sequence = 2;
+  // 64-byte ed25519 signature over `ntk_proto::auth`'s canonical encoding
+  // of (method, payload, sequence). Never covers itself.
+  bytes signature = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Shared primitives
+// ---------------------------------------------------------------------------
+
+// A method call with no arguments and a void return. Used as both a
+// `MethodCall` arm (for zero-argument methods) and a `ResponsePayload` arm
+// (for void-returning methods).
+message Empty {}
+
+// Opaque polymorphic payload, standing in for the ~20 marker interfaces
+// (`IQspnEtpMessage`, `IIdentityID`, `IPeerTupleGNode`, ...) that
+// `ntkdrpc/interfaces.vala:117-223` declares with *empty bodies* — each is
+// implemented by concrete serializable classes owned by a module outside
+// phase 1 (qspn/identities/neighborhood/hooking/peers serializables, none of
+// which exist yet as ntk-* crates). This mirrors zcd's own answer to the same
+// problem, the `{typename, value}` envelope (`json_handling.vala`,
+// `documentation/ita/Librerie/ZcdDettagliTecnici.md:893-903`), but replaces
+// GObject's live `Type.from_name(typename)` registry (impossible in Rust)
+// with a plain string tag: `type_tag` names the concrete Rust type that
+// produced `payload`, `payload` is that type's own encoding. Decoding
+// `payload` is entirely the responsibility of the phase-2 crate that owns
+// `type_tag` — ntk-proto never interprets it.
+message TypedValue {
+  string type_tag = 1;
+  bytes payload = 2;
+}
+
+// Identity-addressing fields common to unicast and broadcast calls: which
+// identity is calling (`source_id`) and which physical/pseudo interface the
+// call is associated with (`src_nic`). A physical node can host several
+// Netsukuku identities sharing one NIC (research/notes/01 §5), so the
+// recipient needs this to resolve routing the way upstream's `CallerInfo`
+// does (`ntkdrpc/caller_info.vala:33-75`); the fields are `TypedValue`
+// because `ISourceID`/`ISrcNic` implementers belong to ntk-identities /
+// ntk-neighborhood (phase 2).
+message CallerContext {
+  TypedValue source_id = 1;
+  TypedValue src_nic = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Request / Response (unicast, stream transport)
+// ---------------------------------------------------------------------------
+
+message Request {
+  // Multiplexing key for concurrent in-flight calls on one connection.
+  // NOT present upstream: zcd's stream transport is one-request-in-flight
+  // per pooled socket (`zcd/senders.vala:24-116`), so no call-correlation id
+  // exists in the JSON envelope. ntk-rpc's tokio transport allows several
+  // outstanding calls per TCP connection, so this id is a deliberate
+  // addition — it plays no role in method dispatch, only in matching a
+  // `Response` back to its `Request`.
+  uint64 correlation_id = 1;
+  CallerContext caller = 2;
+  // Target identity on the recipient node (zcd's `unicast-id`,
+  // `json_handling.vala:36-38`) — which local identity object should handle
+  // this call when the daemon hosts more than one (`IDelegate.get_addr_set`,
+  // `ntkdrpc/api.vala:39-42`).
+  TypedValue unicast_id = 3;
+  // Mirrors zcd's `wait-reply` (`json_handling.vala:38`). If false the
+  // caller does not expect a `Response`; a caller that calls a non-void
+  // method with `wait_reply = false` gets a *local* error
+  // (`StubError.DID_NOT_WAIT_REPLY`, `ntkdrpc/api.vala:23-27`) that never
+  // touches the wire — see ntk-rpc's error type, not this schema.
+  bool wait_reply = 4;
+  MethodCall call = 5;
+}
+
+message Response {
+  uint64 correlation_id = 1;
+  oneof outcome {
+    ResponsePayload payload = 2;
+    RemoteError error = 3;
+  }
+}
+
+// The full method surface collapses to exactly four return shapes once
+// polymorphic returns are opaque `TypedValue`s: void, bool
+// (`can_you_export`), a present value, or (for the one nullable return,
+// `match_duplication`'s `IDuplicationData?`) absence. Rather than add a
+// fifth "none" arm, `empty` is reused for both "void success" and "no value"
+// — a caller always knows statically which of the two a given method means,
+// so the wire does not need to distinguish them.
+message ResponsePayload {
+  oneof value {
+    Empty empty = 1;
+    bool boolean = 2;
+    TypedValue typed = 3;
+  }
+}
+
+// The two error channels from notes/02 §1 (`ntkdrpc/api.vala:23-32`):
+// `StubError` is local-only (connection failure, timeout, "didn't wait for a
+// reply") and is NEVER represented here — it never reaches the wire, see
+// ntk-rpc's error type. `RemoteError` is the wire form of `DeserializeError`
+// and the eight domain-specific `errordomain`s declared in
+// `ntkdrpc/interfaces.vala:85-115` / `interfaces.rpcidl:47-55`; it IS a call
+// outcome, carried in `Response.outcome` alongside success.
+message RemoteError {
+  ErrorDomain domain = 1;
+  string message = 2;
+}
+
+// One entry per upstream `errordomain` plus `DESERIALIZE`, the wire form of
+// `DeserializeError` (bad arguments, unknown method, or — per notes/02 §1 —
+// an error domain the receiver doesn't recognize at all: "undeclared
+// error-domain → DeserializeError"). Every upstream domain has exactly one
+// variant (`GENERIC`); the human-readable detail that would have been the
+// Vala `error-code` string lives in `RemoteError.message` instead, since a
+// second wire field carrying a constant "GENERIC" string would be dead
+// weight.
+enum ErrorDomain {
+  ERROR_DOMAIN_UNSPECIFIED = 0;
+  QSPN_NOT_ACCEPTED = 1;
+  QSPN_BOOTSTRAP_IN_PROGRESS = 2;
+  PEERS_UNKNOWN_MESSAGE = 3;
+  PEERS_INVALID_REQUEST = 4;
+  HOOKING_NOT_PRINCIPAL = 5;
+  NOT_BOOTSTRAPPED = 6;
+  NO_MIGRATION_PATH_FOUND = 7;
+  MIGRATION_PATH_EXECUTE_FAILURE = 8;
+  DESERIALIZE = 9;
+}
+
+// ---------------------------------------------------------------------------
+// Broadcast / datagram transport
+// ---------------------------------------------------------------------------
+
+// Mirrors zcd's broadcast `request` packet (`json_handling.vala:246-335`):
+// unframed, fire-and-forget, at most one best-effort ack per `send_ack`
+// request (no request retransmission — notes/02 §1).
+message BroadcastRequest {
+  // Ack-correlation id (zcd `packet-id`); the recipient echoes it back in
+  // `BroadcastAck.packet_id`.
+  uint64 packet_id = 1;
+  CallerContext caller = 2;
+  // Originating identity's broadcast scope (zcd `broadcast-id`).
+  TypedValue broadcast_id = 3;
+  bool send_ack = 4;
+  MethodCall call = 5;
+}
+
+// Mirrors zcd's broadcast `ack` packet (`json_handling.vala:246-335`). Per
+// notes/02 §1 the receiver of a `send_ack` request resends this 3x at random
+// 10-200ms — best-effort, no delivery guarantee.
+message BroadcastAck {
+  uint64 packet_id = 1;
+  TypedValue src_nic = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Method surface — transcribed from interfaces.rpcidl:1-56 / notes/01 §2.
+//
+// One oneof arm per method on `AddressManager addr`'s five sub-managers.
+// `PeersManager`/`CoordinatorManager`/`HookingManager` methods that share an
+// identical upstream argument shape reuse one message type (documented at
+// each such message below) rather than duplicating an identical field list.
+// AndnaManager is deliberately absent: it has no RPC methods upstream either
+// (`ntkdrpc/interfaces.vala`'s module list omits it entirely, notes/02 §4).
+// ---------------------------------------------------------------------------
+
+message MethodCall {
+  oneof call {
+    // --- NeighborhoodManager (interfaces.rpcidl:2-7) ---
+    NeighborhoodHereIAmArgs neighborhood_here_i_am = 1;
+    NeighborhoodArcArgs neighborhood_request_arc = 2;
+    bool neighborhood_can_you_export = 3;
+    NeighborhoodArcArgs neighborhood_remove_arc = 4;
+    Empty neighborhood_nop = 5;
+
+    // --- IdentityManager (interfaces.rpcidl:8-11) ---
+    IdentityMatchDuplicationArgs identity_match_duplication = 10;
+    Empty identity_get_peer_main_id = 11;
+    IdentityNotifyIdentityArcRemovedArgs identity_notify_identity_arc_removed = 12;
+
+    // --- QspnManager (interfaces.rpcidl:12-16) ---
+    TypedValue qspn_get_full_etp = 20; // arg: IQspnAddress requesting_address
+    QspnSendEtpArgs qspn_send_etp = 21;
+    Empty qspn_got_prepare_destroy = 22;
+    Empty qspn_got_destroy = 23;
+
+    // --- PeersManager (interfaces.rpcidl:17-29) ---
+    TypedValue peers_forward_peer_message = 30; // arg: IPeerMessage
+    PeersMsgIdRespondantArgs peers_get_request = 31;
+    PeersSetResponseArgs peers_set_response = 32;
+    PeersSetRefuseMessageArgs peers_set_refuse_message = 33;
+    PeersMsgIdRespondantArgs peers_set_redo_from_start = 34;
+    PeersMsgIdTupleArgs peers_set_next_destination = 35;
+    PeersMsgIdTupleArgs peers_set_failure = 36;
+    PeersMsgIdTupleArgs peers_set_non_participant = 37;
+    int32 peers_set_missing_optional_maps = 38; // arg: msg_id
+    PeersSetParticipantArgs peers_set_participant = 39;
+    TypedValue peers_give_participant_maps = 40; // arg: IPeerParticipantSet
+    Empty peers_ask_participant_maps = 41;
+
+    // --- CoordinatorManager (interfaces.rpcidl:30-35) ---
+    CoordinatorExecuteArgs coordinator_execute_prepare_migration = 50;
+    CoordinatorExecuteArgs coordinator_execute_finish_migration = 51;
+    CoordinatorExecuteArgs coordinator_execute_prepare_enter = 52;
+    CoordinatorExecuteArgs coordinator_execute_finish_enter = 53;
+    CoordinatorExecuteArgs coordinator_execute_we_have_splitted = 54;
+
+    // --- HookingManager (interfaces.rpcidl:36-46) ---
+    bool hooking_retrieve_network_data = 60; // arg: ask_coord
+    int32 hooking_search_migration_path = 61; // arg: lvl
+    TypedValue hooking_route_search_request = 62; // arg: ISearchMigrationPathRequest
+    TypedValue hooking_route_search_error = 63; // arg: ISearchMigrationPathErrorPkt
+    TypedValue hooking_route_search_response = 64; // arg: ISearchMigrationPathResponse
+    TypedValue hooking_route_explore_request = 65; // arg: IExploreGNodeRequest
+    TypedValue hooking_route_explore_response = 66; // arg: IExploreGNodeResponse
+    TypedValue hooking_route_delete_reserve_request = 67; // arg: IDeleteReservationRequest
+    TypedValue hooking_route_mig_request = 68; // arg: IRequestPacket
+    TypedValue hooking_route_mig_response = 69; // arg: IResponsePacket
+  }
+}
+
+// here_i_am(INeighborhoodNodeIDMessage my_id, string my_mac, string my_nic_addr)
+// — interfaces.rpcidl:3.
+message NeighborhoodHereIAmArgs {
+  TypedValue my_id = 1;
+  string my_mac = 2;
+  string my_nic_addr = 3;
+}
+
+// Shared shape for `request_arc` and `remove_arc` (interfaces.rpcidl:4,6 —
+// the table in notes/01 §2 notes `remove_arc` is "same shape as
+// request_arc"): (your_id, your_mac, your_nic_addr, my_id, my_mac,
+// my_nic_addr).
+message NeighborhoodArcArgs {
+  TypedValue your_id = 1;
+  string your_mac = 2;
+  string your_nic_addr = 3;
+  TypedValue my_id = 4;
+  string my_mac = 5;
+  string my_nic_addr = 6;
+}
+
+// match_duplication(int migration_id, IIdentityID peer_id, IIdentityID
+// old_id, IIdentityID new_id, string old_id_new_mac, string
+// old_id_new_linklocal) — interfaces.rpcidl:9. Returns `IDuplicationData?`
+// (nullable, see `ResponsePayload`).
+message IdentityMatchDuplicationArgs {
+  int32 migration_id = 1;
+  TypedValue peer_id = 2;
+  TypedValue old_id = 3;
+  TypedValue new_id = 4;
+  string old_id_new_mac = 5;
+  string old_id_new_linklocal = 6;
+}
+
+// notify_identity_arc_removed(IIdentityID peer_id, IIdentityID my_id) —
+// interfaces.rpcidl:11.
+message IdentityNotifyIdentityArcRemovedArgs {
+  TypedValue peer_id = 1;
+  TypedValue my_id = 2;
+}
+
+// send_etp(IQspnEtpMessage etp, bool is_full) — interfaces.rpcidl:14. Throws
+// QspnNotAcceptedError.
+message QspnSendEtpArgs {
+  TypedValue etp = 1;
+  bool is_full = 2;
+}
+
+// Shared shape for `get_request(int msg_id, IPeerTupleNode respondant)`
+// (interfaces.rpcidl:19, throws PeersUnknownMessageError/PeersInvalidRequest)
+// and `set_redo_from_start(int msg_id, IPeerTupleNode respondant)`
+// (interfaces.rpcidl:22) — identical (msg_id, respondant) signature.
+message PeersMsgIdRespondantArgs {
+  int32 msg_id = 1;
+  TypedValue respondant = 2;
+}
+
+// set_response(int msg_id, IPeersResponse response, IPeerTupleNode
+// respondant) — interfaces.rpcidl:20.
+message PeersSetResponseArgs {
+  int32 msg_id = 1;
+  TypedValue response = 2;
+  TypedValue respondant = 3;
+}
+
+// set_refuse_message(int msg_id, string refuse_message, int e_lvl,
+// IPeerTupleNode respondant) — interfaces.rpcidl:21.
+message PeersSetRefuseMessageArgs {
+  int32 msg_id = 1;
+  string refuse_message = 2;
+  int32 e_lvl = 3;
+  TypedValue respondant = 4;
+}
+
+// Shared shape for `set_next_destination`, `set_failure`, and
+// `set_non_participant` (interfaces.rpcidl:23-25) — each is
+// `(int msg_id, IPeerTupleGNode tuple)`.
+message PeersMsgIdTupleArgs {
+  int32 msg_id = 1;
+  TypedValue tuple = 2;
+}
+
+// set_participant(int p_id, IPeerTupleGNode tuple) — interfaces.rpcidl:27.
+// `p_id` is a PeerService id (`peers.vala:397-406`), a distinct concept from
+// the `msg_id` correlation id used by `PeersMsgIdTupleArgs`, so this is kept
+// as its own message rather than folded into that one.
+message PeersSetParticipantArgs {
+  int32 p_id = 1;
+  TypedValue tuple = 2;
+}
+
+// Shared shape for all five `CoordinatorManager.execute_*` methods
+// (interfaces.rpcidl:31-35): `(tuple, fp_id, propagation_id, lvl, data)`.
+// The specific operation is carried entirely by which `MethodCall` oneof arm
+// selected this message.
+message CoordinatorExecuteArgs {
+  TypedValue tuple = 1; // ICoordTupleGNode
+  int64 fp_id = 2;
+  int32 propagation_id = 3;
+  int32 lvl = 4;
+  TypedValue data = 5; // ICoordObject
+}

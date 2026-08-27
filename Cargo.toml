@@ -1,0 +1,73 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.97"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/M0Rf30/netsukuku-rs"
+authors = ["netsukuku-rs contributors"]
+
+# Versions verified against crates.io max_stable_version on 2026-08-23.
+# Rationale for every choice and every rejected alternative: research/notes/06-rust-stack.md
+[workspace.dependencies]
+# Each sibling carries an explicit `version` alongside `path`: cargo resolves the path locally,
+# but crates.io REJECTS a published crate whose dependency has no version requirement. Keep the
+# version in lockstep with each crate's own `[package] version`.
+ntk-common = { path = "crates/ntk-common", version = "0.1.0" }
+ntk-proto = { path = "crates/ntk-proto", version = "0.1.0" }
+ntk-rpc = { path = "crates/ntk-rpc", version = "0.1.0" }
+ntk-netlink = { path = "crates/ntk-netlink", version = "0.1.0" }
+ntk-identities = { path = "crates/ntk-identities", version = "0.1.0" }
+ntk-neighborhood = { path = "crates/ntk-neighborhood", version = "0.1.0" }
+ntk-qspn = { path = "crates/ntk-qspn", version = "0.1.0" }
+ntk-peerservices = { path = "crates/ntk-peerservices", version = "0.1.0" }
+ntk-hooking = { path = "crates/ntk-hooking", version = "0.1.0" }
+ntk-coordinator = { path = "crates/ntk-coordinator", version = "0.1.0" }
+ntk-andna = { path = "crates/ntk-andna", version = "0.1.0" }
+
+tokio = "1.53"
+tokio-util = "0.7"
+futures = "0.3"
+bytes = "1"
+socket2 = "0.6"
+nix = "0.31"
+rtnetlink = "0.23"
+netlink-packet-route = "0.33"
+prost = "0.14"
+prost-build = "0.14"
+protox = "0.9"
+serde = "1"
+toml = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+clap = "4"
+proptest = "1"
+# Benchmark harness (dev-dependency only, never linked into `ntkd`). Benches that need a
+# crate's private internals go behind that crate's own `bench` feature + `required-features`,
+# so the default public API is not widened just to be measurable.
+criterion = "0.8"
+ed25519-dalek = "3"
+blake3 = "1.8"
+rand = "0.10"
+# Wireless (nl80211) — test fixtures only, so the `mac80211_hwsim` rung configures radios over
+# netlink like the veth fixture does, rather than shelling out to `iw`. Same rust-netlink family
+# and release train as `rtnetlink`/`netlink-packet-route` above.
+wl-nl80211 = "0.7"
+genetlink = "0.3"
+netlink-packet-generic = "0.5"
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+
+[profile.release]
+lto = "thin"

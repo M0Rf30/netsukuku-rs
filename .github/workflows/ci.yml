@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Every crate that speaks the wire protocol generates its prost code at build time via
+  # `protox` (a pure-Rust protoc), so there is deliberately no `apt-get install protobuf-compiler`
+  # step anywhere in this workflow.
+  RUST_TOOLCHAIN: "1.98.0"
+
+jobs:
+  test:
+    name: build, test, lint, fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      - name: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+
+      # Portability seam guard. Nine of the twelve crates are OS-agnostic protocol logic, and
+      # `ntkd` reaches the kernel only through `ntk-netlink`'s four traits -- `rtnetlink` is a
+      # *dev*-dependency there, used by the netns test fixtures, not by the daemon. That is what
+      # makes a non-Linux backend (FreeBSD `PF_ROUTE`, say) a fifth implementation of those traits
+      # rather than a rewrite. A seam only stays honest if something checks it, so: Linux netlink
+      # types may be imported inside `ntk-netlink`'s own source and nowhere else. Test fixtures
+      # under `crates/*/tests/` are exempt -- they legitimately create veth pairs and radios
+      # directly, which the trait surface deliberately does not cover.
+      - name: netlink stays inside ntk-netlink
+        run: |
+          leaks=$(grep -rn --include='*.rs' -E '^[[:space:]]*use (rtnetlink|netlink_packet_route|netlink_sys)\b' \
+                    crates/*/src | grep -v '^crates/ntk-netlink/src/' || true)
+          if [ -n "$leaks" ]; then
+            echo "$leaks"
+            echo "::error::Linux netlink types leaked outside ntk-netlink (see the portability seam in AGENTS.md)"
+            exit 1
+          fi
+
+  privileged-tests:
+    name: privileged tests (real netlink, real network namespaces)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      # These two suites are `#[ignore]`d because they mutate real kernel network state
+      # (addresses, routes, rules, a veth pair across two namespaces) and so must not run as
+      # part of the default `cargo test --workspace` above. They are the highest-value tests in
+      # the repo (they caught 5 real bugs) and must not silently stop running in CI.
+      #
+      # Locally, `unshare --net --map-root-user` (an *unprivileged* user+network namespace) is
+      # enough to run them. That does NOT work unchanged on GitHub-hosted `ubuntu-latest`
+      # runners: Ubuntu 24.04 restricts unprivileged user-namespace creation via AppArmor by
+      # default, and GitHub's runner image ships that restriction unchanged (see
+      # actions/runner-images#10443; the proposal to disable it, #11489, was closed without being
+      # adopted). `--map-root-user` needs a user namespace, so it hits exactly that restriction.
+      #
+      # GitHub-hosted runners do have passwordless `sudo`, so instead of an *unprivileged* user
+      # namespace we run `unshare --net` as real root via `sudo`. That only unshares the network
+      # namespace (no user namespace involved), which plain `root` is always allowed to do and
+      # which AppArmor's unprivileged-userns restriction does not gate. `--preserve-env` keeps
+      # `cargo`/`rustc` (installed by rustup into `$HOME`) resolvable under `sudo`.
+      # `unshare --net` gives the process a fresh network namespace with no connectivity at
+      # all -- that is the entire point, since these suites assert on a pristine kernel
+      # routing table. But `cargo test` wants to reach `index.crates.io` before it will run
+      # anything, so invoking cargo *inside* the namespace made it retry DNS for ~4 minutes
+      # and exit 101 without ever starting a test. That is why this job had never been
+      # observed to pass: not a code regression, just cargo needing a network the namespace
+      # deliberately does not have.
+      #
+      # So compile outside the namespace (where the runner does have network), then run
+      # inside it with `--offline`. `--offline` is load-bearing, not belt-and-braces: without
+      # it cargo still contacts the registry even when every dependency is already cached.
+      - name: build the privileged test binaries (outside the namespace, needs network)
+        run: |
+          cargo test -p ntk-netlink --test real_netlink --no-run
+          cargo test -p ntkd --test multi_node --no-run
+
+      # `ip link set lo up` is load-bearing too, and its absence is deliberately misleading:
+      # `detect_capabilities` probes for multipath support by installing a throwaway ECMP
+      # route over loopback. In a fresh namespace `lo` starts DOWN, so the probe fails,
+      # `multipath_routes` is reported false, and three tests fail with errors that look like
+      # a sandbox restriction and are not one.
+      - name: ntk-netlink privileged tests (real netlink in a fresh net namespace)
+        run: |
+          sudo --preserve-env=PATH,HOME,CARGO_HOME,RUSTUP_HOME \
+            unshare --net -- sh -c 'ip link set lo up && cargo test --offline -p ntk-netlink --test real_netlink -- --ignored'
+
+      - name: ntkd multi-node real-netns integration test
+        run: |
+          sudo --preserve-env=PATH,HOME,CARGO_HOME,RUSTUP_HOME \
+            unshare --net -- cargo test --offline -p ntkd --test multi_node -- --ignored real_netns

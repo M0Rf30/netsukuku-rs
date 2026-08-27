@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+// Module payload types for `ntk-identities`, carried inside
+// `ntk_proto::v1::TypedValue` (see `ntk-proto/proto/ntk.proto`'s
+// `TypedValue`/`MethodCall` doc comments). These are the concrete wire
+// implementers behind two of upstream's opaque marker interfaces
+// (`ntkdrpc/interfaces.vala:117-223`): `IIdentityID` (:125-127) and
+// `IDuplicationData` (:121-123).
+//
+// This module needs none of `ntk.domain.v1`'s types (no `Naddr`/`HCoord`/
+// `Fingerprint`/`Cost` crosses this module's wire surface), so this file
+// does not import `domain.proto`.
+package ntk.identities.v1;
+
+// Wire form of `ntk_identities::IdentityId`. `type_tag = "identities.IdentityId"`
+// when carried in a `TypedValue` (e.g. `IdentityMatchDuplicationArgs.peer_id`
+// /`old_id`/`new_id`, `IdentityNotifyIdentityArcRemovedArgs.peer_id`/`my_id`).
+message IdentityId {
+  uint64 value = 1;
+}
+
+// Wire form of `ntk_identities::DuplicationData` — the peer's own duplicated
+// identity plus the new mac/linklocal to reach its (now-migrated) old
+// identity on this arc (`identities/identities.vala:990-995`). Carried as
+// the `TypedValue` inside `ResponsePayload.typed` for `match_duplication`'s
+// nullable return; `ResponsePayload.empty` stands in for the `null` case
+// (see `ntk.proto`'s `ResponsePayload` doc comment).
+message DuplicationData {
+  IdentityId peer_new_id = 1;
+  string peer_old_id_new_mac = 2;
+  string peer_old_id_new_linklocal = 3;
+}

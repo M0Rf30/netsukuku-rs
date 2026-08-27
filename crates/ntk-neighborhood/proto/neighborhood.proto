@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+// Module payload types for the Neighborhood manager
+// (research/impl/vala/neighborhood/). These travel inside
+// `ntk_proto::v1::TypedValue` (see ntk-proto's `domain::typed_value` /
+// `from_typed_value`), never as top-level `MethodCall` arms — the arg
+// shapes for `here_i_am`/`request_arc`/`can_you_export`/`remove_arc`/`nop`
+// are already fixed by `ntk-proto/proto/ntk.proto`'s `NeighborhoodHereIAmArgs`
+// / `NeighborhoodArcArgs` messages; this file supplies only the opaque
+// `TypedValue` payloads those messages carry (`my_id`/`your_id`) plus the
+// `CallerContext` payloads this crate chooses to populate. No domain.proto
+// import: neighborhood carries no `Topology`/`Naddr`/`HCoord`/`Fingerprint`/
+// `Cost` on the wire (cost is derived locally from RTT/nop, never sent).
+package ntk.neighborhood.v1;
+
+// Wire form of `NeighborhoodNodeID`
+// (research/impl/vala/neighborhood/serializables.vala:23-35): a per-identity
+// random id, `PRNGen.int_range(1, int.MAX)` upstream, i.e. a positive,
+// nonzero 32-bit signed integer. Kept at the same width/range as upstream
+// (rather than widened to u64) since no consumer depends on a wider space
+// and matching the reference implementation's range keeps collision
+// probability identical.
+message NodeId {
+  int32 id = 1;
+}
+
+// Wire form of "which local NIC (fixed MAC + linklocal address) a call is
+// associated with" — carried in `CallerContext.src_nic` on every
+// neighborhood call. Upstream resolves this by inspecting the physical
+// transport (`CallerInfo`, `ntkdrpc/caller_info.vala:23-134`); this crate's
+// `ntk_rpc::RpcHandler` seam does not expose the peer socket address (and
+// `FakeRpcClient` has no socket at all), so the caller's NIC identity is
+// carried explicitly instead — see `src/wire.rs` for the full rationale.
+message NicRef {
+  string mac = 1;
+  string nic_addr = 2;
+}

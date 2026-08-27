@@ -1,0 +1,37 @@
+[package]
+name = "ntk-peerservices"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Generic distributed-service substrate (DHT-over-topology) that Coordinator and ANDNA register on."
+
+[lints]
+workspace = true
+
+[dependencies]
+ntk-common.workspace = true
+ntk-proto.workspace = true
+ntk-rpc.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+tokio-util.workspace = true
+futures.workspace = true
+prost.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ed25519-dalek.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+protox.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "time", "test-util"] }
+
+[[bench]]
+name = "approximate"
+harness = false

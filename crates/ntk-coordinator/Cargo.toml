@@ -1,0 +1,32 @@
+[package]
+name = "ntk-coordinator"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Coordinator: per-level reserved-position allocator and DHT-hash-based election, implemented as a PeerService over ntk-peerservices."
+
+[lints]
+workspace = true
+
+[dependencies]
+ntk-common.workspace = true
+ntk-proto.workspace = true
+ntk-rpc.workspace = true
+ntk-peerservices.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+tokio-util.workspace = true
+futures.workspace = true
+prost.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+protox.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "time", "test-util"] }

@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+// Wire types for the PeerServices module (the generic DHT-over-topology substrate,
+// research/notes/02-vala-services-daemon.md §3; RFC 0014). These travel inside
+// `ntk_proto::v1::TypedValue` payloads on the `MethodCall::peers_*` arms defined in
+// `ntk-proto/proto/ntk.proto` — that schema already carries `msg_id`/`p_id`/`e_lvl` as
+// first-class fields for the shared-shape args messages (`PeersMsgIdRespondantArgs` &c.);
+// this file only defines the module-specific payload types those `TypedValue` fields
+// wrap: node/g-node position tuples and the participation-map gossip snapshot.
+package ntk.peerservices.v1;
+
+import "domain.proto";
+import "ntk.proto";
+
+// A fully-resolved node position, one entry per level from 0 up to (but not including) `top`.
+// Rust analogue of upstream's `PeerTupleNode{tuple, top}`
+// (research/impl/vala/peerservices/serializables.vala:23-111). Always spans every level below
+// `top` — a real node's position is defined everywhere below the g-node it lives in.
+message PeerTupleNode {
+  repeated uint32 pos = 1;
+}
+
+// A g-node position spanning levels `(top - len(pos))` (inclusive) to `top - 1`. Rust analogue
+// of upstream's `PeerTupleGNode{tuple, top}`
+// (research/impl/vala/peerservices/serializables.vala:113-207); `level = top - len(pos)` is
+// computed, not stored, mirroring the upstream getter.
+message PeerTupleGNode {
+  repeated uint32 pos = 1;
+  uint32 top = 2;
+}
+
+// Hop-by-hop routing envelope for `contact_peer`'s recursive forwarding
+// (research/impl/vala/peerservices/serializables.vala:209-360, message_routing.vala:716-956).
+// `x_macron` is absent exactly when the target level is 0 (the search has reached the innermost
+// g-node and the client's own position no longer disambiguates anything below it).
+message PeerMessageForwarder {
+  uint32 inside_level = 1;
+  PeerTupleNode n = 2;
+  optional PeerTupleNode x_macron = 3;
+  uint32 lvl = 4;
+  uint32 pos = 5;
+  int32 p_id = 6;
+  int32 msg_id = 7;
+  repeated PeerTupleGNode exclude_tuple_list = 8;
+  repeated PeerTupleGNode non_participant_tuple_list = 9;
+  // Origin-auth: the true originator's signature over its claimed `n` (client_tuple), `p_id`,
+  // and (once fetched via GetRequest) the request payload — see
+  // `ntk_peerservices::routing::origin_auth`'s module doc. Unset when the originator has no
+  // configured signing key (the vanilla-reference default); relays forward it opaquely,
+  // verbatim, and never verify it themselves — only the servant does, once, after fetching the
+  // request. Reuses `ntk.rpc.v1.Auth` rather than redeclaring its 3 fields, exactly like
+  // `ntk-coordinator/proto/coordinator.proto` already reuses `ntk.rpc.v1.TypedValue`.
+  ntk.rpc.v1.Auth auth = 10;
+}
+
+// One service's known-participant g-nodes (research/impl/vala/peerservices/serializables.vala:362-424).
+// Reuses the shared wire `HCoord` rather than redeclaring level/pos fields.
+message PeerParticipantMap {
+  repeated ntk.domain.v1.HCoord participant_list = 1;
+}
+
+// The full per-service participation snapshot gossiped between neighbors
+// (research/impl/vala/peerservices/serializables.vala:426-519; map_handler.vala). `my_pos` is
+// intentionally not validated against g-node sizes on decode — the sender may be a virtual
+// (mid-migration) node, exactly as upstream's own `check_valid` comment notes.
+message PeerParticipantSet {
+  uint32 retrieved_below_level = 1;
+  repeated uint32 my_pos = 2;
+  map<int32, PeerParticipantMap> participant_set = 3;
+}

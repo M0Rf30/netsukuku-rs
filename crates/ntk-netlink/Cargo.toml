@@ -1,0 +1,24 @@
+[package]
+name = "ntk-netlink"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The kernel seam for netsukuku-rs: address/route/rule/link traits, RealNetlink over rtnetlink, and FakeNetlink with an ordered operation log for tests."
+
+[lints]
+workspace = true
+
+[dependencies]
+rtnetlink.workspace = true
+netlink-packet-route.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "net", "sync"] }
+futures.workspace = true
+nix = { workspace = true, features = ["sched", "net"] }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time"] }

@@ -1,0 +1,253 @@
+//! [`LinkId`]: the one canonical arc identifier `ntkd` mints per physically-discovered
+//! neighborhood link, and [`LinkRegistry`], the table mapping it to every module's own
+//! opaque per-arc handle.
+//!
+//! Four different crates each carry their own opaque arc identifier
+//! (`ntk_neighborhood::Arc::neighbour_mac`, `ntk_qspn::ArcId` — minted *by* qspn on
+//! `add_arc` —, `ntk_hooking::ArcId`, `ntk_identities::ArcId` — both "minted and owned by
+//! the daemon"). The composition root is exactly the place that must reconcile them: this
+//! registry keys everything by a link's stable `neighbour_mac` and hands out one monotonic
+//! [`LinkId`] per link, reused verbatim as the raw value of both `ntk_hooking::ArcId` and
+//! `ntk_identities::ArcId` (both are bare `pub struct ArcId(pub u64)`, "opaque handle the
+//! daemon assigns"), while separately remembering whatever [`ntk_qspn::ArcId`] `QspnHandle::add_arc`
+//! returned for that same link.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// The one canonical per-link identifier this daemon mints, reused as the raw value of both
+/// [`ntk_hooking::ArcId`] and [`ntk_identities::ArcId`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LinkId(pub u64);
+
+/// `type_tag` for [`encode_caller_id`]'s `TypedValue` encoding.
+const NEIGHBOUR_ID_TAG: &str = "ntkd.NeighbourId";
+
+impl LinkId {
+    #[must_use]
+    pub fn hooking(self) -> ntk_hooking::ArcId {
+        ntk_hooking::ArcId(self.0)
+    }
+
+    #[must_use]
+    pub fn identities(self) -> ntk_identities::ArcId {
+        ntk_identities::ArcId(self.0)
+    }
+}
+
+/// Encodes `id` — this identity's own stable [`ntk_neighborhood::NodeId`]
+/// (`NeighborhoodConfig::my_id`, constant for the process's whole lifetime) — as a
+/// `CallerContext.src_nic` `TypedValue`, so the peer's [`LinkRegistry::link_for_caller`] can
+/// resolve it back to *its own* [`LinkId`] for the arc.
+///
+/// Neither [`LinkId`] nor a MAC is used for this. [`LinkId`]: each node mints its own `LinkId`s
+/// from an independent local counter starting at 1, so two different nodes' `LinkId`s routinely
+/// collide in raw value while naming two completely unrelated arcs (e.g. two different nodes'
+/// very first discovered link both being `LinkId(1)`) — decoding a peer-minted `LinkId` against
+/// this node's own registry, as an earlier version of this module did, silently resolves to
+/// whichever *local* arc happens to share that number, corrupting inbound routing for any node
+/// with more than one arc. A MAC would work in principle (every node already observes its
+/// peers' MACs via Neighborhood discovery) but recomputing "my own MAC for this interface" here
+/// would have to reproduce whatever value the caller of [`crate::node::transport::start`]
+/// originally handed `Manager::start_monitor` — a value this module has no reliable way to
+/// reconstruct independently. `NodeId` has neither problem: Neighborhood discovery already
+/// relies on it being globally distinguishing (`ntk_neighborhood::manager`'s own arc-identity
+/// checks key off it), and it is one constant this identity already owns for its whole
+/// lifetime, not a per-interface value to recompute.
+#[must_use]
+pub fn encode_caller_id(id: ntk_neighborhood::NodeId) -> ntk_proto::v1::TypedValue {
+    ntk_proto::v1::TypedValue::new(NEIGHBOUR_ID_TAG, id.get().to_be_bytes().to_vec())
+}
+
+fn decode_caller_id(tv: &ntk_proto::v1::TypedValue) -> Option<ntk_neighborhood::NodeId> {
+    if tv.type_tag != NEIGHBOUR_ID_TAG {
+        return None;
+    }
+    let raw = i32::from_be_bytes(tv.payload.as_slice().try_into().ok()?);
+    ntk_neighborhood::NodeId::from_raw(raw).ok()
+}
+
+/// Everything the daemon knows about one discovered link, indexed both by its stable
+/// `neighbour_mac` key and by [`LinkId`].
+#[derive(Debug, Clone)]
+pub struct LinkEntry {
+    pub id: LinkId,
+    pub mac: String,
+    pub dev: String,
+    /// This arc's peer's own stable Neighborhood discovery id
+    /// (`ntk_neighborhood::Arc::neighbour_id`) — see [`encode_caller_id`]'s doc for why inbound
+    /// calls are resolved through this, not through a peer-minted [`LinkId`].
+    pub neighbour_id: ntk_neighborhood::NodeId,
+    pub qspn_arc: Option<ntk_qspn::ArcId>,
+}
+
+/// Single-owner map from a neighborhood arc's stable key (`neighbour_mac`) to the canonical
+/// [`LinkId`] the rest of the daemon uses, plus the reverse lookups each adapter needs.
+///
+/// A plain `Mutex`-guarded table, not an actor: every access is a short, synchronous
+/// map lookup/insert, never an await point, so a `Mutex` never risks holding a lock across
+/// an outbound RPC (`research/notes/06-rust-stack.md` §Concurrency's actual concern).
+#[derive(Debug, Default)]
+pub struct LinkRegistry {
+    next: AtomicU64,
+    by_mac: Mutex<HashMap<String, LinkEntry>>,
+    by_id: Mutex<HashMap<LinkId, String>>,
+}
+
+impl LinkRegistry {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the existing [`LinkId`] for `mac`, or mints and records a fresh one for the arc
+    /// to `neighbour_id`.
+    pub fn link_for_neighbour(
+        &self,
+        neighbour_id: ntk_neighborhood::NodeId,
+        mac: &str,
+        dev: &str,
+    ) -> LinkId {
+        let mut by_mac = self.by_mac.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = by_mac.get(mac) {
+            return entry.id;
+        }
+        let id = LinkId(self.next.fetch_add(1, Ordering::Relaxed));
+        by_mac.insert(
+            mac.to_owned(),
+            LinkEntry {
+                id,
+                mac: mac.to_owned(),
+                dev: dev.to_owned(),
+                neighbour_id,
+                qspn_arc: None,
+            },
+        );
+        self.by_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, mac.to_owned());
+        id
+    }
+
+    /// Resolves an inbound `CallerContext.src_nic` (see [`encode_caller_id`]'s doc) to this
+    /// node's own [`LinkId`] for the arc it names, if known.
+    #[must_use]
+    pub fn link_for_caller(&self, tv: &ntk_proto::v1::TypedValue) -> Option<LinkId> {
+        let id = decode_caller_id(tv)?;
+        self.by_mac
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .find(|e| e.neighbour_id == id)
+            .map(|e| e.id)
+    }
+
+    /// Records the [`ntk_qspn::ArcId`] `QspnHandle::add_arc` returned for `link`.
+    ///
+    /// # Invariant this relies on: at most one live `ArcId` per `LinkId`
+    /// This unconditionally *overwrites* `link`'s previous `qspn_arc`, never calling
+    /// `qspn.remove_arc` on whatever was there before — correct only because
+    /// `crate::node::lifecycle::on_neighborhood_event`'s `ArcAdded` arm (this method's sole
+    /// caller, alongside `crate::node::lifecycle::reattach_known_arcs`) is only ever driven
+    /// by `ntk_neighborhood::Event::ArcAdded`, and that event is now guaranteed to fire at
+    /// most once per arc's established lifetime (`ntk_neighborhood::manager::Manager::export_arc`'s
+    /// own doc: its two callers — the peer's inbound negotiation and this node's outbound
+    /// one — legitimately race, and the fix there is exactly to make a second racing call a
+    /// no-op instead of a second export). Before that fix, a duplicate `ArcAdded` for one
+    /// physical arc silently orphaned the previous `qspn_arc` here — never removed from
+    /// qspn, just forgotten by this registry — leaving qspn with two live `ArcId`s for one
+    /// neighbour (confirmed: a single-neighbour leaf's own route ending up a two-nexthop
+    /// `Multipath` naming the identical gateway twice, and a real triangle topology's node
+    /// admitting four `ArcId`s for two physical neighbours).
+    pub fn set_qspn_arc(&self, link: LinkId, arc: ntk_qspn::ArcId) {
+        if let Some(mac) = self
+            .by_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&link)
+            && let Some(entry) = self
+                .by_mac
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_mut(mac)
+        {
+            entry.qspn_arc = Some(arc);
+        }
+    }
+
+    #[must_use]
+    pub fn qspn_arc_of(&self, link: LinkId) -> Option<ntk_qspn::ArcId> {
+        let mac = self
+            .by_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&link)?
+            .clone();
+        self.by_mac
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&mac)
+            .and_then(|e| e.qspn_arc)
+    }
+
+    #[must_use]
+    pub fn link_of_qspn_arc(&self, arc: ntk_qspn::ArcId) -> Option<LinkId> {
+        self.by_mac
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .find(|e| e.qspn_arc == Some(arc))
+            .map(|e| e.id)
+    }
+
+    #[must_use]
+    pub fn entry(&self, link: LinkId) -> Option<LinkEntry> {
+        let mac = self
+            .by_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&link)?
+            .clone();
+        self.by_mac
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&mac)
+            .cloned()
+    }
+
+    #[must_use]
+    pub fn link_for_dev_and_mac(&self, mac: &str) -> Option<LinkId> {
+        self.by_mac
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(mac)
+            .map(|e| e.id)
+    }
+
+    pub fn remove(&self, mac: &str) -> Option<LinkEntry> {
+        let entry = self
+            .by_mac
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(mac);
+        if let Some(entry) = &entry {
+            self.by_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&entry.id);
+        }
+        entry
+    }
+
+    #[must_use]
+    pub fn all(&self) -> Vec<LinkEntry> {
+        self.by_mac
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect()
+    }
+}
