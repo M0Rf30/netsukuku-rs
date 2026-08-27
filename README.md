@@ -151,16 +151,39 @@ See `ntkd::kernel::config::NtkdConfig` for the config file shape (topology `gsiz
   built as two `PeerService` instances registered on the generic `ntk-peerservices` hierarchical DHT
   (NTK_RFC 0014). Coordinator is built the same way. This is a direct port of the Vala-era
   generalization, not a Rust-specific choice.
-- **No transport crypto.** `ntk-rpc`'s `TcpRpcClient`/`TcpServer` speak the wire protocol in the
-  clear; there is no TLS/noise layer anywhere in the stack. Node identity/ownership where it matters
-  (ANDNA hostname registration) is authenticated with ed25519 signatures at the application layer, not
-  the transport.
+- **No transport crypto; authentication is opt-in at the application layer.** `ntk-rpc`'s
+  `TcpRpcClient`/`TcpServer` speak the wire protocol in the clear — there is no TLS/Noise layer
+  anywhere in the stack. What exists instead is ed25519 signing in `ntk-proto::auth`, over a
+  domain-separated, length-framed canonical encoding: ANDNA hostname ownership, per-arc peer
+  identity (pinned on first contact, as ANDNA pins a hostname's owner key), and a request's
+  origin assertion, verified once at the servant rather than at every relay because verification
+  costs ~26.8 µs against a 503 ns unauthenticated round trip. All of it is off by default
+  (`require_auth = false`), so the default build stays a faithful reference: the `Auth` field is
+  an optional protobuf field, which makes carrying it wire-compatible and only *enforcing* it a
+  break.
 - Anything that must be unique across the whole network — not just locally — derives from
   `ntk_neighborhood::NodeId`. Three separate bugs in this codebase came from treating a node-local
   value (an arc id, a link id) as if it were globally meaningful; `NodeId` is the one type that
   actually is.
 
 ## 4. What is deliberately not implemented
+
+**On parity.** The normative baseline for this port is Luca Dionisi's Vala rewrite, not the 2005
+C daemon and not the full NTK_RFC wishlist. Measured against that baseline the port is
+essentially complete, and the list below deliberately mixes three different kinds of absence, so
+read the reason rather than counting the bullets:
+
+- *Not in the normative upstream either* — IPv6 (never implemented in any Netsukuku), and the
+  unported Alpt-era RFC ideas: IGS (0003), bandwidth cost (0002), the counter-gnode pubkey fix
+  (0007), Viphilama (0010), Carciofo (0011), Net Split (0012), Local ANDNA (0015).
+  `research/notes/03-specs-and-rfcs.md` records that none of these has a found vala-era
+  replacement. ANDNA is the inverse case: upstream's is a 13-line stub, so this port is *ahead*
+  of the reference there rather than behind it.
+- *Present in the legacy C daemon, deliberately dropped* — everything reachable only through
+  `iptables`. That follows from the no-subprocess rule, which is a purpose of this port, not an
+  omission from it.
+- *A real gap against the reference* — exactly one: the second protocol stack after a g-node
+  migration.
 
 - **iptables/NAT, and everything downstream of it**: the anonymizing address kind and `subnetlevel`
   (autonomous-subnet/NAT boundary) from the legacy addressing scheme. The legacy daemon implements
@@ -170,10 +193,15 @@ See `ntkd::kernel::config::NtkdConfig` for the config file shape (topology `gsiz
 - **IPv6.** Every address type in the workspace (`ntk-netlink::Ipv4Net`, the netlink `RouteSpec`/
   `Nexthop`/`AddressEntry` types, `NETSUKUKU_ADDRESS_SPACE = 10.0.0.0/8`) is IPv4-only. The legacy C
   daemon never implemented IPv6 either; nothing in this port revisits that.
-- **Live g-node migration.** `ntk-identities` implements the full duplication/migration handshake
-  (`Handle::prepare_migration`/`migrate`, pseudo-device naming) that this feature needs, but it is not
-  wired into `ntkd`'s runtime — the daemon does not currently drive a node through a migration. The
-  crate exists and is tested in isolation; the integration is the gap.
+- **The second protocol stack after a g-node migration.** The migration itself is wired and does
+  run: `ntk_hooking::HookingEvent::DoPrepareMigration`/`DoFinishMigration` drive
+  `ntk_identities::Handle::prepare_migration`/`migrate`, and `ntkd`'s own lifecycle calls them
+  (`crates/ntkd/src/node/lifecycle.rs`). What is missing is narrower: the daemon does not spin up
+  a second full protocol stack for the identity `migrate` resolves, because it keeps one live
+  dispatcher target per process and so can never have two identities simultaneously reachable.
+  A fully faithful port would spawn that second stack the moment `migrate` returns its id; the
+  reasoning is recorded at `crates/ntkd/src/node/lifecycle.rs:137-149`, kept out of this pass and
+  reported rather than half-built.
 - **ANDNA is a reconstruction, not a port.** Upstream's own Vala source, `andna.vala`, is a 13-line
   stub (`AndnaManager.init` and nothing else — no registration, no resolution, no counter/anti-abuse
   logic); `serializables.vala` for the module is empty. `ntk-andna`'s design is derived from the
