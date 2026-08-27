@@ -8,10 +8,17 @@ name: Dependabot auto-merge
 # │ has no protection rule (or ruleset) marking CI as required, GitHub has nothing to wait    │
 # │ for and merges IMMEDIATELY -- turning this into "merge every dependency bump unread".     │
 # │                                                                                            │
-# │ So, on `main`, both of these must be set or this workflow is unsafe:                       │
-# │   - Settings -> General -> "Allow auto-merge" enabled                                      │
-# │   - A branch protection rule / ruleset requiring the CI checks                             │
-# │     ("build, test, lint, fmt" and "privileged tests") to pass                              │
+# │ This IS configured on `main` as of 0.1.2. If it is ever removed, this workflow silently   │
+# │ stops being safe -- there is no error, just unreviewed merges. Current state:              │
+# │   - "Allow auto-merge": enabled                                                            │
+# │   - Branch protection on `main` requiring all three PR checks:                             │
+# │       "build, test, lint, fmt"                                                             │
+# │       "privileged tests (real netlink, real network namespaces)"                           │
+# │       "advisories, licenses, bans, sources"                                                │
+# │   - `enforce_admins` is deliberately OFF, so a maintainer can still push to `main`         │
+# │     directly; Dependabot is not an admin, so its PRs still gate on the checks above.       │
+# │   - `strict` is OFF on purpose: requiring every PR to be rebased onto the newest `main`    │
+# │     would force-update each Dependabot branch on every unrelated push, for no safety gain. │
 # └────────────────────────────────────────────────────────────────────────────────────────────┘
 #
 # Second hazard, specific to Rust: for a `0.x` crate, cargo treats `0.7 -> 0.8` as BREAKING, but
