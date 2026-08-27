@@ -5,13 +5,14 @@
 //! spawned generically), and wires everything into [`crate::node::lifecycle::run`].
 
 use std::collections::HashMap;
+use std::io;
 use std::sync::Arc;
 
 use ntk_neighborhood::{
     IcmpRttProbe, LocalNic, NeighborhoodConfig, NeighborhoodRpcHandler, NeighborhoodTiming, NodeId,
 };
 use ntk_netlink::RealNetlink;
-use ntk_rpc::{TcpServer, UdpBroadcaster};
+use ntk_rpc::{RpcError, TcpServer, UdpBroadcaster};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -23,6 +24,44 @@ use crate::node::lifecycle::{
 use crate::node::peers::PeerLinks;
 use crate::node::registry::LinkRegistry;
 use crate::node::stubs::NeighborhoodStubFactoryAdapter;
+
+/// Turns a failed socket-bind syscall into a message naming the transport, the device (if any),
+/// and the port — and, when the kernel refused the bind because the port is privileged, naming
+/// the exact capability that fixes it. The one place the "was this EACCES/EPERM binding a port
+/// below 1024" branch lives, so the UDP and TCP bind sites in [`start`] cannot drift apart.
+///
+/// Deliberately does not pre-check `CAP_NET_BIND_SERVICE` or `port < 1024` before calling
+/// `bind`: the kernel, not this function, is the authority on whether an unprivileged process
+/// may claim a given port right now. `net.ipv4.ip_unprivileged_port_start` can be lowered below
+/// `port` (or the capability granted some other way, e.g. running as root), in which case
+/// binding port 269 unprivileged legitimately succeeds — a pre-check keyed purely on
+/// `port < 1024` would then refuse to start even though the kernel would have allowed it.
+/// Interpreting the real errno of an actual failed bind can never be wrong that way.
+fn describe_bind_failure(
+    transport: &str,
+    device: Option<&str>,
+    port: u16,
+    source: &io::Error,
+) -> String {
+    let target = match device {
+        Some(dev) => format!("{transport} socket on {dev:?} port {port}"),
+        None => format!("{transport} socket on port {port}"),
+    };
+    // `ErrorKind::PermissionDenied` covers EACCES; EPERM (raw os error 1) is included
+    // explicitly since some kernels/LSMs report a privileged-port bind refusal that way and
+    // std does not always classify it as `PermissionDenied`.
+    let is_permission_denied = source.kind() == io::ErrorKind::PermissionDenied
+        || matches!(source.raw_os_error(), Some(1) | Some(13));
+    if is_permission_denied && port < 1024 {
+        format!(
+            "failed to bind {target}: {source} — ports below 1024 are privileged; grant \
+             CAP_NET_BIND_SERVICE (AmbientCapabilities in the systemd unit) or set a port >= \
+             1024 in the ntkd config"
+        )
+    } else {
+        format!("failed to bind {target}: {source}")
+    }
+}
 
 /// Per-identity cap on exported arcs. No config knob exists for this in the batch contract's
 /// `NtkdConfig` (gsizes/nics/port only); a generous fixed default is used instead of inventing
@@ -43,10 +82,24 @@ pub async fn start(
     let registry = Arc::new(LinkRegistry::new());
     let links = Arc::new(PeerLinks::new());
 
+    let netlink = RealNetlink::new()?;
+    crate::kernel::preflight::check_nics(&netlink, nics).await?;
+
     let mut broadcasters = HashMap::new();
     for nic in nics {
-        let broadcaster = Arc::new(UdpBroadcaster::bind(Some(nic), config.port(), 1 << 16)?);
-        broadcasters.insert(nic.clone(), broadcaster);
+        let broadcaster = match UdpBroadcaster::bind(Some(nic), config.port(), 1 << 16) {
+            Ok(broadcaster) => broadcaster,
+            Err(RpcError::Io(source)) => {
+                return Err(anyhow::anyhow!(describe_bind_failure(
+                    "UDP broadcast",
+                    Some(nic),
+                    config.port(),
+                    &source
+                )));
+            }
+            Err(other) => return Err(other.into()),
+        };
+        broadcasters.insert(nic.clone(), Arc::new(broadcaster));
     }
 
     let neighborhood_stub_factory = Arc::new(NeighborhoodStubFactoryAdapter {
@@ -62,7 +115,7 @@ pub async fn start(
     let neighborhood_config = NeighborhoodConfig {
         my_id,
         max_arcs: MAX_ARCS,
-        kernel: RealNetlink::new()?,
+        kernel: netlink,
         stub_factory: neighborhood_stub_factory,
         ip_route_manager: Arc::new(RealIpRouteManager {
             kernel: RealNetlink::new()?,
@@ -106,7 +159,18 @@ pub async fn start(
     )
     .await?;
 
-    let server = TcpServer::bind(format!("0.0.0.0:{}", config.port()).parse()?, 1 << 20).await?;
+    let server = match TcpServer::bind(format!("0.0.0.0:{}", config.port()).parse()?, 1 << 20).await
+    {
+        Ok(server) => server,
+        Err(source) => {
+            return Err(anyhow::anyhow!(describe_bind_failure(
+                "TCP",
+                None,
+                config.port(),
+                &source
+            )));
+        }
+    };
     let dispatcher = started.dispatcher.clone();
     let server_cancel = cancel.child_token();
     tasks.spawn(async move {
@@ -125,4 +189,55 @@ pub async fn start(
     }
 
     Ok(started)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::describe_bind_failure;
+    use std::io;
+
+    fn permission_denied() -> io::Error {
+        io::Error::from_raw_os_error(13) // EACCES, what an unprivileged bind of port 269 returns
+    }
+
+    #[test]
+    fn permission_denied_on_a_privileged_port_names_cap_net_bind_service() {
+        let message = describe_bind_failure(
+            "UDP broadcast",
+            Some("enp0s31f6"),
+            269,
+            &permission_denied(),
+        );
+        assert!(
+            message.contains("269"),
+            "message must name the port: {message}"
+        );
+        assert!(
+            message.contains("CAP_NET_BIND_SERVICE"),
+            "message must name the capability: {message}"
+        );
+        assert!(
+            message.contains(">= 1024"),
+            "message must offer the non-privileged-port alternative: {message}"
+        );
+    }
+
+    #[test]
+    fn permission_denied_on_a_non_privileged_port_does_not_mention_the_capability() {
+        let message = describe_bind_failure(
+            "UDP broadcast",
+            Some("enp0s31f6"),
+            26900,
+            &permission_denied(),
+        );
+        assert!(
+            !message.contains("CAP_NET_BIND_SERVICE"),
+            "a non-privileged port's EACCES is not the privileged-port trap, so the capability \
+             hint would mislead: {message}"
+        );
+        assert!(
+            message.contains("26900"),
+            "message must still name the port: {message}"
+        );
+    }
 }
