@@ -233,19 +233,24 @@ jobs:
       # silently fell through to the host's glibc `cc`) breaks `FROM scratch` containers and
       # the OpenWrt/Arch `-bin` payloads, both of which assume no runtime linker is present.
       # Caught here, at build time, instead of downstream in a container that just won't start.
+      #
+      # The test is the presence of an ELF INTERP segment (the dynamic loader), NOT a string
+      # match on `file` output. An earlier version grepped for "statically linked" and rejected a
+      # perfectly good binary that `file` described as "static-pie linked" — the phrasing varies
+      # by `file` version and by architecture (the aarch64 leg passed while x86_64 failed on the
+      # exact same kind of binary). INTERP is unambiguous: a static binary has none, a dynamic
+      # one always has exactly one naming its loader.
       - name: verify static linking
         run: |
           set -euo pipefail
           bin="target/${{ matrix.target }}/dist/ntkd"
-          info=$(file "$bin")
-          echo "$info"
-          case "$info" in
-            *"statically linked"*) ;;
-            *)
-              echo "::error::${bin} is not statically linked: ${info}"
-              exit 1
-              ;;
-          esac
+          file "$bin"
+          if readelf -l "$bin" | grep -q INTERP; then
+            echo "::error::${bin} requires a dynamic loader; it is not static"
+            readelf -l "$bin" | grep -A1 INTERP
+            exit 1
+          fi
+          echo "no INTERP segment: statically linked"
 
       - name: package tarball
         run: |
