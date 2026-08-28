@@ -116,7 +116,7 @@ required anywhere.
 
 ### Privileged test tier
 
-536 tests pass in the `cargo test --workspace` run above. 24 more, across seven files, need real
+545 tests pass in the `cargo test --workspace` run above. 24 more, across seven files, need real
 kernel or root privileges and are `#[ignore]`d — not part of that run:
 
 | File | Ignored | Needs |
@@ -124,7 +124,7 @@ kernel or root privileges and are `#[ignore]`d — not part of that run:
 | `crates/ntk-neighborhood/src/rtt.rs` | 1 | `CAP_NET_RAW` or `ping_group_range` (ICMP socket) |
 | `crates/ntk-netlink/tests/real_netlink.rs` | 6 | `CAP_NET_ADMIN` |
 | `crates/ntkd/tests/andna_e2e.rs` | 1 | `CAP_NET_ADMIN` over its own network namespaces |
-| `crates/ntkd/tests/mesh.rs` | 7 | `CAP_NET_ADMIN` over its own network namespaces — **5 of these currently fail; see §6 Maturity** |
+| `crates/ntkd/tests/mesh.rs` | 7 | `CAP_NET_ADMIN` over its own network namespaces — **3 of these currently fail; see §6 Maturity** |
 | `crates/ntkd/tests/multi_nic_relay.rs` | 1 | `CAP_NET_ADMIN` over its own network namespaces |
 | `crates/ntkd/tests/multi_node.rs` | 2 | `CAP_NET_ADMIN` over its own network namespaces |
 | `crates/ntkd/tests/wireless.rs` | 6 | `mac80211_hwsim` loaded; 5 of the 6 also need real root |
@@ -292,7 +292,7 @@ routing permanently, and a missing bootstrap-phase gate letting a still-hooking 
 premature routing state into the network — were real gaps too, until this release: both are
 fixed in 0.1.3 (`CHANGELOG.md`), not carried in the list above.
 
-**Maturity.** 536 unit/property tests pass in the default `cargo test --workspace` run; 24 more
+**Maturity.** 545 unit/property tests pass in the default `cargo test --workspace` run; 24 more
 are `#[ignore]`d because they need real kernel/root privileges (§4 lists all seven files and
 their invocations). Two real `ntkd` daemons, each in its own network namespace joined by a real
 veth pair, do register and resolve an ANDNA hostname across that network —
@@ -300,28 +300,45 @@ veth pair, do register and resolve an ANDNA hostname across that network —
 (`crates/ntkd/tests/andna_e2e.rs`) passes in 0.36s run under `unshare --net --map-root-user`.
 `multi_node` (2 tests) and `multi_nic_relay` (1) also pass there.
 
-**But `crates/ntkd/tests/mesh.rs` does not.** Run serially under
+**`crates/ntkd/tests/mesh.rs` is still partly red.** Run serially under
 `unshare --net --map-root-user -- cargo test -p ntkd --test mesh -- --ignored --test-threads=1`,
-it reports 2 passed / 5 failed in ~500s. Four fail deterministically across repeated runs:
-`partition_clean_severance_drops_exactly_the_unreachable_destinations`,
-`partition_signals_split_only_after_the_documented_debounce`,
-`two_level_gnode_migrates_as_a_unit_into_merged_network`, and
-`two_star_groups_merge_into_one_network` — that is partition detection, g-node migration, and
-network merge, i.e. the protocol's least-exercised and highest-consequence paths. Two more
-(`chain_of_four_converges_to_exact_multi_hop_routes`,
-`level1_destination_installs_correct_cidr_route`) are flaky: they swap pass/fail between
-otherwise identical runs. Only `isolated_merge_migrates_a_preformed_losing_gnode_as_a_unit`
-passes reliably.
+it reports **4 passed / 3 failed** in ~630s. 0.1.3 took it there from 2 passed / 5 failed by
+fixing four root causes (`CHANGELOG.md`); what remains is three tests and two causes, both
+diagnosed:
 
-These failures predate 0.1.3 — verified by re-running the same suite with this release's two
-fixes stashed out, which produces the same 2/5 split. They are invisible in CI because the whole
-tier is `#[ignore]`d and the privileged CI job has never been observed to pass (`AGENTS.md`).
-They are left red rather than weakened, per this project's convention, and are not yet diagnosed.
+- `partition_clean_severance_drops_exactly_the_unreachable_destinations` now converges before the
+  sever and fails on the withdrawal after it: `node1: did not drop exactly the unreachable
+  other-slot destination within 20s`. QSPN's implicit withdrawal is **not** at fault — it was
+  reviewed line-by-line against `research/impl/vala/qspn/qspn.vala:1074-1232` and `:1334-1816` and
+  found faithful. The defect is *over*-withdrawal one layer down: a node tears down a healthy arc
+  to its own sibling ~5.3s after an unrelated arc is severed, on a clean local EOF, while the
+  peer's server log shows it accepted and answered that very call. That points at the
+  one-shared-TCP-connection-per-neighbour multiplexing in `crates/ntkd/src/node/stubs.rs` and
+  `crates/ntk-neighborhood/src/manager.rs`, where tearing down one arc appears to take another
+  arc's connection with it. Not yet pinned to a line: reproducing it needs an in-process test that
+  forces the interleaving deterministically, because real-kernel timing noise buries it.
+- `two_star_groups_merge_into_one_network` and
+  `two_level_gnode_migrates_as_a_unit_into_merged_network` both fail at the same shared assertion,
+  and the reason is the migration gap already listed above. `a0` holds a third, stale level-0
+  destination — a sibling's *pre-migration* position — that is never withdrawn, so its route set
+  stays one entry too large forever. Nothing broadcasts "this identity has retired": upstream does
+  it with the connectivity identity (`qspn.vala:2226-2505`) this port does not implement. So these
+  two tests are gated on that gap, not on a separate bug.
 
-So: the single-process and two-node paths are tested and pass; multi-hop convergence, partition,
-migration, and merge are **not** demonstrated to work on a real kernel. No deployment beyond the
-test harness has been run. This is not battle-tested, and §6's gap list is a floor, not a
-ceiling.
+Position collisions were ruled out as a cause, not assumed away: `derive_initial_position` is a
+function of `NodeId` alone, and both `NodeId(601)`/`NodeId(603)` and `NodeId(601)`/`NodeId(604)`
+collide under `Topology([8])`. That is by design — negotiated positions are collision-free by
+construction (`crates/ntk-coordinator/src/actor.rs:94`), and a colliding *bootstrap* position is
+resolved by arc retry. Both paths were verified working in live traces.
+
+These failures predate 0.1.3, verified by re-running the suite with this release's fixes stashed
+out. They are invisible in CI because the whole tier is `#[ignore]`d and the privileged CI job has
+never been observed to pass (`AGENTS.md`). They are left red rather than weakened.
+
+So: single-process, two-node, multi-hop chain, level-1 aggregation and partition *detection* are
+demonstrated on a real kernel. Partition *withdrawal* and cross-group merge are not. No deployment
+beyond the test harness has been run. This is not battle-tested, and §6's gap list is a floor, not
+a ceiling.
 
 ## 7. Research corpus
 

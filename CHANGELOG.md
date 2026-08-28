@@ -68,21 +68,33 @@ pre-check could refuse a bind the kernel would in fact have allowed.
 
 ### Known broken
 
-- **5 of the 7 real-kernel `mesh.rs` tests fail, and this release does not fix them.** Run
-  serially under `unshare --net --map-root-user -- cargo test -p ntkd --test mesh -- --ignored
-  --test-threads=1`, the suite reports 2 passed / 5 failed in ~500s. Four fail deterministically —
-  `partition_clean_severance_drops_exactly_the_unreachable_destinations`,
-  `partition_signals_split_only_after_the_documented_debounce`,
-  `two_level_gnode_migrates_as_a_unit_into_merged_network`,
-  `two_star_groups_merge_into_one_network` — covering partition detection, g-node migration and
-  network merge. Two more (`chain_of_four_converges_to_exact_multi_hop_routes`,
-  `level1_destination_installs_correct_cidr_route`) swap pass/fail between identical runs, so they
-  are flaky rather than broken. The failures predate this release: re-running the suite with
-  0.1.3's two fixes stashed out produces the same 2/5 split, with the same two flaky tests
-  swapping. They are invisible in CI because the entire privileged tier is `#[ignore]`d and that
-  job has never been observed to pass. Left red and undiagnosed rather than weakened, per the
-  project's convention; `README.md` §6 records the same finding so a reader cannot mistake the
-  green default run for working multi-hop routing.
+- **3 of the 7 real-kernel `mesh.rs` tests still fail.** This release took the suite from 2 passed
+  / 5 failed to **4 passed / 3 failed** (serially, ~630s, under
+  `unshare --net --map-root-user -- cargo test -p ntkd --test mesh -- --ignored
+  --test-threads=1`) by fixing four root causes, listed above.
+  `chain_of_four_converges_to_exact_multi_hop_routes`,
+  `level1_destination_installs_correct_cidr_route` and
+  `partition_signals_split_only_after_the_documented_debounce` now pass. What remains is three
+  tests and two diagnosed causes:
+  - `partition_clean_severance_drops_exactly_the_unreachable_destinations` gets past pre-sever
+    convergence and fails on the withdrawal after it. QSPN's implicit withdrawal was reviewed
+    line-by-line against `qspn.vala:1074-1232` and `:1334-1816` and is faithful; the defect is
+    *over*-withdrawal below it, where tearing down one arc appears to take a healthy sibling arc's
+    shared TCP connection with it. Not yet pinned to a line — it needs an in-process test that
+    forces the interleaving, since real-kernel timing noise buries it.
+  - `two_star_groups_merge_into_one_network` and
+    `two_level_gnode_migrates_as_a_unit_into_merged_network` are gated on the migration gap this
+    release documents rather than on a separate bug: a sibling's pre-migration position is never
+    withdrawn, because nothing announces that an identity has retired. Upstream does that with the
+    connectivity identity (`qspn.vala:2226-2505`) that this port does not implement.
+  Position collisions were investigated and ruled out: negotiated positions are collision-free by
+  construction (`crates/ntk-coordinator/src/actor.rs:94`) and colliding bootstrap positions are
+  resolved by arc retry — both verified in live traces, despite `NodeId(601)`/`NodeId(603)` and
+  `NodeId(601)`/`NodeId(604)` genuinely colliding under `Topology([8])`.
+  These failures predate this release, verified by re-running with its fixes stashed out. They are
+  invisible in CI because the entire privileged tier is `#[ignore]`d and that job has never been
+  observed to pass. Left red rather than weakened, per the project's convention; `README.md` §6
+  records the same finding so a reader cannot mistake the green default run for a working mesh.
 
 ## [0.1.2]
 
