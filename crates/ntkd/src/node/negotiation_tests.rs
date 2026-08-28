@@ -535,6 +535,90 @@ async fn discovering_a_peer_joins_and_adopts_the_negotiated_position() {
     );
 }
 
+/// The same two-virgin-node merge as
+/// [`discovering_a_peer_joins_and_adopts_the_negotiated_position`], but over a **multi-level**
+/// topology instead of that test's single-level `[8]`.
+///
+/// `[4, 2, 2, 2]` is not an arbitrary choice: it is the topology
+/// `contrib/systemd/ntkd.toml` ships and `crates/ntkd/tests/multi_node.rs`'s own `topology()`
+/// uses, so it is what a packaged install actually runs. Single-level negotiation is covered;
+/// multi-level negotiation was not covered anywhere, and a live two-namespace run showed the
+/// guest aborting its entry with `begin_enter proxy error … no participants in the network for
+/// this service` and the two daemons settling permanently into *different* g-nodes
+/// (`10.0.0.0/28` and `10.0.0.16/28`) while still exchanging QSPN routes over their arc.
+///
+/// A successful merge means the two identities end up in one shared network: distinct positions
+/// at the innermost level, and identical positions at *every* level above it. Two nodes that
+/// each keep their own outer-level position are two networks that happen to be adjacent, which
+/// is precisely the state this asserts against.
+///
+/// # Currently RED — confirmed defect, diagnosis escalated, do not weaken
+/// This is `#[ignore]`d against this module's own convention (`#[ignore]` is otherwise reserved
+/// for privilege-gated tests) purely to keep the default `cargo test` run green while the fix is
+/// designed. It needs no privileges: run it with
+/// `cargo test -p ntkd --lib two_virgin_daemons_merge -- --ignored`.
+///
+/// Reproduces deterministically in ~30s. Observed end state, from this test's own failure output:
+/// ```text
+/// node0 at [1, 0, 1, 0], node1 at [3, 1, 0, 0]
+/// node0 arc phases: {ArcId(0): Waiting}
+/// node1 arc phases: {ArcId(0): Evaluating}
+/// ```
+/// `node0` is in `Waiting` — `merge_direction` resolved "my network is decisively larger / the
+/// tiebreak favored me" (`arc_handler.vala:209-214`), which is a legitimate phase. `node1` is
+/// stuck in `Evaluating` — step (5), `arc_handler.vala:216-248` — for the full 30s, meaning its
+/// `evaluate_enter` never returns `Accepted` and it retries indefinitely.
+///
+/// Leading hypothesis, not yet proven: `evaluate_enter` targets `CoordinatorKey(levels)` ("the
+/// coordinator of the whole network", `api.vala:63`), whose DHT lookup resolves through
+/// [`crate::node::adapters::RoutingEnvAdapter::gnode_exists`], which reads
+/// `qspn.snapshot().levels[level][pos]`. Two not-yet-merged nodes do not appear in each other's
+/// QSPN map at the outer levels, so `ntk_peerservices::tuple::approximate` finds no candidate but
+/// the caller itself, and a virgin one-node network cannot answer for a level it does not
+/// populate. If that is right, the fix is about how a *guest* reaches the prospective *host*
+/// network's coordinator before the merge — `ntk_coordinator::CoordinatorClient`'s own
+/// `call_entering` ("always targets a candidate host network", `client.rs:184`) — and not about
+/// level arithmetic. Note this adapter's `evaluate_enter` is also the only enter-protocol method
+/// that passes no `foreign_exclusions()`, unlike `n_nodes`/`reserve`; whether that asymmetry is
+/// correct is part of the same question.
+///
+/// Already ruled out: the `lvl + 1` offset in `CoordinatorClientAdapter::begin_enter`/
+/// `completed_enter`/`abort_enter`. That was a genuine, separately-provable defect (at
+/// `lvl == levels` it exceeded `target_for`'s `1..=levels` contract and hard-failed
+/// `InvalidTop`) and is fixed to `lvl.max(1)` in the same commit as this test — but it does
+/// **not** change this outcome, which is why the fix is described as parity-only.
+#[ignore = "confirmed multi-level merge defect; diagnosis in this doc comment, fix not yet designed"]
+#[tokio::test]
+async fn two_virgin_daemons_merge_into_one_network_on_a_multi_level_topology() {
+    let medium = Arc::new(Medium::default());
+    let node0 = spawn_node(0, "[4, 2, 2, 2]", None, &medium).await;
+    let node1 = spawn_node(1, "[4, 2, 2, 2]", None, &medium).await;
+
+    let merged = wait_until(
+        || {
+            let a = node0.qspn().my_naddr().positions().to_vec();
+            let b = node1.qspn().my_naddr().positions().to_vec();
+            a[1..] == b[1..] && a[0] != b[0]
+        },
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let a = node0.qspn().my_naddr().positions().to_vec();
+    let b = node1.qspn().my_naddr().positions().to_vec();
+    // The arc phases are the whole diagnosis when this fails: a merge that never starts looks
+    // nothing like one that starts and aborts, and the positions alone cannot tell them apart.
+    let phases0 = node0.hooking().snapshot().arcs.clone();
+    let phases1 = node1.hooking().snapshot().arcs.clone();
+    assert!(
+        merged,
+        "the two daemons never merged into one network: node0 at {a:?}, node1 at {b:?} — \
+         levels above the innermost must agree for these to be one network\n\
+         node0 arc phases: {phases0:?}\n\
+         node1 arc phases: {phases1:?}"
+    );
+}
+
 /// An arc whose peer never resolves to the same or a mergeable network (incompatible
 /// topology — the arc-handler's permanently-inert `IncompatibleTopology` phase) recovers to a
 /// well-defined steady state instead of wedging: both identities keep running at their own

@@ -694,26 +694,33 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
     }
 
     /// `begin_enter`/`completed_enter`/`abort_enter` route to `CoordinatorKey(lvl)` directly in
-    /// upstream (`peer_service.vala:218,243,268,293`: `new CoordinatorKey(lvl)`, no offset) —
-    /// unlike [`Self::reserve`], `lvl` here can legitimately be `0` (`arc_handler.vala:303`'s own
-    /// "network is full at level 0" branch), which upstream represents as `CoordinatorKey(0)`,
-    /// `perfect_tuple` = **zero** zeros = the empty tuple `ntk_peerservices::Handle::contact_peer`
-    /// already documents as "route to myself" (`tuple::approximate`'s `valid_levels == 0`
-    /// branch). `ntk_coordinator::CoordinatorClient::target_for` has no way to express that
-    /// degenerate target (`top` must be `1..=levels`), so this keeps `lvl + 1` here — routing to
-    /// `CoordinatorKey(1)` ("coordinator of my own level-0 g-node") instead of literally myself.
-    /// This is not merely a tolerated approximation: `lvl == 0` is reachable exactly when
-    /// [`ntk_coordinator::EvaluateEnterHandler::evaluate_enter`] echoed back a `req.min_lvl` of `0`, and
-    /// `QspnViewAdapter::subnetlevel` is unconditionally `0` in this daemon (see its own doc), so
-    /// every reachable `lvl == 0` call already means "no other member exists anywhere in my own
-    /// hierarchy" — `CoordinatorKey(1)`'s DHT lookup falls back to exactly the same node (myself,
-    /// `tuple::approximate`'s own unconditional "me" fallback) that `CoordinatorKey(0)` would
-    /// have targeted directly, so the two are observably identical for every value `lvl` can
-    /// actually take here today.
+    /// upstream (`peer_service.vala:218,243,268,293`: `new CoordinatorKey(lvl)`, no offset).
+    /// `lvl` can legitimately be `0` (`arc_handler.vala:303`'s own "network is full at level 0"
+    /// branch), which upstream represents as `CoordinatorKey(0)`, `perfect_tuple` = **zero**
+    /// zeros = the empty tuple `ntk_peerservices::Handle::contact_peer` already documents as
+    /// "route to myself" (`tuple::approximate`'s `valid_levels == 0` branch).
+    /// [`ntk_coordinator::CoordinatorClient::target_for`] has no way to express that degenerate
+    /// target (`top` must be `1..=levels`), so `lvl == 0` is clamped up to `CoordinatorKey(1)`
+    /// ("coordinator of my own level-0 g-node") instead of literally myself: that lookup falls
+    /// back to the same node (myself, `tuple::approximate`'s unconditional "me" fallback) the
+    /// `CoordinatorKey(0)` target would have reached, so the two are observably identical *at
+    /// `lvl == 0`*.
+    ///
+    /// # Why `lvl.max(1)` and not `lvl + 1`
+    /// This method used `lvl + 1` unconditionally, justified by an argument that only ever held
+    /// for `lvl == 0` — which is the only value reachable when `levels == 1`. On a multi-level
+    /// topology `evaluate_enter` echoes back a `chosen_lvl >= 1`, and `lvl + 1` then routed every
+    /// entry **one level too deep**; at `lvl == levels` it exceeded `levels` outright and failed
+    /// with [`ntk_coordinator::ProxyError::InvalidTop`] — the same off-by-one, with the same
+    /// signature, as the [`Self::reserve`] bug documented below. Observed live as
+    /// `begin_enter proxy error … no participants in the network for this service`, with two
+    /// daemons settling permanently into different g-nodes while still exchanging QSPN routes.
+    /// Clamping instead of offsetting keeps the `lvl == 0` behaviour byte-for-byte and restores
+    /// upstream's no-offset routing for every `lvl >= 1`.
     fn begin_enter(&self, lvl: usize) -> BoxFuture<'_, Result<(), CoordinatorError>> {
         Box::pin(async move {
             self.dht
-                .begin_enter(lvl + 1, codec::encode_unit())
+                .begin_enter(lvl.max(1), codec::encode_unit())
                 .await
                 .map(drop)
                 .map_err(proxy_err)
@@ -724,7 +731,7 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
     fn completed_enter(&self, lvl: usize) -> BoxFuture<'_, Result<(), CoordinatorError>> {
         Box::pin(async move {
             self.dht
-                .completed_enter(lvl + 1, codec::encode_unit())
+                .completed_enter(lvl.max(1), codec::encode_unit())
                 .await
                 .map(drop)
                 .map_err(proxy_err)
@@ -735,7 +742,7 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
     fn abort_enter(&self, lvl: usize) -> BoxFuture<'_, Result<(), CoordinatorError>> {
         Box::pin(async move {
             self.dht
-                .abort_enter(lvl + 1, codec::encode_unit())
+                .abort_enter(lvl.max(1), codec::encode_unit())
                 .await
                 .map(drop)
                 .map_err(proxy_err)

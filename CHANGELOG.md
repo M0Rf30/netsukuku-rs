@@ -23,6 +23,38 @@ released in lockstep, so they always share a version even when only some of them
   now an array of tables. Local-only — the status socket is not a peer-facing wire protocol, so no
   deployed node is affected.
 
+### Fixed
+
+- **The enter protocol routed one level too deep, and at the top level failed outright.**
+  `CoordinatorClientAdapter::begin_enter`/`completed_enter`/`abort_enter` passed `lvl + 1` as the
+  `CoordinatorKey`, where upstream passes `lvl` with no offset
+  (`peer_service.vala:218,243,268,293`). The offset was justified by an argument that only holds
+  at `lvl == 0` — the only value reachable when `levels == 1`, which is the only topology the
+  negotiation tests covered. On a multi-level topology `evaluate_enter` echoes back
+  `chosen_lvl >= 1`, and at `lvl == levels` the offset exceeded
+  `ntk_coordinator::CoordinatorClient::target_for`'s documented `1..=levels` contract and
+  hard-failed with `ProxyError::InvalidTop` — the same off-by-one, with the same signature, as the
+  `reserve` bug already documented in that file. Now `lvl.max(1)`, which keeps the degenerate
+  `lvl == 0` behaviour byte-for-byte and restores upstream's routing everywhere else.
+  Parity fix only: it does **not** resolve the multi-level merge failure below.
+
+### Known issues
+
+- **Two virgin daemons do not merge into one network on a multi-level topology.** New test
+  `two_virgin_daemons_merge_into_one_network_on_a_multi_level_topology`
+  (`crates/ntkd/src/node/negotiation_tests.rs`) reproduces it deterministically in ~30s with no
+  privileges, and is committed `#[ignore]`d with the full diagnosis in its doc comment rather than
+  weakened or omitted. `[4, 2, 2, 2]` — the topology `contrib/systemd/ntkd.toml` ships — leaves the
+  guest stuck in the `Evaluating` phase indefinitely while the host sits in `Waiting`, so the two
+  settle into different g-nodes (`10.0.0.0/28` and `10.0.0.16/28`) while still exchanging QSPN
+  routes over their arc. Confirmed live in a two-namespace run
+  (`begin_enter proxy error … no participants in the network for this service`). Only single-level
+  `gsizes = [8]` negotiation was ever covered, which is why this went unnoticed. Leading
+  hypothesis is that a guest must reach the prospective *host* network's coordinator via
+  `call_entering` before the merge, rather than through its own participant set, which cannot yet
+  contain the peer's outer g-nodes.
+
+
 ## [0.1.7]
 
 One correctness fix in 0.1.6's groundwork, and the mig-01 plan corrected after tracing it properly.
