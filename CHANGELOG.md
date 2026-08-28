@@ -4,6 +4,42 @@ All notable changes to this project are documented here. Versions follow [Semant
 Versioning](https://semver.org/spec/v2.0.0.html); the twelve `ntk-*` crates and `ntkd` are
 released in lockstep, so they always share a version even when only some of them changed.
 
+## [0.1.4]
+
+One security fix, from the last open finding of 0.1.3's parity audit. Its premise turned out to be
+backwards: the behaviour was justified as matching vanilla, and vanilla does the opposite.
+
+### Fixed
+
+- **ANDNA's anti-Sybil cap was decorative under the default configuration.** The Counter service
+  caps hostname reservations per registrant (NTK_RFC 0007) by keying them to the requester's
+  `client_tuple`, which `crates/ntk-andna/src/counter.rs:12-14` calls "not a self-declared,
+  spoofable payload field". That holds only when the request's origin is verified, and
+  `verify_origin` returned `Ok` unconditionally whenever `require_auth` was `false` — the default.
+  So on a default node the cap was enforced against precisely the self-declared value it claims
+  not to be.
+  `require_auth`'s default is correct and unchanged: the wire `Auth` field is optional upstream, so
+  *enforcing* it globally is what breaks interoperability, not carrying it. But that reasoning
+  never applied to ANDNA, which has no upstream to interoperate with —
+  `research/impl/vala/andna/andna.vala` is 36 lines, its `serializables.vala` is empty, and
+  `ntkdrpc` declares no ANDNA method. Meanwhile vanilla, the C implementation this port
+  reconstructs ANDNA from, verifies a signature on every registration
+  (`research/impl/c/netsukuku/src/andna.c:829-841`, rejecting with `E_INVALID_SIGNATURE`) and again
+  on the counter check (`:1181-1191`), with no toggle at all.
+  `PeerService::requires_origin_auth` now lets a service demand a verified origin per request —
+  per request, not per service, because `AndnaService` answers both a registration and a resolution
+  behind one `exec`. ANDNA opts in the two writes. Resolution stays open, which is where vanilla
+  draws the line too (`andna.c:1604-1609` verifies nothing on a lookup) and what keeps `ntkd`'s own
+  `andna-resolve` working. A service that does not override it behaves exactly as before.
+  **`node_key_path` is now required to register a hostname on another node.** A name a node
+  hash-owns locally still registers without one: the substrate's local path never crosses the wire,
+  so such a request is provably attributable. Resolution never needs a key. Both shipped
+  `ntkd.toml` copies say so.
+
+### Changed
+
+- The logo wordmark reads `netsukuku-rs`, not `netsukuku`.
+
 ## [0.1.3]
 
 Fixes real bugs, unlike 0.1.2. Three defects found while diagnosing a restart-looping
@@ -38,21 +74,6 @@ real protocol defects and one broken research-tooling promise; those are below t
   hands it to its successor. Captured *before* the generation is cancelled, because `hand_off` on
   a dead actor silently returns an empty hand-off — which would have looked like it worked while
   changing nothing.
-- **ANDNA's anti-Sybil cap was decorative under the default configuration.** The Counter service
-  caps hostname reservations per registrant (NTK_RFC 0007) by keying them to the requester's
-  `client_tuple` — trustworthy only if the request's origin is verified, and that verification was
-  skipped whenever `require_auth` was `false`, which is the default. The default itself is correct
-  and unchanged: the wire `Auth` field is optional upstream, so enforcing it globally is what
-  breaks interoperability. But that reasoning never applied to ANDNA, which has no upstream to be
-  compatible with — `research/impl/vala/andna/andna.vala` is 36 lines, its serializables are
-  empty, and `ntkdrpc` declares no ANDNA method — while vanilla, the C implementation this port
-  reconstructs ANDNA from, verifies a signature on every registration
-  (`research/impl/c/netsukuku/src/andna.c:829-841`) and again on the counter check (`:1181-1191`),
-  with no toggle. Registration and counter reservation now demand a verified origin regardless of
-  `require_auth`; resolution stays open, which is where vanilla draws the line too
-  (`andna.c:1604-1609`). Registering a hostname on another node therefore now requires
-  `node_key_path`; a name a node hash-owns locally still registers without one, since a local
-  request is provably attributable.
 - **A permanently misconfigured host restarted forever.** `Restart=on-failure` with
   `RestartSec=3` never tripped systemd's default rate limit (5 starts/10s — 3s spacing only fits
   about 4), so the ENODEV above respawned indefinitely; the observed restart counter reached 69.
@@ -222,6 +243,7 @@ them over native netlink, never by shelling out to `ip`.
 Only five of the twelve crates reached crates.io under this version, for the rate-limit reason
 described under 0.1.1. Use 0.1.2 instead.
 
+[0.1.4]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.0...v0.1.1
