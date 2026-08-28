@@ -578,7 +578,12 @@ impl Handle {
             .await
     }
 
-    pub(crate) async fn begin_enter(
+    /// Invokes this node's *own* enter-protocol handler with no DHT round trip — upstream's
+    /// `mgr.begin_enter(lvl, ...)` (`research/impl/vala/hooking/proxy_coord.vala:342-355`),
+    /// which `ProxyCoord` calls instead of `coord.begin_enter` whenever `lvl == 0`.
+    /// `CoordinatorKey(0)` is not a legal key (`is_valid_key`, `fk_database.vala:47-55`), so this
+    /// is the only correct way to service that level. `pub` for exactly that caller.
+    pub async fn begin_enter(
         &self,
         top: usize,
         data: TypedValue,
@@ -590,7 +595,9 @@ impl Handle {
             .await
     }
 
-    pub(crate) async fn completed_enter(
+    /// See [`Self::begin_enter`] — upstream's `mgr.completed_enter`
+    /// (`proxy_coord.vala:389-396`).
+    pub async fn completed_enter(
         &self,
         top: usize,
         data: TypedValue,
@@ -602,7 +609,8 @@ impl Handle {
             .await
     }
 
-    pub(crate) async fn abort_enter(
+    /// See [`Self::begin_enter`] — upstream's `mgr.abort_enter` (`proxy_coord.vala:422-429`).
+    pub async fn abort_enter(
         &self,
         top: usize,
         data: TypedValue,

@@ -735,39 +735,46 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
     fn begin_enter(&self, lvl: usize) -> BoxFuture<'_, Result<(), CoordinatorError>> {
         Box::pin(async move {
             if lvl == 0 {
+                self.local.begin_enter(1, codec::encode_unit(), &[]).await;
                 return Ok(());
             }
             self.dht
-                .begin_enter(lvl, codec::encode_unit())
+                .begin_enter(lvl + 1, codec::encode_unit())
                 .await
                 .map(drop)
                 .map_err(proxy_err)
         })
     }
 
-    /// See [`Self::begin_enter`]'s doc comment.
-    ///
-    /// **Known gap**: `lvl == 0` still clamps here rather than bypassing, because unlike
-    /// `begin_enter` this port's local [`ntk_coordinator::CompletedEnterHandler`] is *not* a
-    /// no-op — it drives `EnterArbiter::complete` — so an equivalent bypass has to invoke that
-    /// local handler (upstream `proxy_coord.vala:389-396`) rather than simply return, which needs
-    /// [`EnterHandlersAdapter`] threaded into this struct. Not reached by the failing scenario:
-    /// the guest aborts before it can complete.
+    /// See [`Self::begin_enter`]'s doc comment. Unlike `begin_enter`'s, this local handler is
+    /// *not* a no-op — it drives `EnterArbiter::complete`, which must release the level so a
+    /// different network can enter later — so the `lvl == 0` bypass invokes it rather than
+    /// simply returning.
     fn completed_enter(&self, lvl: usize) -> BoxFuture<'_, Result<(), CoordinatorError>> {
         Box::pin(async move {
+            if lvl == 0 {
+                self.local
+                    .completed_enter(1, codec::encode_unit(), &[])
+                    .await;
+                return Ok(());
+            }
             self.dht
-                .completed_enter(lvl.max(1), codec::encode_unit())
+                .completed_enter(lvl + 1, codec::encode_unit())
                 .await
                 .map(drop)
                 .map_err(proxy_err)
         })
     }
 
-    /// See [`Self::begin_enter`]'s doc comment.
+    /// See [`Self::begin_enter`]'s and [`Self::completed_enter`]'s doc comments.
     fn abort_enter(&self, lvl: usize) -> BoxFuture<'_, Result<(), CoordinatorError>> {
         Box::pin(async move {
+            if lvl == 0 {
+                self.local.abort_enter(1, codec::encode_unit(), &[]).await;
+                return Ok(());
+            }
             self.dht
-                .abort_enter(lvl.max(1), codec::encode_unit())
+                .abort_enter(lvl + 1, codec::encode_unit())
                 .await
                 .map(drop)
                 .map_err(proxy_err)

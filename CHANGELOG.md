@@ -38,38 +38,40 @@ released in lockstep, so they always share a version even when only some of them
   uses `call()` with no exclusion (`peers.vala:820-861`) — so `Some(0)` is also the minimum
   deviation needed to keep the self-loop fix this method was introduced for.
 
-- **`begin_enter` constructed the illegal `CoordinatorKey(0)`.** It sent `lvl + 1`, then briefly
-  `lvl.max(1)`. `is_valid_key` accepts only `1..=levels` (`fk_database.vala:47-55`, mirrored in
-  `ntk_coordinator`'s `reserve_enter`), so a servant reached with `top == 0` answers
-  `top 0 is out of range for a topology with N levels`; the clamp silently turned an illegal key
-  into a legal-but-wrong one. Upstream never builds that key — `proxy_coord.vala:342-355`
-  short-circuits `if (lvl == 0)` to the *local* manager, bypassing the coordinator entirely. This
-  port's local `BeginEnterHandler` is a no-op, so the faithful bypass is an immediate `Ok(())`.
-  `completed_enter`/`abort_enter` still clamp, documented as a known gap: their local handlers are
-  not no-ops, so an equivalent bypass must invoke them rather than return.
+- **The enter protocol built the illegal `CoordinatorKey(0)`.** `begin_enter`/`completed_enter`/
+  `abort_enter` sent `lvl + 1`, and briefly a `lvl.max(1)` clamp. `is_valid_key` accepts only
+  `1..=levels` (`fk_database.vala:47-55`, mirrored in `ntk_coordinator`'s `reserve_enter`), so a
+  servant reached with `top == 0` answers `top 0 is out of range for a topology with N levels`.
+  Upstream never builds that key: `proxy_coord.vala:342-355,389-396,422-429` short-circuit
+  `lvl == 0` to the *local* manager, skipping the coordinator entirely. All three now do the
+  same via `ntk_coordinator::Handle::{begin,completed,abort}_enter` (previously `pub(crate)`,
+  now `pub` — they are upstream's `mgr.*`), and pass `lvl + 1` on the DHT path, which is this
+  port's actual contract: the handlers recover `level = top.saturating_sub(1)`.
+  `completed_enter`'s local handler is not a no-op — it drives `EnterArbiter::complete`, which
+  must release the level so a different network can enter later — so its bypass invokes the
+  handler rather than merely returning.
 
-### Known issues
+- **Two virgin daemons now merge into one network on a multi-level topology.** The three fixes
+  above, in combination. `[4, 2, 2, 2]` is the topology `contrib/systemd/ntkd.toml` ships, so
+  before this a packaged two-node install formed an arc, installed routes, and looked healthy
+  while permanently remaining *two* networks. Verified in a live two-namespace run: the pair goes
+  from `10.0.0.10` + `10.0.0.30` with `/28` g-node routes between them to `10.0.0.18` +
+  `10.0.0.16` with `/32` host routes inside one g-node, the guest reaching
+  `hooking: Entered { ask_lvl: 0 }` and both nodes reporting a coordinator reservation.
+  Covered by `two_virgin_daemons_merge_into_one_network_on_a_multi_level_topology`
+  (`crates/ntkd/src/node/negotiation_tests.rs`), which is no longer `#[ignore]`d; its doc comment
+  keeps the full history, including two rejected fixes so they are not retried. Only single-level
+  `gsizes = [8]` negotiation was ever covered, which is why none of this surfaced earlier.
 
-- **Two virgin daemons still do not merge into one network on a multi-level topology.** Test
-  `two_virgin_daemons_merge_into_one_network_on_a_multi_level_topology`
-  (`crates/ntkd/src/node/negotiation_tests.rs`) reproduces it deterministically in ~30s with no
-  privileges, committed `#[ignore]`d with the full diagnosis in its doc comment rather than
-  weakened or omitted. `[4, 2, 2, 2]` is the topology `contrib/systemd/ntkd.toml` ships, so a
-  packaged two-node install forms an arc and installs routes while remaining two networks.
-  The two fixes above moved the guest from stuck in `Evaluating` to clearing both
-  `evaluate_enter` and `begin_enter`; it now stalls in `search_migration_path(0)`.
-  Cause is now localized to the search/migration machinery, not the coordinator path and not
-  level arithmetic: for two single-node networks the guest should find a migration path into a
-  free position of the host's level-0 g-node and does not, so
-  `arc_handler.vala:303-311`'s terminal `ask_lvl == 0` branch ("Failed to find a migration-path
-  for a single node") is hit instead. Next step is `execute_search` /
-  `ntk_hooking::search_migration_path` against `hooking.vala:166`.
-  Two scout claims were checked and refuted rather than acted on: that `gnode_exists` cannot see
-  the peer's outer g-nodes (a working `evaluate_enter` requires that it can), and that upstream's
-  `max_lvl` is "1-indexed, never 0" (`proxy_coord.vala:104` seeds it from `subnetlevel`, which is
-  unconditionally `0` here, so `chosen_lvl = 0` is correct and shifting that index would have been
-  a regression). Only single-level `gsizes = [8]` negotiation was ever covered, which is why none
-  of this surfaced earlier.
+- **Cross-node ANDNA resolve is deterministic again.** Resolving a hostname from a node other
+  than the registrant returned records only intermittently. That was a symptom of the merge
+  failure above, not an ANDNA defect: two unmerged networks have disjoint hash-node placement, so
+  which node answered depended on the run. Two scout claims were checked and refuted rather than
+  acted on — that `RoutingEnvAdapter::gnode_exists` cannot see an unmerged peer's outer g-nodes
+  (a working `evaluate_enter` requires that it can), and that upstream's `max_lvl` is
+  "1-indexed, never 0" (`proxy_coord.vala:104` seeds it from `subnetlevel`, unconditionally `0`
+  here, so `chosen_lvl = 0` is correct and shifting that index would have regressed the
+  single-level path).
 
 ## [0.1.7]
 

@@ -552,70 +552,51 @@ async fn discovering_a_peer_joins_and_adopts_the_negotiated_position() {
 /// each keep their own outer-level position are two networks that happen to be adjacent, which
 /// is precisely the state this asserts against.
 ///
-/// # Currently RED — confirmed defect, diagnosis escalated, do not weaken
-/// This is `#[ignore]`d against this module's own convention (`#[ignore]` is otherwise reserved
-/// for privilege-gated tests) purely to keep the default `cargo test` run green while the fix is
-/// designed. It needs no privileges: run it with
-/// `cargo test -p ntkd --lib two_virgin_daemons_merge -- --ignored`.
+/// # History: this was red, and what it caught
+/// Multi-level negotiation was covered nowhere — only single-level `gsizes = [8]` — so three
+/// independent defects in the guest's entry path were all invisible. Each was found by driving
+/// this reproduction, not by reading, and each is fixed:
 ///
-/// Reproduces deterministically in ~30s. Observed end state, from this test's own failure output:
-/// ```text
-/// node0 at [1, 0, 1, 0], node1 at [3, 1, 0, 0]
-/// node0 arc phases: {ArcId(0): Entering { ask_lvl: 0 }}
-/// node1 arc phases: {ArcId(0): Waiting}
-/// ```
-/// `Waiting` is legitimate — `merge_direction` resolved "my network is larger / the tiebreak
-/// favored me" (`arc_handler.vala:209-214`). The guest reaching `Entering { ask_lvl: 0 }` means
-/// steps (5) and (6) both now clear: `evaluate_enter` succeeds and `begin_enter` no longer
-/// aborts. It then stalls in `search_migration_path(0)`.
+/// - **`call_entering` excluded the entire searchable space.**
+///   `ntk_coordinator::CoordinatorClient::call_entering` passed `exclude_my_gnode =
+///   Some(top - 1)`. `all_gnodes_up_to_lvl` (`ntk-peerservices/src/actor.rs:515-528`) excludes
+///   every g-node that is *not* mine below that level, while `tuple::approximate` independently
+///   skips every g-node that *is* mine — so any `lvl >= 1` excluded everything below it, the
+///   prospective host included, and `contact_peer` returned `NoParticipants`. `Some(top - 1)`
+///   degenerates to `Some(0)` exactly when `levels == 1`, which is why `[8]` was unaffected.
+///   Now `Some(0)` unconditionally.
+/// - **`begin_enter`/`completed_enter`/`abort_enter` built the illegal `CoordinatorKey(0)`.**
+///   `is_valid_key` accepts only `1..=levels` (`fk_database.vala:47-55`), and upstream never
+///   builds that key: `proxy_coord.vala:342-355,389-396,422-429` short-circuit `lvl == 0` to the
+///   *local* manager, skipping the coordinator. Those three now call
+///   `ntk_coordinator::Handle::{begin,completed,abort}_enter` (upstream's `mgr.*`) at `lvl == 0`.
+///   `completed_enter`'s local handler is not a no-op — it drives `EnterArbiter::complete` — so
+///   the bypass invokes it rather than merely returning.
+/// - **A `lvl.max(1)` clamp tried in between was wrong** and is recorded so it is not retried:
+///   this port's contract is `top == lvl + 1` (the handlers recover `level =
+///   top.saturating_sub(1)`, see `EnterHandlersAdapter`), so clamping silently mapped `lvl >= 1`
+///   to the wrong level. It passed the suite only because every test then exercised `lvl == 0`.
 ///
-/// # Where it now stalls
-/// In `search_migration_path(0)`, inside step (6)'s begin/search loop.
-///
-/// `chosen_lvl = 0` is **not** the bug, contrary to an earlier note here: upstream seeds
-/// `int max_lvl = subnetlevel` (`proxy_coord.vala:104`) and returns it verbatim (`:246,279`),
-/// and this daemon's `QspnViewAdapter::subnetlevel` is unconditionally `0` ("no subnetting"), so
-/// `max_lvl == 0` is legitimate upstream behaviour and `begin_enter(0)` taking the local bypass
-/// is exactly what upstream does. A scout reported `max_lvl` was "1-indexed, never 0" while
-/// simultaneously quoting the `subnetlevel` seed; the seed is authoritative and the claim was
-/// wrong. Recorded because acting on it would mean shifting every index in step (6) for nothing.
-///
-/// So the remaining defect is in the search/migration machinery, not the coordinator path and not
-/// level arithmetic: for two single-node networks the guest should find a migration path into a
-/// free position of the host's level-0 g-node, and does not. `arc_handler.vala:303-311`'s
-/// `ask_lvl == 0` branch ("Failed to find a migration-path for a single node") is the terminal
-/// case being hit instead. Next step is `crate::search::execute_search` /
-/// `ntk_hooking`'s `search_migration_path` against `hooking.vala:166`.
-///
-/// # Fixed along the way (both verified against this reproduction)
-/// - `ntk_coordinator::CoordinatorClient::call_entering` passed
-///   `exclude_my_gnode = Some(top - 1)`. `all_gnodes_up_to_lvl`
-///   (`ntk-peerservices/src/actor.rs:515-528`) excludes every g-node that is *not* mine below
-///   that level, while `tuple::approximate` independently skips every g-node that *is* mine — so
-///   any `lvl >= 1` excluded the whole searchable space, the prospective host included, and
-///   `contact_peer` failed `NoParticipants`. `Some(top - 1)` degenerates to `Some(0)` only when
-///   `levels == 1`, which is why single-level `[8]` was unaffected and nobody noticed. Now
-///   `Some(0)` unconditionally; this alone took the guest from stuck in `Evaluating` to clearing
-///   it.
-/// - `CoordinatorClientAdapter::begin_enter` sent `CoordinatorKey(0)` (via a `lvl.max(1)` clamp,
-///   and before that `lvl + 1`). `CoordinatorKey(0)` is illegal — `is_valid_key` accepts only
-///   `1..=levels` (`fk_database.vala:47-55`) — and upstream never builds it, short-circuiting to
-///   the *local* manager instead (`proxy_coord.vala:342-355`). This port's local
-///   `BeginEnterHandler` is a no-op, so the bypass is an immediate `Ok(())`.
-///
-/// # Ruled out
+/// # Ruled out along the way — do not re-litigate
+/// - `chosen_lvl = 0` is **correct**, not an index-space bug. Upstream seeds `int max_lvl =
+///   subnetlevel` (`proxy_coord.vala:104`) and returns it verbatim (`:246,279`), and this
+///   daemon's `QspnViewAdapter::subnetlevel` is unconditionally `0` ("no subnetting"). A scout
+///   reported `max_lvl` was "1-indexed, never 0" while quoting that same seed; the seed is
+///   authoritative. Acting on it would have shifted every index in step (6) to fix nothing.
+/// - Routing `top == 0` as `x_macron = None` ("route to myself") in `call_entering`. It delivers
+///   the request, but the servant still rejects `top == 0`, and it regressed
+///   [`discovering_a_peer_joins_and_adopts_the_negotiated_position`].
 /// - `evaluate_enter` omitting `foreign_exclusions()`. That asymmetry is deliberate and correct:
 ///   it routes via `call_entering`, which self-excludes instead.
 /// - `RoutingEnvAdapter::gnode_exists` failing to see the peer's outer g-nodes. Two scouts
-///   independently *inferred* this; it is false. `evaluate_enter` now completes, which it could
-///   not if the host's g-node were invisible.
-#[ignore = "multi-level merge: chosen_lvl index space, diagnosis in this doc comment"]
+///   independently *inferred* this; it is false — `evaluate_enter` could not complete if the
+///   host's g-node were invisible.
 #[tokio::test]
 async fn two_virgin_daemons_merge_into_one_network_on_a_multi_level_topology() {
     // `CoordinatorClientAdapter::evaluate_enter` already logs every round trip's decoded answer;
     // without a subscriber installed that evidence is invisible, which is what made this defect
     // hard to localize. Opt in with e.g.
-    // `RUST_LOG=ntkd=info cargo test -p ntkd --lib two_virgin_daemons_merge -- --ignored --nocapture`.
+    // `RUST_LOG=ntkd=info cargo test -p ntkd --lib two_virgin_daemons_merge -- --nocapture`.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
