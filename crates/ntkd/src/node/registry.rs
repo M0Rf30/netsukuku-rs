@@ -78,6 +78,49 @@ pub(crate) fn decode_caller_id(tv: &ntk_proto::v1::TypedValue) -> Option<ntk_nei
     ntk_neighborhood::NodeId::from_raw(raw).ok()
 }
 
+/// `type_tag` for [`encode_identity_id`]'s `TypedValue` encoding.
+const IDENTITY_ID_TAG: &str = "ntkd.IdentityId";
+
+/// Encodes an [`ntk_identities::IdentityId`] as a `TypedValue`, for `UnicastId::IdentityAware`'s
+/// payload.
+///
+/// Distinct from [`encode_caller_id`] on purpose, and the distinction is the whole point.
+/// [`ntk_neighborhood::NodeId`] names the *node* — `NeighborhoodConfig::my_id`, one value for the
+/// process's whole life — which is exactly right for `CallerContext.src_nic`, where the peer must
+/// resolve "which arc did this arrive on". It is exactly wrong for naming *which identity* should
+/// handle a call: a connectivity fork and the successor it bridges for run in one process and
+/// share that node id, so it cannot tell them apart. `IdentityId` can: the registry mints a fresh
+/// one per identity and `ntk_identities::Handle::migrate` returns the successor's.
+///
+/// Upstream draws the same line — `IdentityAwareUnicastID` carries an identities-level `NodeID`,
+/// and `get_identity_skeleton` matches it against each entry of `local_identities`
+/// (`research/impl/vala/ntkd/rpc/skeleton_factory.vala:284-291`) — while its own `src_nic`
+/// equivalent stays a per-arc MAC.
+///
+/// `#[cfg(test)]` for now: nothing *sends* an `IdentityAware` `unicast_id` yet — `crate::node::
+/// stubs` explains why naming a destination identity waits for the connectivity fork — so a
+/// production encoder would be dead code. The decoder below is live, because the dispatcher
+/// already has to interpret whatever a peer sends.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn encode_identity_id(id: ntk_identities::IdentityId) -> ntk_proto::v1::TypedValue {
+    ntk_proto::v1::TypedValue::new(IDENTITY_ID_TAG, id.into_raw().to_be_bytes().to_vec())
+}
+
+/// Inverse of [`encode_identity_id`]. Returns `None` on a wrong tag or a payload that is not
+/// exactly eight bytes; unlike [`decode_caller_id`] there is no range to revalidate, since every
+/// `u64` is a well-formed [`ntk_identities::IdentityId`] — whether this node *hosts* that
+/// identity is `crate::node::dispatch`'s question, not this function's.
+pub(crate) fn decode_identity_id(
+    tv: &ntk_proto::v1::TypedValue,
+) -> Option<ntk_identities::IdentityId> {
+    if tv.type_tag != IDENTITY_ID_TAG {
+        return None;
+    }
+    let raw = u64::from_be_bytes(tv.payload.as_slice().try_into().ok()?);
+    Some(ntk_identities::IdentityId::from_raw(raw))
+}
+
 /// Everything the daemon knows about one discovered link, indexed both by its stable
 /// `neighbour_mac` key and by [`LinkId`].
 #[derive(Debug, Clone)]

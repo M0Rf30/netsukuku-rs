@@ -909,7 +909,7 @@ where
     let dispatcher = Arc::new(Dispatcher::new(
         neighborhood_rpc,
         identity_rpc,
-        my_id,
+        identities.clone(),
         generation.dispatch,
     ));
 

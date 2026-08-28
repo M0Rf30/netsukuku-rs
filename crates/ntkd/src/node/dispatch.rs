@@ -64,16 +64,21 @@ pub struct IdentityStack {
 pub struct Dispatcher {
     neighborhood: ntk_neighborhood::NeighborhoodRpcHandler,
     identity: ntk_identities::IdentityRpcHandler,
-    /// This process's own stable Neighborhood id (constant for its whole lifetime — see
-    /// `crate::node::registry::encode_caller_id`'s doc) — the id `UnicastId::MainIdentity` and
-    /// an absent/empty `unicast_id` both resolve to. Never itself a key of `secondary`; see
-    /// [`Self::resolve_stack`], which checks it before ever consulting `secondary`.
-    main_id: ntk_neighborhood::NodeId,
+    /// The identity registry, consulted for *which* [`ntk_identities::IdentityId`] is currently
+    /// main. Read live rather than cached, because unlike this node's
+    /// [`ntk_neighborhood::NodeId`] the main identity id genuinely changes: every `migrate`
+    /// retires one identity and promotes its successor, so a copy taken at construction would
+    /// name a retired identity from the first migration onward. `Handle::main_id` is a
+    /// `watch`-snapshot read, so this costs no round trip.
+    identities_handle: ntk_identities::Handle,
     identity_stack: RwLock<Arc<IdentityStack>>,
-    /// Every OTHER locally-hosted identity (e.g. mig-01's connectivity fork,
-    /// `research/impl/vala/qspn/qspn.vala:2226-2505`), keyed by its own stable Neighborhood id.
-    /// Empty until [`Self::register_identity`] is ever called — today, always.
-    secondary: RwLock<HashMap<ntk_neighborhood::NodeId, Arc<IdentityStack>>>,
+    /// Every locally-hosted identity that is *not* the current main (e.g. mig-01's connectivity
+    /// fork, `research/impl/qspn/qspn.vala:2226-2505`), keyed by its own
+    /// [`ntk_identities::IdentityId`] — the id that distinguishes two identities inside one
+    /// process, which this node's Neighborhood id cannot (see
+    /// `crate::node::registry::encode_identity_id`'s doc). Empty until
+    /// [`Self::register_identity`] is called.
+    secondary: RwLock<HashMap<ntk_identities::IdentityId, Arc<IdentityStack>>>,
 }
 
 impl Dispatcher {
@@ -81,13 +86,13 @@ impl Dispatcher {
     pub fn new(
         neighborhood: ntk_neighborhood::NeighborhoodRpcHandler,
         identity: ntk_identities::IdentityRpcHandler,
-        main_id: ntk_neighborhood::NodeId,
+        identities_handle: ntk_identities::Handle,
         stack: IdentityStack,
     ) -> Self {
         Self {
             neighborhood,
             identity,
-            main_id,
+            identities_handle,
             identity_stack: RwLock::new(Arc::new(stack)),
             secondary: RwLock::new(HashMap::new()),
         }
@@ -108,9 +113,9 @@ impl Dispatcher {
     /// registered under `id`, same swap-in-place semantics as
     /// [`Self::replace_identity_stack`].
     ///
-    /// `id` should not be [`Self::main_id`] — [`Self::resolve_stack`] checks `main_id` first, so
-    /// registering it here would simply never be consulted.
-    pub async fn register_identity(&self, id: ntk_neighborhood::NodeId, stack: IdentityStack) {
+    /// `id` should not be the current main identity — [`Self::resolve_stack`] checks that first,
+    /// so registering it here would simply never be consulted.
+    pub async fn register_identity(&self, id: ntk_identities::IdentityId, stack: IdentityStack) {
         self.secondary.write().await.insert(id, Arc::new(stack));
     }
 
@@ -119,7 +124,7 @@ impl Dispatcher {
     /// already dispatched to it runs to completion unaffected (holds its own `Arc` clone, as
     /// [`Self::replace_identity_stack`]'s doc describes); every call whose dispatch starts after
     /// this returns is rejected as unknown. A no-op if `id` was never registered.
-    pub async fn unregister_identity(&self, id: ntk_neighborhood::NodeId) {
+    pub async fn unregister_identity(&self, id: ntk_identities::IdentityId) {
         self.secondary.write().await.remove(&id);
     }
 
@@ -131,9 +136,8 @@ impl Dispatcher {
     /// - [`UnicastId::MainIdentity`], or an absent/empty `unicast_id` (an unmodified v0.1.5
     ///   peer, or any peer that has never heard of `UnicastId`) -> the main identity's stack —
     ///   the compatibility path, behaviour-identical to before this method existed.
-    /// - [`UnicastId::IdentityAware`] naming [`Self::main_id`] -> also the main identity's
-    ///   stack: a peer addressing this node's identity by its actual id, exactly what
-    ///   `crate::node::stubs` sends whenever it knows a specific destination.
+    /// - [`UnicastId::IdentityAware`] naming whichever identity is currently main -> also the
+    ///   main identity's stack: a peer addressing this node's identity by its actual id.
     /// - [`UnicastId::IdentityAware`] naming anything else -> that id's `secondary` entry, or a
     ///   [`RemoteError`] if this node hosts no such identity. Deliberately never falls back to
     ///   main here: that would route a second identity's traffic into the wrong generation's
@@ -148,7 +152,7 @@ impl Dispatcher {
         &self,
         unicast_id: &TypedValue,
     ) -> Result<Arc<IdentityStack>, RemoteError> {
-        match select_identity(unicast_id, self.main_id)? {
+        match select_identity(unicast_id, self.identities_handle.main_id())? {
             Selection::Main => Ok(self.identity_stack.read().await.clone()),
             Selection::Secondary(id) => {
                 self.secondary
@@ -159,7 +163,7 @@ impl Dispatcher {
                     .ok_or_else(|| {
                         protocol_error(format!(
                             "Request.unicast_id: no locally-hosted identity with id {}",
-                            id.get()
+                            id.into_raw()
                         ))
                     })
             }
@@ -173,15 +177,14 @@ impl Dispatcher {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Selection {
     Main,
-    Secondary(ntk_neighborhood::NodeId),
+    Secondary(ntk_identities::IdentityId),
 }
 
 /// - [`UnicastId::MainIdentity`], or an absent/empty `unicast_id` (an unmodified v0.1.5 peer, or
 ///   any peer that has never heard of `UnicastId`) -> [`Selection::Main`] — the compatibility
 ///   path, behaviour-identical to before `unicast_id` was ever consulted.
-/// - [`UnicastId::IdentityAware`] naming `main_id` -> also [`Selection::Main`]: a peer addressing
-///   this node's identity by its actual id, exactly what `crate::node::stubs` sends whenever it
-///   knows a specific destination.
+/// - [`UnicastId::IdentityAware`] naming the current main identity -> also [`Selection::Main`]: a
+///   peer addressing this node's identity by its actual id.
 /// - [`UnicastId::IdentityAware`] naming anything else -> [`Selection::Secondary`] with that id.
 ///   [`Dispatcher::resolve_stack`] rejects it if this node hosts no such identity — deliberately
 ///   never falling back to main, which would route a second identity's traffic into the wrong
@@ -194,7 +197,7 @@ enum Selection {
 /// reasoning for a malformed/misaddressed call.
 fn select_identity(
     unicast_id: &TypedValue,
-    main_id: ntk_neighborhood::NodeId,
+    main_id: ntk_identities::IdentityId,
 ) -> Result<Selection, RemoteError> {
     match UnicastId::from_typed_value(unicast_id)
         .map_err(|err| protocol_error(format!("Request.unicast_id: {err}")))?
@@ -204,7 +207,7 @@ fn select_identity(
             "Request.unicast_id: WholeNode is not valid for an identity-scoped call",
         )),
         UnicastId::IdentityAware(id_tv) => {
-            let id = crate::node::registry::decode_caller_id(&id_tv).ok_or_else(|| {
+            let id = crate::node::registry::decode_identity_id(&id_tv).ok_or_else(|| {
                 protocol_error(
                     "Request.unicast_id: IdentityAware payload is not a valid identity id",
                 )
@@ -336,6 +339,10 @@ mod tests {
         ntk_neighborhood::NodeId::from_raw(raw).unwrap()
     }
 
+    fn identity_id(raw: u64) -> ntk_identities::IdentityId {
+        ntk_identities::IdentityId::from_raw(raw)
+    }
+
     // -----------------------------------------------------------------------------------------
     // select_identity: the pure decision, no `IdentityStack` needed at all.
     // -----------------------------------------------------------------------------------------
@@ -345,7 +352,7 @@ mod tests {
     /// this exact empty `TypedValue`. It must still resolve to the main identity.
     #[test]
     fn an_empty_unicast_id_selects_main() {
-        let main = node_id(1);
+        let main = identity_id(1);
         assert_eq!(
             select_identity(&TypedValue::default(), main).unwrap(),
             Selection::Main
@@ -354,9 +361,9 @@ mod tests {
 
     #[test]
     fn an_identity_aware_unicast_id_naming_main_selects_main() {
-        let main = node_id(1);
+        let main = identity_id(1);
         let tv = ntk_proto::domain::UnicastId::IdentityAware(
-            crate::node::registry::encode_caller_id(main),
+            crate::node::registry::encode_identity_id(main),
         )
         .to_typed_value();
         assert_eq!(select_identity(&tv, main).unwrap(), Selection::Main);
@@ -364,10 +371,10 @@ mod tests {
 
     #[test]
     fn an_identity_aware_unicast_id_naming_another_identity_selects_that_identity_not_main() {
-        let main = node_id(1);
-        let other = node_id(2);
+        let main = identity_id(1);
+        let other = identity_id(2);
         let tv = ntk_proto::domain::UnicastId::IdentityAware(
-            crate::node::registry::encode_caller_id(other),
+            crate::node::registry::encode_identity_id(other),
         )
         .to_typed_value();
         assert_eq!(
@@ -378,10 +385,11 @@ mod tests {
 
     #[test]
     fn a_whole_node_unicast_id_is_rejected_on_an_identity_scoped_call() {
-        let main = node_id(1);
-        let tv =
-            ntk_proto::domain::UnicastId::WholeNode(crate::node::registry::encode_caller_id(main))
-                .to_typed_value();
+        let main = identity_id(1);
+        let tv = ntk_proto::domain::UnicastId::WholeNode(
+            crate::node::registry::encode_identity_id(main),
+        )
+        .to_typed_value();
         assert!(select_identity(&tv, main).is_err());
     }
 
@@ -641,25 +649,26 @@ mod tests {
 
     /// Likewise dormant (no local identities beyond the one [`Dispatcher`] itself tracks) —
     /// never consulted by [`Dispatcher::resolve_stack`] either.
-    fn spawn_identity_rpc() -> ntk_identities::IdentityRpcHandler {
+    /// Returns the dispatcher together with the `IdentityId` its registry actually reports as
+    /// main. The id is read back rather than chosen: `Dispatcher` resolves it live from the
+    /// handle (see its field doc), so a test that invented one would be asserting against a
+    /// value the dispatcher never sees.
+    fn dispatcher(node_id: ntk_neighborhood::NodeId) -> (Dispatcher, ntk_identities::IdentityId) {
         let (handle, _join) =
             ntk_identities::Handle::spawn(None, Arc::new(NoRealArcs), CancellationToken::new());
-        ntk_identities::IdentityRpcHandler::new(handle, Arc::new(NoRealArcs))
-    }
-
-    fn dispatcher(main_id: ntk_neighborhood::NodeId) -> Dispatcher {
-        Dispatcher::new(
-            spawn_neighborhood_rpc(main_id),
-            spawn_identity_rpc(),
-            main_id,
+        let main_id = handle.main_id();
+        let dispatcher = Dispatcher::new(
+            spawn_neighborhood_rpc(node_id),
+            ntk_identities::IdentityRpcHandler::new(handle.clone(), Arc::new(NoRealArcs)),
+            handle,
             spawn_identity_stack(0),
-        )
+        );
+        (dispatcher, main_id)
     }
 
     #[tokio::test]
     async fn an_empty_unicast_id_resolves_the_main_stack() {
-        let main_id = node_id(1);
-        let d = dispatcher(main_id);
+        let (d, _main_id) = dispatcher(node_id(1));
         let main_stack = d.identity_stack.read().await.clone();
         let resolved = d.resolve_stack(&TypedValue::default()).await.unwrap();
         assert!(Arc::ptr_eq(&resolved, &main_stack));
@@ -667,15 +676,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_registered_second_identity_resolves_to_its_own_stack_not_main() {
-        let main_id = node_id(1);
-        let other_id = node_id(2);
-        let d = dispatcher(main_id);
+        let (d, main_id) = dispatcher(node_id(1));
+        let other_id = identity_id(main_id.into_raw().wrapping_add(1));
         let main_stack = d.identity_stack.read().await.clone();
         d.register_identity(other_id, spawn_identity_stack(1)).await;
         let secondary_stack = d.secondary.read().await.get(&other_id).cloned().unwrap();
 
         let tv = ntk_proto::domain::UnicastId::IdentityAware(
-            crate::node::registry::encode_caller_id(other_id),
+            crate::node::registry::encode_identity_id(other_id),
         )
         .to_typed_value();
         let resolved = d.resolve_stack(&tv).await.unwrap();
@@ -685,12 +693,11 @@ mod tests {
 
     #[tokio::test]
     async fn an_identity_aware_unicast_id_naming_an_unregistered_identity_is_rejected() {
-        let main_id = node_id(1);
-        let unknown_id = node_id(99);
-        let d = dispatcher(main_id);
+        let (d, main_id) = dispatcher(node_id(1));
+        let unknown_id = identity_id(main_id.into_raw().wrapping_add(99));
 
         let tv = ntk_proto::domain::UnicastId::IdentityAware(
-            crate::node::registry::encode_caller_id(unknown_id),
+            crate::node::registry::encode_identity_id(unknown_id),
         )
         .to_typed_value();
         assert!(d.resolve_stack(&tv).await.is_err());
@@ -698,14 +705,13 @@ mod tests {
 
     #[tokio::test]
     async fn unregistering_a_second_identity_makes_it_unknown_again() {
-        let main_id = node_id(1);
-        let other_id = node_id(2);
-        let d = dispatcher(main_id);
+        let (d, main_id) = dispatcher(node_id(1));
+        let other_id = identity_id(main_id.into_raw().wrapping_add(1));
         d.register_identity(other_id, spawn_identity_stack(1)).await;
         d.unregister_identity(other_id).await;
 
         let tv = ntk_proto::domain::UnicastId::IdentityAware(
-            crate::node::registry::encode_caller_id(other_id),
+            crate::node::registry::encode_identity_id(other_id),
         )
         .to_typed_value();
         assert!(d.resolve_stack(&tv).await.is_err());
