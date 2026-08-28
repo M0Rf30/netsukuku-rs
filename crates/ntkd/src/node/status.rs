@@ -7,6 +7,7 @@
 //! request line, or any failure handling a recognized one, replies with [`ErrorReply`] instead
 //! of panicking or closing silently.
 
+use std::net::Ipv4Addr;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::sync::CancellationToken;
 
+use crate::kernel::addressing;
 use crate::node::adapters::NetworkInfo;
 use crate::node::andna_key;
 use crate::node::kernel_handle::SendNetlink;
@@ -71,10 +73,30 @@ pub struct AndnaRegisterReply {
     pub expires_unix: Option<u64>,
 }
 
+/// One resolved SNSD record: what ANDNA stored, plus — for an address target — the
+/// `10.0.0.0/8` IPv4 that record actually routes as, which is the only form a caller can
+/// connect to or hand to `ping`.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ResolvedTarget {
+    /// The stored target verbatim: an [`SnsdTarget::Address`]'s hierarchical `Naddr` notation,
+    /// or an [`SnsdTarget::Alias`]'s hostname.
+    pub target: String,
+    /// The `/32` host address [`addressing::host_address`] computes for an
+    /// [`SnsdTarget::Address`] target.
+    ///
+    /// `None` in two distinct cases, deliberately not distinguished here because a client's
+    /// action is the same in both (fall back to `target`): an [`SnsdTarget::Alias`], which names
+    /// a hostname rather than a position and so has no address of its own; or an address whose
+    /// topology does not fit the 24 bits under the fixed `10` octet. The latter cannot arise for
+    /// a peer sharing this node's `gsizes` — but the `Naddr` here was decoded from the wire, so
+    /// it is not this node's invariant to assume.
+    pub ipv4: Option<Ipv4Addr>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AndnaResolveReply {
     pub hostname: String,
-    pub addresses: Vec<String>,
+    pub addresses: Vec<ResolvedTarget>,
     /// Always `None`: neither [`ntk_andna::Handle::resolve`] nor its wire reply carries a
     /// per-record TTL back to the caller (only the hash-node's own hosted record knows
     /// `expires_at`) — present so a client can tell "known absent" from "not yet supported" if
@@ -288,8 +310,16 @@ async fn andna_resolve<K>(
     let addresses = records
         .into_iter()
         .map(|record| match record.target {
-            SnsdTarget::Address(naddr) => naddr.to_string(),
-            SnsdTarget::Alias(alias) => alias.to_string(),
+            SnsdTarget::Address(naddr) => ResolvedTarget {
+                target: naddr.to_string(),
+                ipv4: addressing::host_address(&naddr)
+                    .ok()
+                    .map(|net| net.address()),
+            },
+            SnsdTarget::Alias(alias) => ResolvedTarget {
+                target: alias.to_string(),
+                ipv4: None,
+            },
         })
         .collect();
     Ok(AndnaResolveReply {
@@ -562,6 +592,15 @@ mod andna_socket_tests {
             .expect("resolve succeeds");
         assert_eq!(resolve.hostname, "angelica");
         assert_eq!(resolve.addresses.len(), 1);
+        // The whole point of `ResolvedTarget::ipv4`: an address target resolves to something a
+        // caller can actually connect to, not only to hierarchical `Naddr` notation. This node's
+        // `gsizes = [1]` leaves a single valid position, so its `/32` host address is 10.0.0.0.
+        assert_eq!(
+            resolve.addresses[0].ipv4,
+            Some(Ipv4Addr::new(10, 0, 0, 0)),
+            "address target must carry its routable IPv4"
+        );
+        assert!(!resolve.addresses[0].target.is_empty());
 
         cancel.cancel();
         let _ = server.await;

@@ -248,8 +248,11 @@ pub async fn andna_resolve(socket: PathBuf, hostname: String) -> anyhow::Result<
     let reply = status::resolve_hostname(&socket, &hostname).await?;
     println!("hostname: {}", reply.hostname);
     println!("addresses:");
-    for address in &reply.addresses {
-        println!("  {address}");
+    for entry in &reply.addresses {
+        match entry.ipv4 {
+            Some(ip) => println!("  {ip}  ({})", entry.target),
+            None => println!("  {}", entry.target),
+        }
     }
     match reply.ttl_secs {
         Some(t) => println!("ttl_secs: {t}"),

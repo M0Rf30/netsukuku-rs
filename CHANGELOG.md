@@ -4,6 +4,25 @@ All notable changes to this project are documented here. Versions follow [Semant
 Versioning](https://semver.org/spec/v2.0.0.html); the twelve `ntk-*` crates and `ntkd` are
 released in lockstep, so they always share a version even when only some of them changed.
 
+## [Unreleased]
+
+### Changed
+
+- **`ntkd andna-resolve` now returns the routable IPv4, not only `Naddr` notation.** A resolve
+  reported its target as a hierarchical position (`2/4.0/2.1/2.0/2`) — correct, and useless to a
+  caller, who wants something it can connect to. Each entry in `AndnaResolveReply::addresses` is
+  now a `ResolvedTarget { target, ipv4 }`, where `ipv4` is the `/32`
+  `crate::kernel::addressing::host_address` computes for an `SnsdTarget::Address`. The CLI prints
+  `10.0.0.27  (2/4.0/2.1/2.0/2)`.
+  `ipv4` is `None` for an `SnsdTarget::Alias` (a hostname has no position of its own) and for an
+  address whose topology does not fit the 24 bits under the fixed `10` octet. The two are
+  deliberately not distinguished: a client's action is the same in both — fall back to `target`.
+  The `Naddr` here was decoded from the wire, so the second case is not this node's invariant to
+  assume even though it cannot arise for a peer sharing this node's `gsizes`.
+  This changes the control socket's TOML reply shape: `addresses` was an array of strings and is
+  now an array of tables. Local-only — the status socket is not a peer-facing wire protocol, so no
+  deployed node is affected.
+
 ## [0.1.7]
 
 One correctness fix in 0.1.6's groundwork, and the mig-01 plan corrected after tracing it properly.
