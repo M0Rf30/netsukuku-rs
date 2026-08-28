@@ -25,35 +25,48 @@ released in lockstep, so they always share a version even when only some of them
 
 ### Fixed
 
-- **The enter protocol routed one level too deep, and at the top level failed outright.**
-  `CoordinatorClientAdapter::begin_enter`/`completed_enter`/`abort_enter` passed `lvl + 1` as the
-  `CoordinatorKey`, where upstream passes `lvl` with no offset
-  (`peer_service.vala:218,243,268,293`). The offset was justified by an argument that only holds
-  at `lvl == 0` — the only value reachable when `levels == 1`, which is the only topology the
-  negotiation tests covered. On a multi-level topology `evaluate_enter` echoes back
-  `chosen_lvl >= 1`, and at `lvl == levels` the offset exceeded
-  `ntk_coordinator::CoordinatorClient::target_for`'s documented `1..=levels` contract and
-  hard-failed with `ProxyError::InvalidTop` — the same off-by-one, with the same signature, as the
-  `reserve` bug already documented in that file. Now `lvl.max(1)`, which keeps the degenerate
-  `lvl == 0` behaviour byte-for-byte and restores upstream's routing everywhere else.
-  Parity fix only: it does **not** resolve the multi-level merge failure below.
+- **`call_entering` excluded the entire searchable space on any multi-level topology.**
+  `ntk_coordinator::CoordinatorClient::call_entering` passed `exclude_my_gnode = Some(top - 1)`.
+  `all_gnodes_up_to_lvl` (`ntk-peerservices/src/actor.rs:515-528`) excludes every g-node that is
+  *not* mine below the level it is given, while `tuple::approximate` independently skips every
+  g-node that *is* mine — so any `lvl >= 1` excluded everything below it, the prospective host
+  included, and `contact_peer` failed `NoParticipants`. `Some(top - 1)` degenerates to `Some(0)`
+  exactly when `levels == 1`, which is why single-level `gsizes = [8]` was unaffected and this
+  went unnoticed. Now `Some(0)` unconditionally, which is the "do not self-answer" suppression
+  the call actually wants. Verified: this alone takes a multi-level guest's `evaluate_enter` from
+  `NoParticipants` to success. Upstream has no `call_entering` at all — every coordinator call
+  uses `call()` with no exclusion (`peers.vala:820-861`) — so `Some(0)` is also the minimum
+  deviation needed to keep the self-loop fix this method was introduced for.
+
+- **`begin_enter` constructed the illegal `CoordinatorKey(0)`.** It sent `lvl + 1`, then briefly
+  `lvl.max(1)`. `is_valid_key` accepts only `1..=levels` (`fk_database.vala:47-55`, mirrored in
+  `ntk_coordinator`'s `reserve_enter`), so a servant reached with `top == 0` answers
+  `top 0 is out of range for a topology with N levels`; the clamp silently turned an illegal key
+  into a legal-but-wrong one. Upstream never builds that key — `proxy_coord.vala:342-355`
+  short-circuits `if (lvl == 0)` to the *local* manager, bypassing the coordinator entirely. This
+  port's local `BeginEnterHandler` is a no-op, so the faithful bypass is an immediate `Ok(())`.
+  `completed_enter`/`abort_enter` still clamp, documented as a known gap: their local handlers are
+  not no-ops, so an equivalent bypass must invoke them rather than return.
 
 ### Known issues
 
-- **Two virgin daemons do not merge into one network on a multi-level topology.** New test
+- **Two virgin daemons still do not merge into one network on a multi-level topology.** Test
   `two_virgin_daemons_merge_into_one_network_on_a_multi_level_topology`
   (`crates/ntkd/src/node/negotiation_tests.rs`) reproduces it deterministically in ~30s with no
-  privileges, and is committed `#[ignore]`d with the full diagnosis in its doc comment rather than
-  weakened or omitted. `[4, 2, 2, 2]` — the topology `contrib/systemd/ntkd.toml` ships — leaves the
-  guest stuck in the `Evaluating` phase indefinitely while the host sits in `Waiting`, so the two
-  settle into different g-nodes (`10.0.0.0/28` and `10.0.0.16/28`) while still exchanging QSPN
-  routes over their arc. Confirmed live in a two-namespace run
-  (`begin_enter proxy error … no participants in the network for this service`). Only single-level
-  `gsizes = [8]` negotiation was ever covered, which is why this went unnoticed. Leading
-  hypothesis is that a guest must reach the prospective *host* network's coordinator via
-  `call_entering` before the merge, rather than through its own participant set, which cannot yet
-  contain the peer's outer g-nodes.
-
+  privileges, committed `#[ignore]`d with the full diagnosis in its doc comment rather than
+  weakened or omitted. `[4, 2, 2, 2]` is the topology `contrib/systemd/ntkd.toml` ships, so a
+  packaged two-node install forms an arc and installs routes while remaining two networks.
+  The two fixes above moved the guest from stuck in `Evaluating` to clearing both
+  `evaluate_enter` and `begin_enter`; it now stalls in `search_migration_path(0)`.
+  Cause is localized: `chosen_lvl_from_snapshot` (`crates/ntkd/src/node/adapters.rs:1448-1478`)
+  answers a 0-indexed `chosen_lvl = 0`, where upstream's `max_lvl`
+  (`proxy_coord.vala:115-126,248`) is a 1-indexed host level that is never 0 — and
+  `arc_handler.vala:303-311`'s `ask_lvl == 0` branch is a terminal *failure* case, not a normal
+  entry level. Correcting that index space is the next step; every layer beneath it is now
+  upstream-faithful. Two scouts independently *inferred* that `gnode_exists` could not see the
+  peer's outer g-nodes — that is refuted: `evaluate_enter` now completes, which requires it.
+  Only single-level `gsizes = [8]` negotiation was ever covered, which is why none of this
+  surfaced earlier.
 
 ## [0.1.7]
 

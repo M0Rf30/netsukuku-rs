@@ -715,12 +715,30 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
     /// signature, as the [`Self::reserve`] bug documented below. Observed live as
     /// `begin_enter proxy error … no participants in the network for this service`, with two
     /// daemons settling permanently into different g-nodes while still exchanging QSPN routes.
-    /// Clamping instead of offsetting keeps the `lvl == 0` behaviour byte-for-byte and restores
-    /// upstream's no-offset routing for every `lvl >= 1`.
+    ///
+    /// # `lvl == 0` never goes to the DHT
+    /// `CoordinatorKey(0)` is not a legal key — `is_valid_key` accepts only `1..=levels`
+    /// (`fk_database.vala:47-55`, mirrored in `ntk_coordinator`'s own `reserve_enter`) — so a
+    /// servant reached with `top == 0` answers `top 0 is out of range for a topology with N
+    /// levels`. Upstream never constructs that key: `proxy_coord.vala:342-355` short-circuits
+    /// `if (lvl == 0) { mgr.begin_enter(lvl, ...); return; }`, invoking the *local* manager and
+    /// skipping the coordinator entirely (same bypass at `:389-396` for `completed_enter` and
+    /// `:422-429` for `abort_enter`).
+    ///
+    /// This port's local [`ntk_coordinator::BeginEnterHandler`] is
+    /// [`EnterHandlersAdapter`]'s no-op, so upstream's bypass is exactly equivalent to
+    /// succeeding here without any round trip — no handler wiring is needed to reproduce it.
+    /// A prior `lvl.max(1)` clamp instead sent `CoordinatorKey(1)`, silently converting an
+    /// illegal key into a legal-but-wrong one; on a multi-level topology `evaluate_enter`
+    /// legitimately answers `chosen_lvl = 0` and the guest then aborted with
+    /// `begin_enter proxy error … no participants in the network for this service`.
     fn begin_enter(&self, lvl: usize) -> BoxFuture<'_, Result<(), CoordinatorError>> {
         Box::pin(async move {
+            if lvl == 0 {
+                return Ok(());
+            }
             self.dht
-                .begin_enter(lvl.max(1), codec::encode_unit())
+                .begin_enter(lvl, codec::encode_unit())
                 .await
                 .map(drop)
                 .map_err(proxy_err)
@@ -728,6 +746,13 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
     }
 
     /// See [`Self::begin_enter`]'s doc comment.
+    ///
+    /// **Known gap**: `lvl == 0` still clamps here rather than bypassing, because unlike
+    /// `begin_enter` this port's local [`ntk_coordinator::CompletedEnterHandler`] is *not* a
+    /// no-op — it drives `EnterArbiter::complete` — so an equivalent bypass has to invoke that
+    /// local handler (upstream `proxy_coord.vala:389-396`) rather than simply return, which needs
+    /// [`EnterHandlersAdapter`] threaded into this struct. Not reached by the failing scenario:
+    /// the guest aborts before it can complete.
     fn completed_enter(&self, lvl: usize) -> BoxFuture<'_, Result<(), CoordinatorError>> {
         Box::pin(async move {
             self.dht

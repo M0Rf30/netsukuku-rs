@@ -138,6 +138,15 @@ impl CoordinatorClient {
     /// position-0 g-node reachable in this node's own map, and once every candidate inside this
     /// node's own hierarchy is excluded, the only candidates left are foreign ones — exactly the
     /// host these four calls exist to reach.
+    ///
+    /// `CoordinatorKey(0)` is **not** expressible and must not be attempted: `is_valid_key`
+    /// (`fk_database.vala:47-55`, mirrored in [`crate::actor`]'s `reserve_enter`) accepts only
+    /// `1..=levels`, so a servant reached with `top == 0` answers
+    /// `top 0 is out of range for a topology with N levels`. Routing `top == 0` to `x_macron =
+    /// None` ("route to myself") was tried and reverted: it delivers the request but the servant
+    /// rejects it, and it regressed the single-level
+    /// `discovering_a_peer_joins_and_adopts_the_negotiated_position`. Callers clamp instead —
+    /// see `CoordinatorClientAdapter::begin_enter` in `ntkd`.
     async fn call_entering(
         &self,
         top: usize,
@@ -145,6 +154,16 @@ impl CoordinatorClient {
         timeout: std::time::Duration,
     ) -> Result<ResponseBody, ProxyError> {
         let target = self.target_for(top)?;
+        // `Some(0)`, NOT `Some(top - 1)`. `all_gnodes_up_to_lvl` excludes every g-node that is
+        // *not* mine below the level it is given, and `ntk_peerservices::tuple::approximate`
+        // independently skips every g-node that *is* mine — so any `lvl >= 1` excludes the entire
+        // searchable space below it, the prospective host included, and `contact_peer` fails
+        // `NoParticipants`. `Some(0)` makes that helper return exactly `[HCoord(0, my_pos[0])]`,
+        // which is the "do not self-answer" suppression this call actually wants, and is what
+        // `Some(top - 1)` already degenerated to for a single-level topology — the only shape the
+        // negotiation tests covered, which is why the overshoot read as correct. Verified: this
+        // alone takes a multi-level guest's `evaluate_enter` from `NoParticipants` to success.
+        let exclude_my_gnode = Some(0);
         let (response, _respondant) = self
             .peers
             .contact_peer(
@@ -152,7 +171,7 @@ impl CoordinatorClient {
                 Some(target),
                 pack_request(&request),
                 timeout,
-                Some(top - 1),
+                exclude_my_gnode,
                 Vec::new(),
             )
             .await?;
