@@ -29,6 +29,15 @@ real protocol defects and one broken research-tooling promise; those are below t
   refuses: an overlap is a genuine hazard, but a 10/8 address on an idle interface is no reason to
   refuse to route, and failing would break working deployments to prevent a hypothetical one. The
   collision is no longer silent; ntkd still does not narrow the space it claims.
+- **The Coordinator's migration hand-off was implemented and never used.**
+  `ntk_coordinator::Manager::new` takes a `handoff: Option<HandOff>` and `Handle::hand_off`
+  exports a generation's state for exactly that purpose — the protocol at `coord.vala:142-146`,
+  covered by its own test (`crates/ntk-coordinator/tests/reserve.rs:393`). But `ntkd`'s only call
+  site passed `None`, so every level's eldership and reservation state restarted from
+  `GnodeMemory::fresh` on every rehook. `migrate` now exports the outgoing generation's state and
+  hands it to its successor. Captured *before* the generation is cancelled, because `hand_off` on
+  a dead actor silently returns an empty hand-off — which would have looked like it worked while
+  changing nothing.
 - **A permanently misconfigured host restarted forever.** `Restart=on-failure` with
   `RestartSec=3` never tripped systemd's default rate limit (5 starts/10s — 3s spacing only fits
   about 4), so the ENODEV above respawned indefinitely; the observed restart counter reached 69.

@@ -623,6 +623,11 @@ async fn bootstrap_generation<K>(
     // rare enough that the extra file read is immaterial.
     signing_key: Option<ed25519_dalek::SigningKey>,
     require_auth: bool,
+    // A retiring generation's exported Coordinator state, or `None` on a first boot. See
+    // `services::spawn`'s own parameter doc; `migrate` captures this from the outgoing
+    // generation *before* cancelling it, because `Handle::hand_off` on a dead actor
+    // silently yields an empty hand-off.
+    coordinator_handoff: Option<ntk_coordinator::HandOff>,
 ) -> anyhow::Result<Generation<K>>
 where
     K: SendNetlink + 'static,
@@ -694,6 +699,7 @@ where
         &cancel,
         signing_key,
         require_auth,
+        coordinator_handoff,
     )
     .await;
 
@@ -848,6 +854,8 @@ where
         generation_cancel.clone(),
         signing_key.clone(),
         require_auth,
+        // First generation of this process: no prior Coordinator state exists to inherit.
+        None,
     )
     .await?;
     let table = ntk_netlink::DEFAULT_MAIN_TABLE_ID;
@@ -1373,6 +1381,16 @@ where
         tracing::warn!(%err, "identities: set_naddr(virtual) on the migrating identity failed");
     }
 
+    // Export the outgoing generation's Coordinator state BEFORE cancelling it. `Handle::hand_off`
+    // falls back to an empty hand-off once the actor is gone, so reading it after the cancel
+    // below would silently reset every level to `GnodeMemory::fresh` — which is exactly the
+    // defect this captures: per-level eldership and reservation state used to restart from
+    // scratch on every rehook, because `Manager::new`'s `handoff` was hardcoded `None`.
+    // Cloned out in its own statement so the `watch::Ref` guard is dropped before the `await` —
+    // holding it across one makes this future `!Send`, which `JoinSet` rejects.
+    let outgoing_coordinator = ctx.generation_handles_tx.borrow().coordinator.clone();
+    let coordinator_handoff = outgoing_coordinator.hand_off().await;
+
     // -- tear down the previous generation: cancel its tasks, wait for them, then remove
     // exactly the kernel state it installed — before anything about the new generation touches
     // the kernel, so there is never a moment with both generations' routes installed at once. --
@@ -1403,6 +1421,7 @@ where
         new_generation_cancel.clone(),
         ctx.signing_key.clone(),
         ctx.require_auth,
+        Some(coordinator_handoff),
     )
     .await
     {

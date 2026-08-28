@@ -234,8 +234,9 @@ the count.
   `snsd_cache.c`) plus NTK_RFC 0009 (SNSD) and NTK_RFC 0014 (the DHT substrate). This is the
   fourth kind the old three-bucket framing excluded: not absent, not dropped, but built past what
   the reference itself has — which is why the security note below matters, not less.
-- *A real gap against the reference* — three, not one (a fourth, the missing `10.0.0.0/8`
-  collision check, was closed in 0.1.3 and is described below):
+- *A real gap against the reference* — two, not one. Two more the audit found (the Coordinator
+  hand-off never being wired, and the missing `10.0.0.0/8` collision check) were closed in 0.1.3;
+  the second is described below because it is only partly closed:
   - **G-node migration is a full data-plane blackout for the whole window, not merely a missing
     second stack.** `rehook`/`migrate` tears down every kernel route the previous generation held
     before the successor identity exists (`crates/ntkd/src/node/lifecycle.rs:1298-1301`), and only
@@ -248,13 +249,6 @@ the count.
     (`research/impl/vala/identities/identities.vala:441-577`) — which this daemon cannot build
     today because it holds one live dispatcher target per process, never two identities
     simultaneously reachable (`crates/ntkd/src/node/lifecycle.rs:137-149`).
-  - **The Coordinator's migration hand-off is implemented and never used.**
-    `ntk_coordinator::Manager::new` accepts a `handoff: Option<HandOff>`
-    (`crates/ntk-coordinator/src/actor.rs:383`) and `Handle::hand_off` exports a generation's
-    state for exactly that purpose (`:512-517`), but the one call site that constructs a
-    `Manager` hardcodes `None` (`crates/ntkd/src/node/services.rs:217`). Per-level eldership and
-    reservation state (`GnodeMemory::fresh`, `actor.rs:389`) restarts from scratch on every rehook
-    instead of carrying forward.
   - **A host that already uses `10.0.0.0/8` is now detected, but only warned about.**
     `crates/ntkd/src/kernel/preflight.rs`'s `warn_address_space_conflicts` lists every host
     address inside the range this daemon routes in

@@ -137,6 +137,12 @@ pub async fn spawn(
     // `NtkdConfig::require_auth` — gates this generation's servant-side origin-auth
     // enforcement (`ntk_peerservices::Config::require_auth`).
     require_auth: bool,
+    // A retiring generation's exported Coordinator state (`ntk_coordinator::Handle::hand_off`),
+    // threaded into `ntk_coordinator::Manager::new`'s `handoff` parameter — the hand-off protocol
+    // at `coord.vala:142-146`. `None` on a first boot, where there is nothing to inherit; `Some`
+    // on a rehook, so per-level eldership and reservation state carries across the migration
+    // instead of every level restarting from `GnodeMemory::fresh`.
+    coordinator_handoff: Option<ntk_coordinator::HandOff>,
 ) -> Services {
     // A negotiated re-address (`HookingProvenance::Carried`) starts this generation's
     // participation knowledge empty rather than trivially-complete — `ntk_peerservices::Manager::
@@ -214,7 +220,7 @@ pub async fn spawn(
         propagation_handler,
         enter_handlers,
         coordinator_config(),
-        None,
+        coordinator_handoff,
     );
     tasks.spawn(coordinator_manager.run(cancel.child_token()));
 
