@@ -6,11 +6,13 @@
 //! [`ntk_qspn::RouteSnapshot`] actually requires, never a blind reinstall of everything.
 
 use std::collections::BTreeMap;
+use std::hash::Hash;
 use std::net::Ipv4Addr;
 
 use ntk_common::{Cost, HCoord, Naddr};
 use ntk_netlink::{
     Interface, Ipv4Net, Netlink, Nexthop, RouteKey, RouteSpec, RouteTarget, RuleSelector, RuleSpec,
+    TableAllocator, TableAllocatorError,
 };
 use ntk_qspn::{ArcId, RoutePath, RouteSnapshot};
 
@@ -55,6 +57,15 @@ pub struct RouteInstaller<K> {
 }
 
 impl<K> RouteInstaller<K> {
+    /// Whether this installer still has kernel state applied for its identity — its address on
+    /// [`IDENTITY_ADDRESS_INTERFACE`], its catch-all rule, or any route from a prior
+    /// [`Self::apply`] — `false` only once [`Self::teardown`] has actually removed all three (or
+    /// before anything was ever installed). [`release_generation_table`] uses this to refuse
+    /// releasing a still-installed generation's table back to a [`ntk_netlink::TableAllocator`].
+    pub fn is_installed(&self) -> bool {
+        self.identity_address.is_some() || !self.applied.is_empty()
+    }
+
     /// Test-only accessor to the underlying kernel handle, so integration tests can assert on
     /// [`ntk_netlink::FakeNetlink`]'s recorded operation log directly.
     #[cfg(any(test, feature = "test-util"))]
@@ -415,10 +426,57 @@ pub enum RouteError {
     Addressing(#[from] AddressingError),
 }
 
+/// Everything that can go wrong releasing a retired generation's table id/rule priority back to
+/// a [`ntk_netlink::TableAllocator`] via [`release_generation_table`].
+#[derive(Debug, thiserror::Error)]
+pub enum GenerationTableError {
+    /// `installer` still has kernel state installed — see [`RouteInstaller::is_installed`] and
+    /// [`RouteInstaller::teardown`]. Releasing now would let a fresh generation's
+    /// [`ntk_netlink::TableAllocator::acquire`] be handed this table while the retiring
+    /// generation's routes/rule/address are still sitting in it: `ntk_netlink::cleanup`'s
+    /// crash-recovery sweep already treats every table
+    /// [`ntk_netlink::TableAllocator::owned_tables`] enumerates as Netsukuku's regardless of the
+    /// allocator's own bookkeeping, so it cannot tell "freed, empty" apart from "freed, still
+    /// full" — this check is what keeps that distinction true in the first place.
+    #[error("route installer still has kernel state installed; call teardown() first")]
+    StillInstalled,
+    /// The allocator itself refused: unknown owner, or
+    /// [`ntk_netlink::TableAllocator::release`]'s own outstanding-reference guard.
+    #[error(transparent)]
+    Allocator(#[from] TableAllocatorError),
+}
+
+/// Releases `owner`'s table id/rule priority back to `table_allocator` — the retirement
+/// counterpart to [`ntk_netlink::TableAllocator::acquire`] for one identity generation's
+/// [`RouteInstaller`]. Refuses (see [`GenerationTableError::StillInstalled`]) unless `installer`
+/// has already been torn down: [`RouteInstaller::teardown`] must remove the generation's
+/// routes/rule/address from the kernel *before* its table id is freed, or a table `cleanup` (and
+/// a fresh [`ntk_netlink::TableAllocator::acquire`]) considers empty may still hold this
+/// generation's now-orphaned kernel state.
+///
+/// # Errors
+/// [`GenerationTableError::StillInstalled`] if `installer` has not been torn down yet;
+/// [`GenerationTableError::Allocator`] if `table_allocator` has no allocation for `owner`, or
+/// still has outstanding references.
+pub fn release_generation_table<K, O>(
+    installer: &RouteInstaller<K>,
+    table_allocator: &mut TableAllocator<O>,
+    owner: &O,
+) -> Result<u32, GenerationTableError>
+where
+    O: Clone + Eq + Hash,
+{
+    if installer.is_installed() {
+        return Err(GenerationTableError::StillInstalled);
+    }
+    Ok(table_allocator.release(owner)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ntk_qspn::RouteEntry;
+    use std::sync::Arc;
 
     #[test]
     fn nexthop_weight_gives_cheapest_path_max_weight() {
@@ -728,6 +786,136 @@ mod tests {
         assert!(
             matches!(&ops[1], ntk_netlink::Operation::RemoveRoute(key) if key.table == 200),
             "stale's stale route must be withdrawn: {ops:?}"
+        );
+    }
+
+    /// Two identities' [`RouteInstaller`]s, each holding a distinct already-allocated
+    /// `table`/`rule_priority` pair (exactly what [`TableAllocator::acquire`] hands out: the
+    /// main identity's fixed table plus one drawn from the peer pool), must install without
+    /// either seeing the other's state — same interface, same underlying kernel, even the same
+    /// destination — yet every mutation still lands in its own table. Proven on
+    /// [`ntk_netlink::FakeNetlink::operations`]'s ordered log directly, not internal state, per
+    /// this repo's own testing convention.
+    #[tokio::test]
+    async fn two_installers_on_different_tables_never_collide() {
+        let topology = ntk_common::Topology::new([4, 2]).unwrap();
+        let main_naddr = Naddr::new(topology.clone(), [1, 0]).unwrap();
+        let bridge_naddr = Naddr::new(topology, [2, 0]).unwrap();
+
+        let kernel = Arc::new(ntk_netlink::FakeNetlink::with_links(vec![
+            ntk_netlink::LinkInfo {
+                index: 1,
+                name: "lo".into(),
+                is_up: true,
+            },
+        ]));
+
+        let mut allocator: TableAllocator<&str> = TableAllocator::new();
+        let (bridge_table, bridge_priority) = allocator.acquire("bridge").unwrap();
+        assert_ne!(bridge_table, allocator.main_table());
+        assert_ne!(bridge_priority, allocator.main_rule_priority());
+
+        let mut main_installer = RouteInstaller::new(
+            crate::node::kernel_handle::KernelHandle(kernel.clone()),
+            main_naddr,
+            allocator.main_table(),
+            allocator.main_rule_priority(),
+        );
+        let mut bridge_installer = RouteInstaller::new(
+            crate::node::kernel_handle::KernelHandle(kernel.clone()),
+            bridge_naddr,
+            bridge_table,
+            bridge_priority,
+        );
+
+        main_installer.install_identity().await.unwrap();
+        bridge_installer.install_identity().await.unwrap();
+
+        let via: Ipv4Addr = "169.254.1.1".parse().unwrap();
+        main_installer.set_arc_endpoint(ArcId::from(1), via, Interface::name("eth0"));
+        bridge_installer.set_arc_endpoint(ArcId::from(2), via, Interface::name("eth0"));
+        let snapshot = |arc: u32| RouteSnapshot {
+            levels: vec![
+                vec![RouteEntry {
+                    destination: HCoord::new(0, 3),
+                    paths: vec![path(arc, 10)],
+                }],
+                Vec::new(),
+            ],
+        };
+        main_installer.apply(&snapshot(1)).await.unwrap();
+        bridge_installer.apply(&snapshot(2)).await.unwrap();
+
+        let ops = kernel.operations();
+        let rules: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                ntk_netlink::Operation::AddRule(r) => Some(*r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rules.len(), 2, "one AddRule per identity: {ops:?}");
+        assert_ne!(rules[0].table, rules[1].table);
+        assert_ne!(rules[0].priority, rules[1].priority);
+
+        let routes: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                ntk_netlink::Operation::AddRoute(r) => Some(r.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            routes.len(),
+            2,
+            "one AddRoute per identity, same destination: {ops:?}"
+        );
+        assert_ne!(
+            routes[0].table, routes[1].table,
+            "identical destination in two different tables must not collide: {ops:?}"
+        );
+    }
+
+    /// [`release_generation_table`] must refuse to release a generation's table while its
+    /// [`RouteInstaller`] still has kernel state installed for it — releasing early would let
+    /// [`TableAllocator::acquire`] hand the same table to a fresh generation while the retiring
+    /// one's routes/rule/address are still sitting in it. Once [`RouteInstaller::teardown`]
+    /// actually runs, release must succeed and the table must be the next one
+    /// [`TableAllocator::acquire`] hands out.
+    #[tokio::test]
+    async fn release_before_teardown_is_rejected_then_the_table_is_reusable() {
+        let topology = ntk_common::Topology::new([4, 2]).unwrap();
+        let naddr = Naddr::new(topology, [1, 0]).unwrap();
+        let kernel = ntk_netlink::FakeNetlink::with_links(vec![ntk_netlink::LinkInfo {
+            index: 1,
+            name: "lo".into(),
+            is_up: true,
+        }]);
+
+        let mut allocator: TableAllocator<&str> = TableAllocator::new();
+        let (table, priority) = allocator.acquire("bridge").unwrap();
+
+        let mut installer = RouteInstaller::new(kernel, naddr, table, priority);
+        installer.install_identity().await.unwrap();
+
+        assert!(matches!(
+            release_generation_table(&installer, &mut allocator, &"bridge"),
+            Err(GenerationTableError::StillInstalled)
+        ));
+        assert_eq!(
+            allocator.table_of(&"bridge"),
+            Some((table, priority)),
+            "a rejected release must not touch the allocator's bookkeeping"
+        );
+
+        installer.teardown().await.unwrap();
+        let released = release_generation_table(&installer, &mut allocator, &"bridge").unwrap();
+        assert_eq!(released, table);
+
+        let (reused, _) = allocator.acquire("another-bridge").unwrap();
+        assert_eq!(
+            reused, table,
+            "a released table must be the next one handed out"
         );
     }
 }

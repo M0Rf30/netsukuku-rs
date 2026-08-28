@@ -63,6 +63,10 @@ pub enum DomainDecodeError {
     /// [`from_typed_value`]'s `M::decode` failed on the `payload` bytes.
     #[error("failed to decode TypedValue payload: {0}")]
     PayloadDecode(String),
+
+    /// [`v1::UnicastId`]'s `kind` oneof had no arm set.
+    #[error("UnicastId message is missing its `kind` oneof")]
+    MissingUnicastIdKind,
 }
 
 // ---------------------------------------------------------------------------
@@ -255,4 +259,73 @@ pub fn from_typed_value<M: prost::Message + Default>(
     }
     M::decode(tv.payload.as_slice())
         .map_err(|err| DomainDecodeError::PayloadDecode(err.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// UnicastId
+// ---------------------------------------------------------------------------
+
+/// `type_tag` [`UnicastId::to_typed_value`] uses — this crate's own module name in the
+/// `"<module>.<TypeName>"` convention (see the "TypedValue helpers" doc above).
+pub const UNICAST_ID_TAG: &str = "proto.UnicastId";
+
+/// Which local identity a `Request` addresses — upstream's three `IUnicastID` implementers
+/// (research/impl/vala/ntkd/serializables.vala:405-492); see [`crate::v1::UnicastId`]'s own doc
+/// for the exact wire shape and the v0.1.5 compatibility rule [`Self::from_typed_value`]
+/// implements. `WholeNode`/`IdentityAware` carry their id as an opaque [`crate::v1::TypedValue`]
+/// — exactly like [`crate::v1::CallerContext`]'s own `source_id`/`src_nic` — because decoding it
+/// is a phase-2 crate's job; this crate depends on none of them and must not start now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnicastId {
+    /// Addresses this node's node-level (neighborhood/identities) skeleton, not any one
+    /// identity. Carries the caller's own id (`WholeNodeUnicastID(neighbour_id)`).
+    WholeNode(crate::v1::TypedValue),
+    /// Addresses exactly the local identity whose own id matches the carried payload
+    /// (`IdentityAwareUnicastID(NodeID)`).
+    IdentityAware(crate::v1::TypedValue),
+    /// Addresses whichever local identity currently is main (`MainIdentityUnicastID`). Also
+    /// what an absent/empty `TypedValue` decodes as — see [`Self::from_typed_value`]'s doc.
+    MainIdentity,
+}
+
+impl UnicastId {
+    /// Encodes as the `TypedValue` that populates [`crate::v1::Request::unicast_id`].
+    #[must_use]
+    pub fn to_typed_value(&self) -> crate::v1::TypedValue {
+        use crate::v1::unicast_id::Kind;
+        let kind = match self {
+            UnicastId::WholeNode(id) => Kind::WholeNode(id.clone()),
+            UnicastId::IdentityAware(id) => Kind::IdentityAware(id.clone()),
+            UnicastId::MainIdentity => Kind::MainIdentity(crate::v1::Empty::VALUE),
+        };
+        typed_value(UNICAST_ID_TAG, &crate::v1::UnicastId { kind: Some(kind) })
+    }
+
+    /// Decodes `tv` — the wire value of [`crate::v1::Request::unicast_id`].
+    ///
+    /// # Compatibility
+    /// An empty `type_tag` — what `tv` always is on a `Request` an unmodified v0.1.5 peer (or
+    /// any peer that has never heard of `UnicastId`) sent, since such a peer never sets
+    /// `unicast_id` at all and proto3's zero value for an unset message field is exactly this
+    /// empty struct — decodes as [`UnicastId::MainIdentity`], not [`DomainDecodeError::TypeTagMismatch`].
+    /// Breaking that would partition this node from every already-deployed peer.
+    ///
+    /// # Errors
+    /// [`DomainDecodeError::TypeTagMismatch`] if `type_tag` is set but is not [`UNICAST_ID_TAG`];
+    /// [`DomainDecodeError::PayloadDecode`] if the payload does not decode as
+    /// [`crate::v1::UnicastId`]; [`DomainDecodeError::MissingUnicastIdKind`] if it decodes but no
+    /// `kind` oneof arm is set.
+    pub fn from_typed_value(tv: &crate::v1::TypedValue) -> Result<Self, DomainDecodeError> {
+        use crate::v1::unicast_id::Kind;
+        if tv.type_tag.is_empty() {
+            return Ok(UnicastId::MainIdentity);
+        }
+        let wire: crate::v1::UnicastId = from_typed_value(tv, UNICAST_ID_TAG)?;
+        match wire.kind {
+            Some(Kind::WholeNode(id)) => Ok(UnicastId::WholeNode(id)),
+            Some(Kind::IdentityAware(id)) => Ok(UnicastId::IdentityAware(id)),
+            Some(Kind::MainIdentity(_)) => Ok(UnicastId::MainIdentity),
+            None => Err(DomainDecodeError::MissingUnicastIdKind),
+        }
+    }
 }

@@ -36,10 +36,15 @@ impl LinkId {
     }
 }
 
-/// Encodes `id` — this identity's own stable [`ntk_neighborhood::NodeId`]
-/// (`NeighborhoodConfig::my_id`, constant for the process's whole lifetime) — as a
-/// `CallerContext.src_nic` `TypedValue`, so the peer's [`LinkRegistry::link_for_caller`] can
-/// resolve it back to *its own* [`LinkId`] for the arc.
+/// Encodes `id` — an [`ntk_neighborhood::NodeId`] — as a `TypedValue`. This node's own
+/// stable id (`NeighborhoodConfig::my_id`, constant for the process's whole lifetime) travels
+/// this way in `CallerContext.src_nic`, so the peer's [`LinkRegistry::link_for_caller`] can
+/// resolve it back to *its own* [`LinkId`] for the arc; a *destination* id travels the exact
+/// same way inside `crate::node::dispatch`'s `UnicastId::WholeNode`/`IdentityAware` payload
+/// (`crates/ntk-proto/proto/ntk.proto`'s `UnicastId` message) — this port's deliberate choice to
+/// reuse one identity-id type everywhere on the wire rather than mint a second one for
+/// addressing purposes (see this doc's own reasoning below for why `NodeId` is the right type;
+/// three separate bugs in this codebase came from inventing a second per-process identity).
 ///
 /// Neither [`LinkId`] nor a MAC is used for this. [`LinkId`]: each node mints its own `LinkId`s
 /// from an independent local counter starting at 1, so two different nodes' `LinkId`s routinely
@@ -60,7 +65,12 @@ pub fn encode_caller_id(id: ntk_neighborhood::NodeId) -> ntk_proto::v1::TypedVal
     ntk_proto::v1::TypedValue::new(NEIGHBOUR_ID_TAG, id.get().to_be_bytes().to_vec())
 }
 
-fn decode_caller_id(tv: &ntk_proto::v1::TypedValue) -> Option<ntk_neighborhood::NodeId> {
+/// Inverse of [`encode_caller_id`] — decodes a `TypedValue` tagged [`NEIGHBOUR_ID_TAG`] back to
+/// the [`ntk_neighborhood::NodeId`] it names, revalidating through `NodeId::from_raw` rather
+/// than trusting a peer-supplied value is already positive. `pub(crate)` (not just used via
+/// [`LinkRegistry::link_for_caller`] below) so `crate::node::dispatch`'s `UnicastId::WholeNode`/
+/// `IdentityAware` resolution can decode the same encoding.
+pub(crate) fn decode_caller_id(tv: &ntk_proto::v1::TypedValue) -> Option<ntk_neighborhood::NodeId> {
     if tv.type_tag != NEIGHBOUR_ID_TAG {
         return None;
     }

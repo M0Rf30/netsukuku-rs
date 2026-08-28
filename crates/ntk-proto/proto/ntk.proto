@@ -117,6 +117,36 @@ message CallerContext {
   TypedValue src_nic = 2;
 }
 
+// Destination-identity selector, wire-encoded as the `TypedValue` populating `Request.
+// unicast_id` below (via `ntk_proto::domain::UnicastId::to_typed_value`/`from_typed_value`).
+// Mirrors upstream's three `IUnicastID` implementers
+// (research/impl/vala/ntkd/serializables.vala:405-492) and `get_dispatcher`'s routing rule for
+// each (research/impl/vala/ntkd/rpc/skeleton_factory.vala:190-236):
+//   - `whole_node`: addresses this node's neighborhood/identities skeleton, not any one
+//     identity (`WholeNodeUnicastID(neighbour_id)`). `crates/ntkd/src/node/dispatch.rs` never
+//     reaches this variant in practice: its neighborhood/identity routing arms are node-level
+//     and dispatch unconditionally, without ever decoding `unicast_id` — round-tripped here
+//     only so a peer that ever sends one is not rejected outright.
+//   - `identity_aware`: exactly the local identity whose own id equals `identity_aware`
+//     (`IdentityAwareUnicastID(NodeID)`). This schema deliberately reuses whichever id type a
+//     phase-2 crate already carries on the wire for identity purposes (this port's deviation:
+//     see `crates/ntkd/src/node/registry.rs`'s `encode_caller_id` doc) rather than introducing
+//     a second one — the payload is opaque `TypedValue` for exactly that reason.
+//   - `main_identity`: whichever locally-hosted identity currently is main
+//     (`MainIdentityUnicastID`).
+//
+// Wire-compat rule: a `Request.unicast_id` at its zero value (empty `type_tag`, empty `payload`
+// — what an unmodified v0.1.5 peer, which never sets `unicast_id` at all, always sends) decodes
+// exactly as `main_identity`, never rejected. See `crates/ntkd/src/node/dispatch.rs`'s
+// compatibility contract.
+message UnicastId {
+  oneof kind {
+    TypedValue whole_node = 1;
+    TypedValue identity_aware = 2;
+    Empty main_identity = 3;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Request / Response (unicast, stream transport)
 // ---------------------------------------------------------------------------
@@ -134,7 +164,8 @@ message Request {
   // Target identity on the recipient node (zcd's `unicast-id`,
   // `json_handling.vala:36-38`) — which local identity object should handle
   // this call when the daemon hosts more than one (`IDelegate.get_addr_set`,
-  // `ntkdrpc/api.vala:39-42`).
+  // `ntkdrpc/api.vala:39-42`). Wire-encoded as a `UnicastId` above (see that
+  // message's own doc for the three cases and the v0.1.5 compatibility rule).
   TypedValue unicast_id = 3;
   // Mirrors zcd's `wait-reply` (`json_handling.vala:38`). If false the
   // caller does not expect a `Response`; a caller that calls a non-void

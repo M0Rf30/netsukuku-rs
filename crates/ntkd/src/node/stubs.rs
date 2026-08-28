@@ -6,6 +6,24 @@
 //! (`RpcPeersStub`, `RpcCoordinatorStub`); `ntk-qspn` and `ntk-hooking` do not (only their
 //! `Fake*` doubles exist), so this module hand-writes `QspnStub`/`HookingStub` over the shared
 //! `RpcClient`, encoding/decoding with each crate's already-exported `wire` helpers.
+//!
+//! # `unicast_id`
+//! Every call built here names [`main_identity_unicast_id`] — "whichever identity is currently
+//! main" (`research/impl/vala/ntkd/serializables.vala:492`'s `MainIdentityUnicastID`).
+//!
+//! Deliberately *not* the identity-aware variant, even though the dispatcher can now resolve it
+//! and [`identity_aware_unicast_id`] exists for when it is needed. Naming a destination identity
+//! requires knowing the id the receiver will match against — its own
+//! `NeighborhoodConfig::my_id`. The only candidate available here is
+//! `LinkRegistry::entry(link).neighbour_id`, and sending that regressed real-kernel convergence
+//! (`mesh.rs` went 4 passed/3 failed to 2/5) because it is this sender's record of the peer, not
+//! provably the value the peer matches on: exactly the failure family `AGENTS.md` records, where
+//! an id minted on one side was decoded against the other side's registry.
+//!
+//! It costs nothing to defer. A second identity only exists once the connectivity identity does
+//! (mig-01, README §6), and at that point the caller knows *deliberately* which of the two it is
+//! addressing rather than inferring it from an arc. Until then every node hosts exactly one
+//! identity and `main_identity` names it unambiguously.
 
 use std::sync::Arc;
 
@@ -16,6 +34,7 @@ use ntk_hooking::{
     HookingStubFactory, NetworkData, RequestPacket, ResponsePacket, SearchMigrationPathErrorPkt,
     SearchMigrationPathRequest, SearchMigrationPathResponse,
 };
+use ntk_proto::domain::UnicastId;
 use ntk_proto::v1::method_call::Call;
 use ntk_proto::v1::response_payload::Value as RespValue;
 use ntk_proto::v1::{CallerContext, MethodCall, TypedValue};
@@ -41,8 +60,13 @@ fn caller_for_id(id: ntk_neighborhood::NodeId) -> CallerContext {
     }
 }
 
-fn unicast_id() -> TypedValue {
-    TypedValue::new(String::new(), Vec::new())
+/// The `unicast_id` every call from this module sends: "whichever identity is currently main".
+///
+/// There is deliberately no identity-aware counterpart here yet — see this module's own doc for
+/// why naming a destination identity has to wait for the connectivity identity to exist.
+/// `ntk_proto::domain::UnicastId::IdentityAware` is the encoder for when it does.
+fn main_identity_unicast_id() -> TypedValue {
+    UnicastId::MainIdentity.to_typed_value()
 }
 
 fn malformed(msg: impl Into<String>) -> RpcError {
@@ -293,6 +317,12 @@ struct RpcQspnStub {
     my_id: ntk_neighborhood::NodeId,
 }
 
+impl RpcQspnStub {
+    fn unicast_id(&self) -> TypedValue {
+        main_identity_unicast_id()
+    }
+}
+
 impl QspnStub for RpcQspnStub {
     fn get_full_etp(
         &self,
@@ -304,7 +334,7 @@ impl QspnStub for RpcQspnStub {
                 .client
                 .call(
                     caller_for_id(self.my_id),
-                    unicast_id(),
+                    self.unicast_id(),
                     MethodCall {
                         call: Some(Call::QspnGetFullEtp(arg)),
                     },
@@ -328,7 +358,7 @@ impl QspnStub for RpcQspnStub {
             self.client
                 .call(
                     caller_for_id(self.my_id),
-                    unicast_id(),
+                    self.unicast_id(),
                     MethodCall {
                         call: Some(Call::QspnSendEtp(args)),
                     },
@@ -343,7 +373,7 @@ impl QspnStub for RpcQspnStub {
             self.client
                 .notify(
                     caller_for_id(self.my_id),
-                    unicast_id(),
+                    self.unicast_id(),
                     MethodCall {
                         call: Some(Call::QspnGotPrepareDestroy(ntk_proto::v1::Empty::VALUE)),
                     },
@@ -357,7 +387,7 @@ impl QspnStub for RpcQspnStub {
             self.client
                 .notify(
                     caller_for_id(self.my_id),
-                    unicast_id(),
+                    self.unicast_id(),
                     MethodCall {
                         call: Some(Call::QspnGotDestroy(ntk_proto::v1::Empty::VALUE)),
                     },
@@ -549,6 +579,12 @@ struct RpcHookingStub {
     client: Arc<dyn RpcClient>,
 }
 
+impl RpcHookingStub {
+    fn unicast_id(&self) -> TypedValue {
+        main_identity_unicast_id()
+    }
+}
+
 macro_rules! notify_call {
     ($self:ident, $variant:ident, $encoded:expr) => {
         Box::pin(async move {
@@ -556,7 +592,7 @@ macro_rules! notify_call {
                 .client
                 .notify(
                     empty_caller(),
-                    unicast_id(),
+                    $self.unicast_id(),
                     MethodCall {
                         call: Some(Call::$variant($encoded)),
                     },
@@ -576,7 +612,7 @@ impl HookingStub for RpcHookingStub {
                 .client
                 .call(
                     empty_caller(),
-                    unicast_id(),
+                    self.unicast_id(),
                     MethodCall {
                         call: Some(Call::HookingRetrieveNetworkData(ask_coord)),
                     },
@@ -598,7 +634,7 @@ impl HookingStub for RpcHookingStub {
                 .client
                 .call(
                     empty_caller(),
-                    unicast_id(),
+                    self.unicast_id(),
                     MethodCall {
                         call: Some(Call::HookingSearchMigrationPath(lvl_i32)),
                     },
@@ -722,7 +758,8 @@ pub struct HookingStubFactoryAdapter {
 
 impl HookingStubFactory for HookingStubFactoryAdapter {
     fn arc_stub(&self, arc: ntk_hooking::ArcId) -> Arc<dyn HookingStub> {
-        self.links.get(LinkId(arc.0)).map_or_else(
+        let link = LinkId(arc.0);
+        self.links.get(link).map_or_else(
             || Arc::new(UnreachableHookingStub) as Arc<dyn HookingStub>,
             |client| Arc::new(RpcHookingStub { client }) as Arc<dyn HookingStub>,
         )

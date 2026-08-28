@@ -3,7 +3,7 @@
 //! against.
 
 use ntk_common::{Cost, Fingerprint, FingerprintParts, HCoord, Naddr, Topology};
-use ntk_proto::domain::{DomainDecodeError, from_typed_value, typed_value, v1};
+use ntk_proto::domain::{DomainDecodeError, UnicastId, from_typed_value, typed_value, v1};
 use proptest::prelude::*;
 
 fn topology_strategy() -> impl Strategy<Value = Topology> {
@@ -297,4 +297,78 @@ fn typed_value_rejects_truncated_payload() {
     // incomplete/invalid encoding prost must reject, not silently accept.
     let err = from_typed_value::<v1::Topology>(&tv, "domain.Topology").unwrap_err();
     assert!(matches!(err, DomainDecodeError::PayloadDecode(_)));
+}
+
+// ---------------------------------------------------------------------------
+// UnicastId
+// ---------------------------------------------------------------------------
+
+fn opaque_identity_payload(tag: &str, raw: i32) -> ntk_proto::v1::TypedValue {
+    // Stand-in for whatever phase-2 crate's own id encoding travels inside
+    // `UnicastId::WholeNode`/`IdentityAware` — ntk-proto never interprets it, so any tag/bytes
+    // exercise the round trip identically to a real `ntk_neighborhood::NodeId` encoding.
+    ntk_proto::v1::TypedValue::new(tag, raw.to_be_bytes().to_vec())
+}
+
+#[test]
+fn main_identity_round_trips() {
+    let tv = UnicastId::MainIdentity.to_typed_value();
+    assert_eq!(
+        UnicastId::from_typed_value(&tv).unwrap(),
+        UnicastId::MainIdentity
+    );
+}
+
+#[test]
+fn identity_aware_round_trips_its_opaque_id_payload() {
+    let id = opaque_identity_payload("ntkd.NeighbourId", 42);
+    let tv = UnicastId::IdentityAware(id.clone()).to_typed_value();
+    assert_eq!(
+        UnicastId::from_typed_value(&tv).unwrap(),
+        UnicastId::IdentityAware(id)
+    );
+}
+
+#[test]
+fn whole_node_round_trips_its_opaque_id_payload() {
+    let id = opaque_identity_payload("ntkd.NeighbourId", 7);
+    let tv = UnicastId::WholeNode(id.clone()).to_typed_value();
+    assert_eq!(
+        UnicastId::from_typed_value(&tv).unwrap(),
+        UnicastId::WholeNode(id)
+    );
+}
+
+/// The single most important case: a v0.1.5 peer never sets `unicast_id` at all, and proto3's
+/// zero value for that unset field is this exact empty `TypedValue`. It MUST decode as
+/// `MainIdentity`, not be rejected as a type-tag mismatch — breaking this partitions this node
+/// from every already-deployed peer.
+#[test]
+fn an_absent_or_empty_unicast_id_decodes_as_main_identity() {
+    let empty = ntk_proto::v1::TypedValue::default();
+    assert_eq!(
+        UnicastId::from_typed_value(&empty).unwrap(),
+        UnicastId::MainIdentity
+    );
+}
+
+#[test]
+fn rejects_a_typed_value_tagged_for_something_else() {
+    let foreign = typed_value("qspn.Naddr", &v1::Topology { gsizes: vec![2] });
+    let err = UnicastId::from_typed_value(&foreign).unwrap_err();
+    assert_eq!(
+        err,
+        DomainDecodeError::TypeTagMismatch {
+            expected: "proto.UnicastId".to_owned(),
+            actual: "qspn.Naddr".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn rejects_unicast_id_with_absent_kind_oneof() {
+    let wire = ntk_proto::v1::UnicastId { kind: None };
+    let tv = typed_value("proto.UnicastId", &wire);
+    let err = UnicastId::from_typed_value(&tv).unwrap_err();
+    assert_eq!(err, DomainDecodeError::MissingUnicastIdKind);
 }

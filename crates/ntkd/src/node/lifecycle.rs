@@ -159,7 +159,7 @@ use futures::future::BoxFuture;
 use ntk_common::{Fingerprint, Naddr, Topology};
 use ntk_hooking::HookingEvent;
 use ntk_identities::{ArcInfo, MigrationId};
-use ntk_netlink::Interface;
+use ntk_netlink::{Interface, TableAllocator};
 use ntk_qspn::QspnEvent;
 use ntk_rpc::RpcClient;
 use tokio::sync::{broadcast, watch};
@@ -573,6 +573,13 @@ enum QspnOrigin {
 /// (the initial, always-trivial generation) and [`rehook`] (a later negotiated re-address) need.
 /// Every actor spawned here is a child of `cancel` and reaped into `tasks`.
 ///
+/// `table`/`rule_priority` are this generation's already-allocated routing-table id and rule
+/// priority — [`ntk_netlink::TableAllocator::main_table`]/`main_rule_priority` for the main
+/// identity, or a fresh [`ntk_netlink::TableAllocator::acquire`] for a future connectivity/
+/// bridge identity. This function only ever forwards them into [`RouteInstaller::new`], never
+/// allocates one itself, so two generations of this process can hold kernel routing state at
+/// once without fighting over the same table.
+///
 /// # Bug this fixes: a lost-event race on `QspnEvent::BootstrapComplete`
 /// `ntk_qspn`'s actor unconditionally fires `BootstrapComplete` `bootstrap_signal_delay`
 /// (default 1ms) after its own task is first polled — `create_net` is always immediately
@@ -614,6 +621,8 @@ async fn bootstrap_generation<K>(
     links: Arc<PeerLinks>,
     my_id: ntk_neighborhood::NodeId,
     kernel: KernelHandle<K>,
+    table: u32,
+    rule_priority: u32,
     tasks: &mut JoinSet<()>,
     cancel: CancellationToken,
     // This node's RPC-identity signing key and `require_auth` flag — threaded straight through
@@ -703,8 +712,6 @@ where
     )
     .await;
 
-    let table = ntk_netlink::DEFAULT_MAIN_TABLE_ID;
-    let rule_priority = ntk_netlink::DEFAULT_MAIN_RULE_PRIORITY;
     let mut installer = RouteInstaller::new(kernel, route_naddr, table, rule_priority);
     installer.install_identity().await?;
 
@@ -839,6 +846,13 @@ where
     });
 
     // -- qspn / peerservices / coordinator / andna / hooking / routes --
+    // One table-id/rule-priority pool for this process's whole life: the main identity always
+    // gets the fixed main table (`TableAllocator::main_table`, upstream's own `ntk.conf`,
+    // `research/impl/vala/ntkd/table_names.vala:51-52`), never drawn from the peer pool below —
+    // a future connectivity/bridge identity (`migrate`'s own "Why not a true concurrent fork"
+    // doc) would instead `acquire` one from it, so both can hold kernel routing state at once
+    // without fighting over table 251.
+    let table_allocator: TableAllocator<MigrationId> = TableAllocator::new();
     let generation_cancel = cancel.child_token();
     let generation = bootstrap_generation(
         topology.clone(),
@@ -850,6 +864,8 @@ where
         links.clone(),
         my_id,
         kernel,
+        table_allocator.main_table(),
+        table_allocator.main_rule_priority(),
         tasks,
         generation_cancel.clone(),
         signing_key.clone(),
@@ -858,7 +874,7 @@ where
         None,
     )
     .await?;
-    let table = ntk_netlink::DEFAULT_MAIN_TABLE_ID;
+    let table = table_allocator.main_table();
     let generation_handles = GenerationHandles::from_generation(&generation, 0);
 
     // -- Inbound dispatch --
@@ -869,6 +885,7 @@ where
     let dispatcher = Arc::new(Dispatcher::new(
         neighborhood_rpc,
         identity_rpc,
+        my_id,
         generation.dispatch,
     ));
 
@@ -902,6 +919,7 @@ where
             generation_tasks: JoinSet::new(),
             signing_key,
             require_auth,
+            table_allocator,
         },
         generation.qspn_events,
         cancel,
@@ -981,6 +999,16 @@ struct SteadyStateCtx<K> {
     /// origin-auth requests with the same identity.
     signing_key: Option<ed25519_dalek::SigningKey>,
     require_auth: bool,
+    /// Numbered routing-table/rule-priority pool for this process's identity generations,
+    /// constructed once in [`run`] and kept for the process's whole life. The main identity's
+    /// table/priority are always [`ntk_netlink::TableAllocator::main_table`]/`main_rule_priority`
+    /// (fixed, upstream's own `ntk.conf`, `research/impl/vala/ntkd/table_names.vala:51-52`),
+    /// never drawn from the peer pool below; a future connectivity/bridge identity ([`migrate`]'s
+    /// own "Why not a true concurrent fork" doc) would instead `acquire` a table from here, then
+    /// release it back via [`crate::kernel::routes::release_generation_table`] once retired —
+    /// see that function's own doc for why release must happen only after
+    /// [`crate::kernel::routes::RouteInstaller::teardown`], never before.
+    table_allocator: TableAllocator<MigrationId>,
 }
 
 /// Reacts to arc up/down/cost-change, qspn route-snapshot changes, and hooking's migration
@@ -1439,6 +1467,8 @@ where
         ctx.links.clone(),
         ctx.my_id,
         KernelHandle(ctx.kernel.clone()),
+        ctx.table_allocator.main_table(),
+        ctx.table_allocator.main_rule_priority(),
         &mut new_tasks,
         new_generation_cancel.clone(),
         ctx.signing_key.clone(),
