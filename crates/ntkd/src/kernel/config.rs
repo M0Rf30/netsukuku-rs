@@ -53,12 +53,24 @@ pub struct NtkdConfig {
 impl NtkdConfig {
     /// Reads and parses the config file at `path`.
     ///
+    /// Every error names `path`. A parse failure otherwise reports only the offending field —
+    /// `missing field \`nics\`` — with no indication of *which* file to edit, and the packaged
+    /// config deliberately ships `nics` commented out (no interface can be a safe default: one
+    /// that happens to exist would silently mesh over the operator's uplink), so that message is
+    /// the first thing a new operator sees.
+    ///
     /// # Errors
-    /// [`ConfigError::Io`] if `path` cannot be read; see [`NtkdConfig::from_str`] for parse
-    /// and validation errors.
+    /// [`ConfigError::Io`] if `path` cannot be read; [`ConfigError::Parse`] wrapping any
+    /// parse/validation failure from [`NtkdConfig::from_str`].
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let text = std::fs::read_to_string(path)?;
-        Self::from_str(&text)
+        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+        Self::from_str(&text).map_err(|source| ConfigError::Parse {
+            path: path.display().to_string(),
+            source: Box::new(source),
+        })
     }
 
     /// Parses `text` as TOML and validates its topology.
@@ -120,9 +132,20 @@ impl NtkdConfig {
 /// Everything that can go wrong loading an [`NtkdConfig`].
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    /// The config file could not be read.
-    #[error("failed to read config file: {0}")]
-    Io(#[from] std::io::Error),
+    /// The config file could not be read. Carries the path, since the daemon is normally
+    /// started by a unit file the operator did not type the path into.
+    #[error("failed to read config file {path}: {source}")]
+    Io {
+        path: String,
+        source: std::io::Error,
+    },
+    /// The config at `path` parsed as TOML but was rejected. Wraps the underlying reason so a
+    /// bare `missing field \`nics\`` still says which file to edit.
+    #[error("failed to load config {path}: {source}")]
+    Parse {
+        path: String,
+        source: Box<ConfigError>,
+    },
     /// The config text is not valid TOML, or is missing/mistypes a required field.
     #[error("failed to parse config: {0}")]
     Toml(#[from] toml::de::Error),
