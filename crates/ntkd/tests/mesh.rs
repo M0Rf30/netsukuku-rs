@@ -606,6 +606,7 @@ fn severance_position(idx: u32) -> Vec<u32> {
 async fn severance_worker_body(
     idx: u32,
     sever_barrier: Arc<Barrier>,
+    done_barrier: Arc<Barrier>,
 ) -> anyhow::Result<NodeReport> {
     let devs = ["eth0"];
     let dev_index = netns::bring_up_devs(&devs).await?;
@@ -706,6 +707,21 @@ async fn severance_worker_body(
     );
 
     let report = netns::observe(&format!("node{idx}"), &started, dev_index).await?;
+
+    // Hold every node up until all four have observed. `netns::teardown` cancels this node's
+    // root token, which closes its `TcpServer` (`ntkd::node::transport`'s `server_cancel` is a
+    // child of the supervisor's root token, not of a generation token), and that drops every
+    // peer's shared connection to it. Without this barrier the first node to finish observing
+    // tears itself down while the others are still watching, so their *sibling* route vanishes
+    // for a reason the scenario never intended to test — which is exactly how this test used to
+    // fail: node1 must watch a route *disappear*, which is inherently slower than watching one
+    // arrive, so it was reliably the node still waiting when its sibling exited. Bounded like
+    // `sever_barrier` above so one node's failed `ensure!` cannot hang the rest.
+    let _ = tokio::time::timeout(
+        SEVERANCE_TIMEOUT + Duration::from_secs(5),
+        done_barrier.wait(),
+    )
+    .await;
     netns::teardown(&started, cancel, &mut tasks).await;
     Ok(report)
 }
@@ -730,11 +746,15 @@ async fn partition_clean_severance_drops_exactly_the_unreachable_destinations() 
     // Sized 5: the 4 node workers plus this coordinator, so the sever only runs once every node
     // has confirmed convergence.
     let sever_barrier = Arc::new(Barrier::new(5));
+    // Also sized 5, and for the mirror-image reason: no node may tear itself down until all four
+    // have finished observing the post-sever state. See `severance_worker_body`'s own comment.
+    let done_barrier = Arc::new(Barrier::new(5));
     let workers: Vec<NamespaceWorker<NodeReport>> = (0..4u32)
         .map(|i| {
             let b = sever_barrier.clone();
+            let d = done_barrier.clone();
             NamespaceWorker::spawn(format!("severance-node{i}"), move || {
-                severance_worker_body(i, b)
+                severance_worker_body(i, b, d)
             })
         })
         .collect();
@@ -788,6 +808,15 @@ async fn partition_clean_severance_drops_exactly_the_unreachable_destinations() 
     )
     .await;
     mesh.sever(&root, "sevup").await.expect("sever the uplink");
+
+    // Join the post-observation rendezvous as the 5th party, same bounded discipline: this is
+    // what keeps all four nodes alive until every one of them has observed the post-sever state,
+    // so no node's `TcpServer` closes under a peer that is still watching.
+    let _ = tokio::time::timeout(
+        SEVERANCE_TIMEOUT + Duration::from_secs(25),
+        done_barrier.wait(),
+    )
+    .await;
 
     // Join every worker unconditionally, teardown the mesh, and only then panic — see
     // `netns::join_all`'s own doc.

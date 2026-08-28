@@ -204,6 +204,17 @@ async fn run_actor(
             frame = stream.next() => {
                 match frame {
                     None => {
+                        // Peer-initiated EOF: the remote half closed cleanly. Logged
+                        // distinctly from the `Some(Err(_))` arm below because
+                        // `RpcError::ConnectionClosed` cannot tell a caller which happened
+                        // (`is_remote()` is false for both — it only reports wire-carried
+                        // `Remote` errors), and one shared connection carries every module's
+                        // calls to this neighbour, so "who closed it" is the first question
+                        // worth asking when unrelated arcs die together.
+                        tracing::debug!(
+                            pending = pending.len(),
+                            "ntk-rpc: client connection closed by peer (EOF)"
+                        );
                         for (_, reply) in pending.drain() {
                             let _ = reply.send(Err(RpcError::ConnectionClosed));
                         }

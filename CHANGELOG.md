@@ -69,24 +69,26 @@ pre-check could refuse a bind the kernel would in fact have allowed.
 ### Known broken
 
 - **3 of the 7 real-kernel `mesh.rs` tests still fail.** This release took the suite from 2 passed
-  / 5 failed to **4 passed / 3 failed** (serially, ~630s, under
+  / 5 failed to **4 passed / 3 failed** (serially, ~830s, under
   `unshare --net --map-root-user -- cargo test -p ntkd --test mesh -- --ignored
-  --test-threads=1`) by fixing four root causes, listed above.
+  --test-threads=1`) by fixing five root causes, listed above.
   `chain_of_four_converges_to_exact_multi_hop_routes`,
   `level1_destination_installs_correct_cidr_route` and
-  `partition_signals_split_only_after_the_documented_debounce` now pass. What remains is three
-  tests and two diagnosed causes:
-  - `partition_clean_severance_drops_exactly_the_unreachable_destinations` gets past pre-sever
-    convergence and fails on the withdrawal after it. QSPN's implicit withdrawal was reviewed
-    line-by-line against `qspn.vala:1074-1232` and `:1334-1816` and is faithful; the defect is
-    *over*-withdrawal below it, where tearing down one arc appears to take a healthy sibling arc's
-    shared TCP connection with it. Not yet pinned to a line — it needs an in-process test that
-    forces the interleaving, since real-kernel timing noise buries it.
-  - `two_star_groups_merge_into_one_network` and
-    `two_level_gnode_migrates_as_a_unit_into_merged_network` are gated on the migration gap this
-    release documents rather than on a separate bug: a sibling's pre-migration position is never
-    withdrawn, because nothing announces that an identity has retired. Upstream does that with the
-    connectivity identity (`qspn.vala:2226-2505`) that this port does not implement.
+  `partition_signals_split_only_after_the_documented_debounce` now pass.
+  All three remaining failures share ONE cause: the migration gap this release documents. Nothing
+  announces that an identity has retired, so peers keep routing to a position its owner has left.
+  Both merge scenarios keep a sibling's stale pre-migration position; the severance scenario keeps
+  a level-1 route to the now-unreachable other slot across the re-hook the partition triggers.
+  Upstream announces retirement via the connectivity identity (`qspn.vala:2226-2505`) that this
+  port does not implement, so these three cannot go green without that work. QSPN's implicit
+  withdrawal is not at fault — reviewed line-by-line against `qspn.vala:1074-1232` and `:1334-1816`
+  and found faithful.
+  Two attributions of the severance failure were investigated and disproven along the way, noted so
+  they are not re-run: `RpcError::is_remote()` is `matches!(self, Remote(_))`, so `ConnectionClosed`
+  reads `false` for a peer-initiated EOF as well and never distinguished local from remote; and the
+  shared-per-neighbour connection multiplexing is not implicated — new `ntk-rpc` debug logging
+  showed a server-side cancellation from a node that finished observing early and tore itself down,
+  because the scenario had a barrier before the sever and none after it.
   Position collisions were investigated and ruled out: negotiated positions are collision-free by
   construction (`crates/ntk-coordinator/src/actor.rs:94`) and colliding bootstrap positions are
   resolved by arc retry — both verified in live traces, despite `NodeId(601)`/`NodeId(603)` and

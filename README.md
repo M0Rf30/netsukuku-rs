@@ -302,28 +302,34 @@ veth pair, do register and resolve an ANDNA hostname across that network —
 
 **`crates/ntkd/tests/mesh.rs` is still partly red.** Run serially under
 `unshare --net --map-root-user -- cargo test -p ntkd --test mesh -- --ignored --test-threads=1`,
-it reports **4 passed / 3 failed** in ~630s. 0.1.3 took it there from 2 passed / 5 failed by
-fixing four root causes (`CHANGELOG.md`); what remains is three tests and two causes, both
-diagnosed:
+it reports **4 passed / 3 failed** in ~830s. 0.1.3 took it there from 2 passed / 5 failed by
+fixing five root causes (`CHANGELOG.md`). All three remaining failures share **one** cause, and it
+is the migration gap listed above:
 
-- `partition_clean_severance_drops_exactly_the_unreachable_destinations` now converges before the
-  sever and fails on the withdrawal after it: `node1: did not drop exactly the unreachable
-  other-slot destination within 20s`. QSPN's implicit withdrawal is **not** at fault — it was
-  reviewed line-by-line against `research/impl/vala/qspn/qspn.vala:1074-1232` and `:1334-1816` and
-  found faithful. The defect is *over*-withdrawal one layer down: a node tears down a healthy arc
-  to its own sibling ~5.3s after an unrelated arc is severed, on a clean local EOF, while the
-  peer's server log shows it accepted and answered that very call. That points at the
-  one-shared-TCP-connection-per-neighbour multiplexing in `crates/ntkd/src/node/stubs.rs` and
-  `crates/ntk-neighborhood/src/manager.rs`, where tearing down one arc appears to take another
-  arc's connection with it. Not yet pinned to a line: reproducing it needs an in-process test that
-  forces the interleaving deterministically, because real-kernel timing noise buries it.
 - `two_star_groups_merge_into_one_network` and
-  `two_level_gnode_migrates_as_a_unit_into_merged_network` both fail at the same shared assertion,
-  and the reason is the migration gap already listed above. `a0` holds a third, stale level-0
-  destination — a sibling's *pre-migration* position — that is never withdrawn, so its route set
-  stays one entry too large forever. Nothing broadcasts "this identity has retired": upstream does
-  it with the connectivity identity (`qspn.vala:2226-2505`) this port does not implement. So these
-  two tests are gated on that gap, not on a separate bug.
+  `two_level_gnode_migrates_as_a_unit_into_merged_network` fail at the same shared assertion. A
+  node holds a third, stale level-0 destination — a sibling's *pre-migration* position — that is
+  never withdrawn, so its route set stays one entry too large forever.
+- `partition_clean_severance_drops_exactly_the_unreachable_destinations` gets past pre-sever
+  convergence and then keeps a level-1 route to the now-unreachable other slot. The partition makes
+  both surviving nodes re-hook (`coordinator: reserve outcome ... new_pos` appears for each in its
+  own log), and the stale destination survives that re-hook.
+
+In every case nothing announces that an identity has retired, so peers keep routing to a position
+its owner has left. Upstream does announce it, via the connectivity identity at
+`qspn.vala:2226-2505` that this port does not implement. QSPN's implicit withdrawal itself is
+**not** at fault: it was reviewed line-by-line against `qspn.vala:1074-1232` and `:1334-1816` and
+found faithful.
+
+Two earlier attributions of the severance failure were investigated and **disproven**, recorded
+here so nobody re-runs them. It is not an `RpcError::is_remote` "local close" — `is_remote()` is
+`matches!(self, Remote(_))`, so `ConnectionClosed` reports `false` for a peer-initiated EOF too,
+and the flag never meant what it appeared to. And it is not the shared-per-neighbour connection
+multiplexing: added `ntk-rpc` debug logging showed the close was a *server-side cancellation* on a
+node that had simply finished its own observation early and torn itself down, because the scenario
+had a barrier before the sever but none after it. That was a real harness defect and it is fixed;
+it moved which worker fails without changing the count, which is how the underlying cause above
+became visible.
 
 Position collisions were ruled out as a cause, not assumed away: `derive_initial_position` is a
 function of `NodeId` alone, and both `NodeId(601)`/`NodeId(603)` and `NodeId(601)`/`NodeId(604)`

@@ -169,13 +169,30 @@ async fn serve_connection(
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
+                // Cancellation closes this connection for every module multiplexed over it,
+                // not just whichever one prompted the cancel. Logged because a peer sees only
+                // an anonymous EOF, so an arc dying for no visible reason is indistinguishable
+                // from a network fault without this line.
+                tracing::debug!(
+                    inflight = inflight.len(),
+                    "ntk-rpc: server connection cancelled, closing"
+                );
                 inflight.abort_all();
                 break;
             }
             Some(_) = inflight.join_next(), if !inflight.is_empty() => {}
             frame = stream.next() => {
                 match frame {
-                    None | Some(Err(_)) => break,
+                    None => {
+                        tracing::debug!("ntk-rpc: server connection closed by peer (EOF)");
+                        break;
+                    }
+                    Some(Err(err)) => {
+                        // A decode failure kills the whole shared connection, so name it:
+                        // every module's calls to this peer die with it.
+                        tracing::debug!(error = %err, "ntk-rpc: server connection read error, closing");
+                        break;
+                    }
                     Some(Ok(envelope)) => {
                         if let Err(mismatch) = envelope.check_version() {
                             tracing::warn!(%mismatch, "ntk-rpc: rejecting envelope with incompatible protocol version");
