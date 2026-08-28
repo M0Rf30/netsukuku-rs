@@ -4,6 +4,48 @@ All notable changes to this project are documented here. Versions follow [Semant
 Versioning](https://semver.org/spec/v2.0.0.html); the twelve `ntk-*` crates and `ntkd` are
 released in lockstep, so they always share a version even when only some of them changed.
 
+## [0.1.6]
+
+Groundwork for the connectivity identity (mig-01). No behaviour change for a single-identity node,
+which is every node today — the point is that a second identity is now *possible*.
+
+### Added
+
+- **A second local identity is now addressable.** `lifecycle.rs`'s own scope note named the two
+  blockers: "one live dispatcher target per process; never two identities simultaneously
+  reachable". Both are gone.
+  The wire already carried the selector and this port ignored it. `unicast_id` — upstream's
+  `IUnicastID` — names the *destination* identity:
+  `research/impl/vala/ntkd/rpc/skeleton_factory.vala`
+  dispatches on it at `:192-236`, and `get_identity_skeleton` matches it against each local
+  identity's own id at `:284-291`. `ntk.proto`'s `CallerContext` comment has said all along that a
+  node can host several identities sharing one NIC. `stubs.rs` sent an empty value; `dispatch.rs`
+  never read it.
+  `unicast_id` now has upstream's three variants (`serializables.vala:405-492`) and the dispatcher
+  resolves them: identity-aware to that identity's stack, main/empty/absent to the main stack,
+  whole-node to the node-level handlers. An identity-aware id naming an identity this node does not
+  host is **rejected**, not quietly served from main — answering out of the wrong map is the defect
+  this work exists to prevent.
+- **Two identities can hold kernel routing state at once.** Every generation claimed table 251, so
+  a bridge would have fought the main identity for it. `bootstrap_generation` now takes the table
+  and rule priority as parameters, and one `TableAllocator` lives in `SteadyStateCtx` for the
+  process's life. The main identity keeps 251 and its rule priority unchanged — upstream's
+  `ntk.conf` fixes that id. Releasing a table whose routes are still installed is rejected rather
+  than leaving `cleanup`'s ownership model believing it is free.
+
+### Compatibility
+
+- An empty or absent `unicast_id` still reaches the main identity, unchanged. Every peer released
+  before this sends one, and an unmodified upstream node sends its own encoding; that path has its
+  own test asserting the real dispatcher returns the main stack, not merely that the decision
+  function agrees.
+- Outbound calls deliberately still send `main_identity` rather than naming a destination.
+  Naming one was tried and regressed real-kernel convergence from 4 passed/3 failed to 2/5: the
+  only id available at a stub is the sender's own `LinkRegistry` record of the peer, not provably
+  the value the peer matches on — the failure family `AGENTS.md` records, where an id minted on one
+  side is decoded against the other side's registry. A destination worth naming only exists once
+  the bridge does, and then the caller knows which identity it means. `mesh.rs` is back to 4/3.
+
 ## [0.1.5]
 
 A partial answer to the migration gap, and the packaged unit and config move into this repository.
@@ -281,6 +323,7 @@ them over native netlink, never by shelling out to `ip`.
 Only five of the twelve crates reached crates.io under this version, for the rate-limit reason
 described under 0.1.1. Use 0.1.2 instead.
 
+[0.1.6]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.2...v0.1.3

@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.97"
 license = "GPL-3.0-or-later"
@@ -17,17 +17,17 @@ authors = ["netsukuku-rs contributors"]
 # Each sibling carries an explicit `version` alongside `path`: cargo resolves the path locally,
 # but crates.io REJECTS a published crate whose dependency has no version requirement. Keep the
 # version in lockstep with each crate's own `[package] version`.
-ntk-common = { path = "crates/ntk-common", version = "0.1.5" }
-ntk-proto = { path = "crates/ntk-proto", version = "0.1.5" }
-ntk-rpc = { path = "crates/ntk-rpc", version = "0.1.5" }
-ntk-netlink = { path = "crates/ntk-netlink", version = "0.1.5" }
-ntk-identities = { path = "crates/ntk-identities", version = "0.1.5" }
-ntk-neighborhood = { path = "crates/ntk-neighborhood", version = "0.1.5" }
-ntk-qspn = { path = "crates/ntk-qspn", version = "0.1.5" }
-ntk-peerservices = { path = "crates/ntk-peerservices", version = "0.1.5" }
-ntk-hooking = { path = "crates/ntk-hooking", version = "0.1.5" }
-ntk-coordinator = { path = "crates/ntk-coordinator", version = "0.1.5" }
-ntk-andna = { path = "crates/ntk-andna", version = "0.1.5" }
+ntk-common = { path = "crates/ntk-common", version = "0.1.6" }
+ntk-proto = { path = "crates/ntk-proto", version = "0.1.6" }
+ntk-rpc = { path = "crates/ntk-rpc", version = "0.1.6" }
+ntk-netlink = { path = "crates/ntk-netlink", version = "0.1.6" }
+ntk-identities = { path = "crates/ntk-identities", version = "0.1.6" }
+ntk-neighborhood = { path = "crates/ntk-neighborhood", version = "0.1.6" }
+ntk-qspn = { path = "crates/ntk-qspn", version = "0.1.6" }
+ntk-peerservices = { path = "crates/ntk-peerservices", version = "0.1.6" }
+ntk-hooking = { path = "crates/ntk-hooking", version = "0.1.6" }
+ntk-coordinator = { path = "crates/ntk-coordinator", version = "0.1.6" }
+ntk-andna = { path = "crates/ntk-andna", version = "0.1.6" }
 
 tokio = "1.53"
 tokio-util = "0.7"
