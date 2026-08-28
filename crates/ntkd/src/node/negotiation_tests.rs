@@ -569,14 +569,23 @@ async fn discovering_a_peer_joins_and_adopts_the_negotiated_position() {
 /// steps (5) and (6) both now clear: `evaluate_enter` succeeds and `begin_enter` no longer
 /// aborts. It then stalls in `search_migration_path(0)`.
 ///
-/// # Root cause, localized
-/// `crate::node::adapters::chosen_lvl_from_snapshot` (~`adapters.rs:1448-1478`) answers
-/// `chosen_lvl = 0`. Upstream's equivalent, `proxy_coord.vala:115-126` seeding
-/// `int max_lvl = subnetlevel` and returning it at `:248`, is a **1-indexed host level that is
-/// never 0** — so upstream never asks a guest to enter "at level 0" the way this port does, and
-/// `arc_handler.vala:303-311`'s `ask_lvl == 0` branch is a terminal *failure* case ("Failed to
-/// find a migration-path for a single node"), not a normal entry level. Fixing the index space of
-/// that answer is the next step; every layer below it is now upstream-faithful.
+/// # Where it now stalls
+/// In `search_migration_path(0)`, inside step (6)'s begin/search loop.
+///
+/// `chosen_lvl = 0` is **not** the bug, contrary to an earlier note here: upstream seeds
+/// `int max_lvl = subnetlevel` (`proxy_coord.vala:104`) and returns it verbatim (`:246,279`),
+/// and this daemon's `QspnViewAdapter::subnetlevel` is unconditionally `0` ("no subnetting"), so
+/// `max_lvl == 0` is legitimate upstream behaviour and `begin_enter(0)` taking the local bypass
+/// is exactly what upstream does. A scout reported `max_lvl` was "1-indexed, never 0" while
+/// simultaneously quoting the `subnetlevel` seed; the seed is authoritative and the claim was
+/// wrong. Recorded because acting on it would mean shifting every index in step (6) for nothing.
+///
+/// So the remaining defect is in the search/migration machinery, not the coordinator path and not
+/// level arithmetic: for two single-node networks the guest should find a migration path into a
+/// free position of the host's level-0 g-node, and does not. `arc_handler.vala:303-311`'s
+/// `ask_lvl == 0` branch ("Failed to find a migration-path for a single node") is the terminal
+/// case being hit instead. Next step is `crate::search::execute_search` /
+/// `ntk_hooking`'s `search_migration_path` against `hooking.vala:166`.
 ///
 /// # Fixed along the way (both verified against this reproduction)
 /// - `ntk_coordinator::CoordinatorClient::call_entering` passed

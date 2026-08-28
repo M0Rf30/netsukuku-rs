@@ -58,15 +58,18 @@ released in lockstep, so they always share a version even when only some of them
   packaged two-node install forms an arc and installs routes while remaining two networks.
   The two fixes above moved the guest from stuck in `Evaluating` to clearing both
   `evaluate_enter` and `begin_enter`; it now stalls in `search_migration_path(0)`.
-  Cause is localized: `chosen_lvl_from_snapshot` (`crates/ntkd/src/node/adapters.rs:1448-1478`)
-  answers a 0-indexed `chosen_lvl = 0`, where upstream's `max_lvl`
-  (`proxy_coord.vala:115-126,248`) is a 1-indexed host level that is never 0 — and
-  `arc_handler.vala:303-311`'s `ask_lvl == 0` branch is a terminal *failure* case, not a normal
-  entry level. Correcting that index space is the next step; every layer beneath it is now
-  upstream-faithful. Two scouts independently *inferred* that `gnode_exists` could not see the
-  peer's outer g-nodes — that is refuted: `evaluate_enter` now completes, which requires it.
-  Only single-level `gsizes = [8]` negotiation was ever covered, which is why none of this
-  surfaced earlier.
+  Cause is now localized to the search/migration machinery, not the coordinator path and not
+  level arithmetic: for two single-node networks the guest should find a migration path into a
+  free position of the host's level-0 g-node and does not, so
+  `arc_handler.vala:303-311`'s terminal `ask_lvl == 0` branch ("Failed to find a migration-path
+  for a single node") is hit instead. Next step is `execute_search` /
+  `ntk_hooking::search_migration_path` against `hooking.vala:166`.
+  Two scout claims were checked and refuted rather than acted on: that `gnode_exists` cannot see
+  the peer's outer g-nodes (a working `evaluate_enter` requires that it can), and that upstream's
+  `max_lvl` is "1-indexed, never 0" (`proxy_coord.vala:104` seeds it from `subnetlevel`, which is
+  unconditionally `0` here, so `chosen_lvl = 0` is correct and shifting that index would have been
+  a regression). Only single-level `gsizes = [8]` negotiation was ever covered, which is why none
+  of this surfaced earlier.
 
 ## [0.1.7]
 
