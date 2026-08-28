@@ -933,7 +933,7 @@ dependencies = [
 
 [[package]]
 name = "ntk-andna"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -955,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "ntk-common"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "proptest",
  "serde",
@@ -964,7 +964,7 @@ dependencies = [
 
 [[package]]
 name = "ntk-coordinator"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "futures",
  "ntk-common",
@@ -983,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "ntk-hooking"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "futures",
  "ntk-common",
@@ -1001,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "ntk-identities"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "futures",
  "ntk-common",
@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "ntk-neighborhood"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "ed25519-dalek",
  "futures",
@@ -1040,7 +1040,7 @@ dependencies = [
 
 [[package]]
 name = "ntk-netlink"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "futures",
  "netlink-packet-route",
@@ -1053,7 +1053,7 @@ dependencies = [
 
 [[package]]
 name = "ntk-peerservices"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "criterion",
  "ed25519-dalek",
@@ -1073,7 +1073,7 @@ dependencies = [
 
 [[package]]
 name = "ntk-proto"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "blake3",
  "bytes",
@@ -1089,7 +1089,7 @@ dependencies = [
 
 [[package]]
 name = "ntk-qspn"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "criterion",
  "futures",
@@ -1108,7 +1108,7 @@ dependencies = [
 
 [[package]]
 name = "ntk-rpc"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "bytes",
  "futures",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "ntkd"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "clap",

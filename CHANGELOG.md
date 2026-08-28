@@ -4,6 +4,45 @@ All notable changes to this project are documented here. Versions follow [Semant
 Versioning](https://semver.org/spec/v2.0.0.html); the twelve `ntk-*` crates and `ntkd` are
 released in lockstep, so they always share a version even when only some of them changed.
 
+## [0.1.7]
+
+One correctness fix in 0.1.6's groundwork, and the mig-01 plan corrected after tracing it properly.
+No behaviour change for a single-identity node, which is every node today.
+
+### Fixed
+
+- **The identity dispatch map was keyed on the node, not on an identity.** `secondary` used
+  `ntk_neighborhood::NodeId` — `NeighborhoodConfig::my_id`, one value for the process's whole life
+  — so a connectivity fork and the successor it bridges for would have shared it and collided,
+  which defeats the only purpose the map has. Keyed on `ntk_identities::IdentityId` now, which the
+  registry mints per identity and `Handle::migrate` returns for the successor. Upstream draws the
+  same line: `IdentityAwareUnicastID` carries an identities-level id and `get_identity_skeleton`
+  matches it against each local identity (`skeleton_factory.vala:284-291`), while its `src_nic`
+  equivalent stays per-arc.
+  The main id is also read live from the registry rather than copied at construction, which is a
+  second correctness fix in the same area: unlike the node id, the main `IdentityId` *changes* on
+  every migration, so a cached copy would have named a retired identity from the first rehook on.
+  Nothing on the wire changes — no caller sends an `IdentityAware` `unicast_id`, so redefining that
+  payload cannot affect a deployed peer.
+
+### Documentation
+
+- **The recorded mig-01 plan was wrong, and is corrected.** A previous note claimed the migration
+  blackout was purely `migrate`'s ordering. Reordering is necessary but not sufficient: the
+  successor converges by receiving its peers' ETPs, so it must be reachable while it bootstraps, so
+  a peer must name it in `unicast_id`, so that peer must know its `IdentityId`. Peers learn that
+  from the identity-arc duplication protocol — and `ntk_identities::Handle::migrate` is called with
+  an empty devices map (`crates/ntkd/src/node/lifecycle.rs:1418`), so `run_migration_duplication`
+  computes `broken = devdata.is_none()` for every arc, reports them all broken, and removes them.
+  No peer is ever told the successor exists. The map is empty because it describes per-identity
+  *pseudodevices*, which `ntk_identities::pseudo` names and nothing creates.
+  So the floor under mig-01 is per-identity pseudodevices — real per-identity L2/L3 presence on a
+  shared NIC, over `ntk-netlink` link creation. Doing the reordering alone would keep the bridge
+  serving while leaving the successor unable to converge, which is *worse* than today, since the
+  current synchronous teardown at least guarantees the successor is the only identity its peers can
+  reach. Recorded in `lifecycle.rs` and `README.md` §6 so a plausible-looking partial fix is not
+  attempted twice.
+
 ## [0.1.6]
 
 Groundwork for the connectivity identity (mig-01). No behaviour change for a single-identity node,
@@ -323,6 +362,7 @@ them over native netlink, never by shelling out to `ip`.
 Only five of the twelve crates reached crates.io under this version, for the rate-limit reason
 described under 0.1.1. Use 0.1.2 instead.
 
+[0.1.7]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.3...v0.1.4
