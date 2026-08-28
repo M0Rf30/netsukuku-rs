@@ -84,6 +84,7 @@ pub async fn start(
 
     let netlink = RealNetlink::new()?;
     crate::kernel::preflight::check_nics(&netlink, nics).await?;
+    crate::kernel::preflight::warn_address_space_conflicts(&netlink).await;
 
     let mut broadcasters = HashMap::new();
     for nic in nics {

@@ -22,6 +22,13 @@ real protocol defects and one broken research-tooling promise; those are below t
   socket bind, in `node/transport.rs::start`. The same failure now reads: `configured interface
   "eth0" does not exist; available interfaces: enp0s31f6, lo, tailscale0, wlan0 — fix `nics` in
   the ntkd config`.
+- **A host already using `10.0.0.0/8` collided with Netsukuku's address space silently.** That
+  range is the whole space this daemon routes in, and nothing checked whether something else on
+  the host was already in it — Docker's default bridge, a corporate VPN, WireGuard, Tailscale.
+  Startup now lists every conflicting host address by name and ifindex. It warns rather than
+  refuses: an overlap is a genuine hazard, but a 10/8 address on an idle interface is no reason to
+  refuse to route, and failing would break working deployments to prevent a hypothetical one. The
+  collision is no longer silent; ntkd still does not narrow the space it claims.
 - **A permanently misconfigured host restarted forever.** `Restart=on-failure` with
   `RestartSec=3` never tripped systemd's default rate limit (5 starts/10s — 3s spacing only fits
   about 4), so the ENODEV above respawned indefinitely; the observed restart counter reached 69.

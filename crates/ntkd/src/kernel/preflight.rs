@@ -64,6 +64,59 @@ pub async fn check_nics<K: TopologyQuery>(kernel: &K, nics: &[String]) -> Result
     }
 }
 
+/// Netsukuku's entire address space (`crate::kernel::addressing`). Every identity address and
+/// every g-node destination this daemon installs falls inside it.
+///
+/// A function rather than a `const`: `Ipv4Net::new` validates its prefix at runtime and so is
+/// not a `const fn`.
+fn netsukuku_address_space() -> ntk_netlink::Ipv4Net {
+    ntk_netlink::Ipv4Net::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 8)
+        .expect("10.0.0.0/8 is a valid network")
+}
+
+/// Warns if this host already carries addresses inside `10.0.0.0/8`, which is the whole space
+/// Netsukuku routes in.
+///
+/// **Warns, never fails.** An overlap is a genuine operational hazard — this daemon will install
+/// routes for g-node destinations that may collide with what the host already uses, and
+/// `10.0.0.0/8` is extremely common in practice (Docker's default pools, corporate VPNs,
+/// WireGuard and Tailscale subnets). But an overlap is not automatically fatal: the conflicting
+/// interface may be idle, or the operator may have sized the topology to avoid the range in use.
+/// Refusing to start would break working deployments to prevent a hypothetical one, so this
+/// reports and continues. `check_nics` fails instead, because a nonexistent interface can never
+/// become usable, whereas an overlap can be perfectly fine.
+///
+/// Addresses this daemon itself installed are indistinguishable from pre-existing ones at this
+/// point, which is exactly why it runs during startup preflight — before any identity address is
+/// added — rather than later.
+///
+/// No upstream analogue: upstream never checks, and would collide silently.
+pub async fn warn_address_space_conflicts<K: ntk_netlink::AddressTable>(kernel: &K) {
+    let addresses = match kernel.list_addresses(None).await {
+        Ok(addresses) => addresses,
+        Err(err) => {
+            // Not fatal: this is advisory, so a failed probe must not stop startup.
+            tracing::debug!(%err, "preflight: could not list host addresses to check for 10.0.0.0/8 overlap");
+            return;
+        }
+    };
+    let space = netsukuku_address_space();
+    let conflicting: Vec<String> = addresses
+        .iter()
+        .filter(|entry| space.contains(entry.network.address()))
+        .map(|entry| format!("{} (ifindex {})", entry.network, entry.interface_index))
+        .collect();
+    if !conflicting.is_empty() {
+        tracing::warn!(
+            conflicts = %conflicting.join(", "),
+            "preflight: this host already uses addresses inside 10.0.0.0/8, the range Netsukuku \
+             routes in — ntkd will install g-node routes that may collide with them (common \
+             causes: Docker, WireGuard, Tailscale, corporate VPNs). Starting anyway; verify the \
+             ranges do not overlap"
+        );
+    }
+}
+
 /// One or more interfaces named in the ntkd config's `nics` list are missing from this
 /// host's link table, or listing the host's interfaces failed outright.
 #[derive(Debug)]
@@ -154,7 +207,7 @@ impl PreflightError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ntk_netlink::{FakeNetlink, LinkInfo};
+    use ntk_netlink::{AddressTable, FakeNetlink, LinkInfo};
 
     #[tokio::test]
     async fn fake_netlink_with_loopback_passes_preflight() {
@@ -175,6 +228,57 @@ mod tests {
             .await
             .expect_err("no lo means no multipath probe");
         assert!(err.to_string().contains("IP_ROUTE_MULTIPATH"));
+    }
+
+    #[test]
+    fn the_netsukuku_address_space_covers_ten_slash_eight_and_nothing_outside_it() {
+        // Pins the constant itself: the warning below is only meaningful if this range is
+        // actually what `crate::kernel::addressing` packs into.
+        let space = netsukuku_address_space();
+        assert!(space.contains(std::net::Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(space.contains(std::net::Ipv4Addr::new(10, 255, 255, 254)));
+        assert!(!space.contains(std::net::Ipv4Addr::new(192, 168, 1, 1)));
+        assert!(!space.contains(std::net::Ipv4Addr::new(100, 64, 0, 1)));
+    }
+
+    #[tokio::test]
+    async fn an_address_outside_ten_slash_eight_is_not_reported_as_a_conflict() {
+        let kernel = FakeNetlink::with_links(vec![LinkInfo {
+            index: 1,
+            name: "eth0".into(),
+            is_up: true,
+        }]);
+        kernel
+            .add_address(
+                &ntk_netlink::Interface::index(1),
+                ntk_netlink::Ipv4Net::new(std::net::Ipv4Addr::new(192, 168, 1, 10), 24)
+                    .expect("valid network"),
+            )
+            .await
+            .expect("add a non-conflicting address");
+        // Advisory and infallible by contract: it must return normally either way. The value is
+        // that it does not panic or error on a clean host, so startup is never blocked by it.
+        warn_address_space_conflicts(&kernel).await;
+    }
+
+    #[tokio::test]
+    async fn an_address_inside_ten_slash_eight_still_lets_startup_proceed() {
+        let kernel = FakeNetlink::with_links(vec![LinkInfo {
+            index: 1,
+            name: "docker0".into(),
+            is_up: true,
+        }]);
+        kernel
+            .add_address(
+                &ntk_netlink::Interface::index(1),
+                ntk_netlink::Ipv4Net::new(std::net::Ipv4Addr::new(10, 42, 0, 1), 16)
+                    .expect("valid network"),
+            )
+            .await
+            .expect("add a conflicting address");
+        // The whole point of warn-not-fail: an overlap must NOT stop the daemon, because a
+        // 10/8 address on an idle interface is not a reason to refuse to route.
+        warn_address_space_conflicts(&kernel).await;
     }
 
     #[tokio::test]

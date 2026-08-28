@@ -234,7 +234,8 @@ the count.
   `snsd_cache.c`) plus NTK_RFC 0009 (SNSD) and NTK_RFC 0014 (the DHT substrate). This is the
   fourth kind the old three-bucket framing excluded: not absent, not dropped, but built past what
   the reference itself has — which is why the security note below matters, not less.
-- *A real gap against the reference* — four, not one:
+- *A real gap against the reference* — three, not one (a fourth, the missing `10.0.0.0/8`
+  collision check, was closed in 0.1.3 and is described below):
   - **G-node migration is a full data-plane blackout for the whole window, not merely a missing
     second stack.** `rehook`/`migrate` tears down every kernel route the previous generation held
     before the successor identity exists (`crates/ntkd/src/node/lifecycle.rs:1298-1301`), and only
@@ -254,12 +255,15 @@ the count.
     `Manager` hardcodes `None` (`crates/ntkd/src/node/services.rs:217`). Per-level eldership and
     reservation state (`GnodeMemory::fresh`, `actor.rs:389`) restarts from scratch on every rehook
     instead of carrying forward.
-  - **No preflight for a host that already uses `10.0.0.0/8`.**
-    `crates/ntkd/src/kernel/preflight.rs` checks kernel routing capabilities and configured-NIC
-    existence (`:18-65`) but nothing checks whether the address space this daemon unconditionally
-    claims (`crates/ntkd/src/kernel/addressing.rs:1-2`) is already in use by something else on the
-    host — Docker's default bridge, a corporate VPN, or (on the machine this audit ran on)
-    `tailscale0`/`wg0`. A collision is silently possible, not merely undocumented.
+  - **A host that already uses `10.0.0.0/8` is now detected, but only warned about.**
+    `crates/ntkd/src/kernel/preflight.rs`'s `warn_address_space_conflicts` lists every host
+    address inside the range this daemon routes in
+    (`crates/ntkd/src/kernel/addressing.rs:1-2`) and names it at startup — on the machine this
+    audit ran on that is `10.0.0.16/32` and `10.100.1.10/32`, from `tailscale0`/`wg0`. It
+    deliberately warns rather than refuses: an overlap is a real hazard, but a 10/8 address on an
+    idle interface is not a reason to refuse to route, and failing would break working
+    deployments to prevent a hypothetical one. So the collision is no longer *silent*, but ntkd
+    still does not avoid or negotiate around it — nothing narrows the space it claims.
   - **ANDNA's Counter anti-Sybil cap (NTK_RFC 0007) is fully bypassable under the default
     `require_auth = false`.** The cap keys reservations by the requester's `client_tuple`
     (`crates/ntk-andna/src/counter.rs:12-14`), tamper-proof only when origin-auth is enforced —
