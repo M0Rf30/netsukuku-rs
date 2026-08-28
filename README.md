@@ -250,9 +250,22 @@ the count.
     at 10s even with no qualifying peer ETP (`crates/ntk-qspn/src/config.rs:151`). Upstream
     avoids the blackout with connectivity identities — a bridge keeping the migrating g-node's
     external arcs alive while the guest re-hooks concurrently
-    (`research/impl/vala/identities/identities.vala:441-577`) — which this daemon cannot build
-    today because it holds one live dispatcher target per process, never two identities
-    simultaneously reachable (`crates/ntkd/src/node/lifecycle.rs:137-149`).
+    (`research/impl/vala/identities/identities.vala:441-577`).
+
+    0.1.6 removed the two blockers this bullet used to cite — the dispatcher resolves
+    `Request.unicast_id` to a specific identity, and a generation can hold its own routing table
+    — so the remaining work is `migrate`'s ordering: keep the outgoing generation serving while
+    the successor bootstraps, then retire it. But that ordering is the *last* step, not the whole
+    fix. The successor converges by receiving its peers' ETPs, so it has to be reachable while it
+    bootstraps, so a peer has to name it in `unicast_id`, so that peer has to know its
+    `IdentityId`. Peers learn that from the identity-arc duplication protocol — and
+    `ntk_identities::Handle::migrate` is called with an empty devices map
+    (`crates/ntkd/src/node/lifecycle.rs:1418`), so `run_migration_duplication` marks every arc
+    broken and no peer is ever told the successor exists. The map is empty because it describes
+    per-identity *pseudodevices*, which `ntk_identities::pseudo` names and nothing creates. That
+    — real per-identity L2/L3 presence on a shared NIC, over `ntk-netlink` link creation — is the
+    actual floor under this gap. Reordering alone would keep the bridge serving but leave the
+    successor unable to converge, which is worse than today.
 
     A departing node *does* now announce itself. Upstream's `destroy`
     (`research/impl/vala/qspn/qspn.vala:2481-2505`) tells every neighbour the identity is going

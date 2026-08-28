@@ -167,10 +167,31 @@
 //! destination *and* the transit it forwards for others, which is the half
 //! `crates/ntkd/tests/mesh.rs` fails on.
 //!
-//! Two prerequisites, both recorded where they bite: `crate::node::dispatch`'s `secondary` map
-//! must be re-keyed on [`ntk_identities::IdentityId`] (a fork shares the node's
-//! `ntk_neighborhood::NodeId`), and outbound calls must then name their destination identity,
-//! which `crate::node::stubs` deliberately does not do yet and explains why.
+//! The re-key that used to be listed here as a prerequisite is done: `crate::node::dispatch`'s
+//! `secondary` map is keyed on [`ntk_identities::IdentityId`], and the current main id is read
+//! live from the registry because it changes on every migration.
+//!
+//! # Why that sequence is necessary but not sufficient
+//! Step 2 requires the successor to be *reachable* while it bootstraps — it converges by
+//! receiving its peers' ETPs. Reaching it means a peer's `Request.unicast_id` has to name it,
+//! which means that peer has to know its [`ntk_identities::IdentityId`]. Peers learn that from
+//! the identity-arc duplication protocol, which is where this stops working:
+//!
+//! [`ntk_identities::Handle::migrate`] is called with an empty devices map (see its call site
+//! below), so `run_migration_duplication` computes `broken = devdata.is_none()` — true for every
+//! arc — reports every arc broken, and removes them all. No peer is ever told the successor
+//! exists. The devices map is empty because it describes per-identity *pseudodevices*, and this
+//! daemon never creates any: `ntk_identities::pseudo` names them, nothing makes them.
+//!
+//! So the floor under mig-01 is per-identity pseudodevices — real per-identity L2/L3 presence on
+//! a shared NIC, which is how upstream keeps two identities addressable at once
+//! (`identities.vala:441-577`) — built over `ntk-netlink` link creation. Until that exists, the
+//! reordering above would keep the bridge serving but leave the successor unable to converge,
+//! which is strictly worse than today: today's synchronous teardown at least guarantees the
+//! successor is the only identity its peers can reach.
+//!
+//! Recorded because an earlier pass of this note claimed the ordering *was* the whole fix. It is
+//! the last step, not the first.
 
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
