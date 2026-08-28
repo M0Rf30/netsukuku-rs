@@ -38,18 +38,22 @@ jobs:
       - name: cargo fmt --all --check
         run: cargo fmt --all --check
 
-      # Generated documentation is a shipped deliverable, and rustdoc's link lints are only
-      # warnings by default -- so a broken link degrades docs.rs silently and indefinitely. An
-      # intra-doc link that does not resolve, or one pointing at a private item, renders as bare
-      # unlinked text; worse, a *relative markdown* link renders as a genuinely dead href, which
-      # is how `https://docs.rs/ntkd/latest/src/main.rs` shipped (rustdoc documents the library
-      # and drops the `[[bin]]` target, so that URL can never exist).
+      # Generated documentation is a shipped deliverable. `[workspace.lints.rustdoc]` in the root
+      # manifest already *denies* `broken_intra_doc_links`, `private_intra_doc_links` and
+      # `redundant_explicit_links`, and Cargo forwards those to rustdoc as `-D` flags -- so plain
+      # `cargo doc` is enough and no `RUSTDOCFLAGS` is duplicated here. Keeping the policy in the
+      # manifest alone means a contributor running `cargo doc` locally gets exactly what CI gets.
       #
-      # `-D warnings` promotes `broken_intra_doc_links` and `private_intra_doc_links` to hard
-      # failures. It does NOT cover relative markdown links -- rustdoc has no lint for those, so
-      # that one class still relies on review. Everything else is now mechanically enforced.
+      # This step exists because 0.1.1 fixed 181 dead doc links and recorded that "`cargo doc`
+      # runs in CI, so they cannot come back" -- but no such step was ever added, and 25 broken
+      # links had accumulated again by 0.1.8. The lints were never the gap; running them was.
+      #
+      # Not covered: *relative markdown* links such as `](../src/main.rs)`. Rustdoc has no lint
+      # for those and they render as genuinely dead hrefs, which is how
+      # `https://docs.rs/ntkd/latest/src/main.rs` shipped (rustdoc documents the library and drops
+      # the `[[bin]]` target, so that URL can never resolve). That class still relies on review.
       - name: cargo doc --workspace --no-deps
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+        run: cargo doc --workspace --no-deps
 
       # Portability seam guard. Nine of the twelve crates are OS-agnostic protocol logic, and
       # `ntkd` reaches the kernel only through `ntk-netlink`'s four traits -- `rtnetlink` is a

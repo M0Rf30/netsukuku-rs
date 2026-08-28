@@ -4,7 +4,14 @@ All notable changes to this project are documented here. Versions follow [Semant
 Versioning](https://semver.org/spec/v2.0.0.html); the twelve `ntk-*` crates and `ntkd` are
 released in lockstep, so they always share a version even when only some of them changed.
 
-## [Unreleased]
+## [0.1.8]
+
+Multi-level topologies work. Two daemons on the `gsizes = [4, 2, 2, 2]` config the packages ship
+would form an arc, install routes and look healthy while permanently remaining *two* networks —
+three defects in the guest's entry path, none of which single-level `gsizes = [8]` could expose.
+The intermittent cross-node ANDNA resolve was a symptom of the same split. Also: shutdown no
+longer leaks a link-local address per start, and generated documentation is gated in CI for real
+this time.
 
 ### Changed
 
@@ -107,11 +114,17 @@ released in lockstep, so they always share a version even when only some of them
   demoted to inline code; `ntk_coordinator::CompletedEnterHandler::completed_enter` and
   `crate::v1::UnicastId` are properly qualified instead, being genuinely public.
 
-- **CI now gates generated documentation.** `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
-  --no-deps` promotes rustdoc's `broken_intra_doc_links`/`private_intra_doc_links` — warnings by
-  default, which is how all of the above degraded docs.rs silently — to hard failures. It does
-  **not** cover relative markdown links: rustdoc has no lint for that class, so the `src/main.rs`
-  defect above would still slip past and continues to rely on review.
+- **CI now actually runs `cargo doc`.** The lints were never the gap. `[workspace.lints.rustdoc]`
+  has denied `broken_intra_doc_links`/`private_intra_doc_links`/`redundant_explicit_links` since
+  0.1.1, and Cargo forwards them to rustdoc as `-D` flags, so a plain `cargo doc` fails on any of
+  them — verified by planting a broken link and watching `cargo doc` exit 101. What was missing is
+  that 0.1.1 recorded "`cargo doc` runs in CI, so they cannot come back" while no such step was
+  ever added to `ci.yml`, so nothing executed the lints and 25 links accumulated again. The step
+  now exists and deliberately carries no `RUSTDOCFLAGS`: policy stays in the manifest alone, so a
+  contributor running `cargo doc` locally gets exactly what CI gets.
+  Still **not** covered: relative markdown links such as `](../src/main.rs)`. Rustdoc has no lint
+  for that class, and it is the one that produces a genuinely dead href rather than bare text, so
+  it continues to rely on review.
 
 ## [0.1.7]
 
@@ -471,6 +484,7 @@ them over native netlink, never by shelling out to `ip`.
 Only five of the twelve crates reached crates.io under this version, for the rate-limit reason
 described under 0.1.1. Use 0.1.2 instead.
 
+[0.1.8]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.4...v0.1.5
