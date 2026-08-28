@@ -89,6 +89,10 @@ impl RoutingEnv for FakeEnv {
     }
 }
 
+/// Every node gets its own transport signing key. Distinct per node, because the Counter caps
+/// per registrant and one shared key would collapse four registrants into one — and because
+/// `AndnaService`/`CounterService::requires_origin_auth` now demand a verified origin for a
+/// registration and a counter reservation regardless of `PeersConfig::require_auth`.
 fn build_peers_network() -> (Vec<PeersHandle>, CancellationToken) {
     let topology = Topology::new([2, 2]).unwrap();
     let positions: Vec<[u32; 2]> = vec![[0, 0], [1, 0], [0, 1], [1, 1]];
@@ -111,7 +115,7 @@ fn build_peers_network() -> (Vec<PeersHandle>, CancellationToken) {
             topology.levels(),
         );
         tokio::spawn(manager.run(cancel.child_token()));
-        handles.push(handle);
+        handles.push(handle.with_signing_key(SigningKey::from_bytes(&[0xA0 + i as u8; 32])));
     }
 
     let stubs: Vec<Arc<dyn PeersStub>> = handles

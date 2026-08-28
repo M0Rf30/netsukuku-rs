@@ -234,9 +234,10 @@ the count.
   `snsd_cache.c`) plus NTK_RFC 0009 (SNSD) and NTK_RFC 0014 (the DHT substrate). This is the
   fourth kind the old three-bucket framing excluded: not absent, not dropped, but built past what
   the reference itself has — which is why the security note below matters, not less.
-- *A real gap against the reference* — two, not one. Two more the audit found (the Coordinator
-  hand-off never being wired, and the missing `10.0.0.0/8` collision check) were closed in 0.1.3;
-  the second is described below because it is only partly closed:
+- *A real gap against the reference* — one, not one-of-a-different-kind. Three more the audit
+  found (the Coordinator hand-off never being wired, the missing `10.0.0.0/8` collision check,
+  and ANDNA's unenforced anti-Sybil cap) were closed after it; the middle one is described below
+  because it is only partly closed:
   - **G-node migration is a full data-plane blackout for the whole window, not merely a missing
     second stack.** `rehook`/`migrate` tears down every kernel route the previous generation held
     before the successor identity exists (`crates/ntkd/src/node/lifecycle.rs:1298-1301`), and only
@@ -258,32 +259,35 @@ the count.
     idle interface is not a reason to refuse to route, and failing would break working
     deployments to prevent a hypothetical one. So the collision is no longer *silent*, but ntkd
     still does not avoid or negotiate around it — nothing narrows the space it claims.
-  - **ANDNA's Counter anti-Sybil cap (NTK_RFC 0007) is fully bypassable under the default
-    `require_auth = false`.** The cap keys reservations by the requester's `client_tuple`
-    (`crates/ntk-andna/src/counter.rs:12-14`), tamper-proof only when origin-auth is enforced —
-    which it isn't by default (`crates/ntk-peerservices/src/actor.rs:834-841`,
-    `crates/ntkd/src/kernel/config.rs:49-50`). A security property, not a scope cut — the note
-    directly below explains why, and why the default can't simply change.
 
-### Security default: hostname registration has no anti-Sybil enforcement
+### Security: hostname registration is attributable, and why that needed saying
 
 ANDNA's Counter service caps live hostname reservations per registrant (NTK_RFC 0007) by keying
-them to the requester's `client_tuple` — its position as `ntk-peerservices`' own routing resolved
-it, supposedly not a value the requester can just declare (`crates/ntk-andna/src/counter.rs:12-14`,
-`crates/ntk-andna/proto/andna.proto:108-110`). That is only true when the request's origin is
-authenticated. `client_tuple` travels end-to-end through relays inside
-`PeerMessageForwarder::n`, and only an origin-auth signature
-(`crates/ntk-peerservices/src/origin_auth.rs`) stops a relay — or the requester itself — from
-claiming any position it likes. Verifying that signature is a no-op when `Config::require_auth`
-is `false` (`crates/ntk-peerservices/src/actor.rs:834-841`), and `false` is the default:
-`NtkdConfig::require_auth` is `#[serde(default)]` (`crates/ntkd/src/kernel/config.rs:49-50`).
-That default is not an oversight — the wire `Auth` field is optional precisely so a node that
-doesn't set it stays interoperable with one that does (`crates/ntkd/src/kernel/config.rs:114-117`);
-*enforcing* it, not carrying it, is what would break interop. The practical consequence: on a
-default node, the Counter cap is enforced against whatever `client_tuple` a caller sends, which
-is exactly the self-declared, spoofable value `counter.rs`'s own doc comment says it deliberately
-is not. Set `require_auth = true` with a configured `node_key_path` for the cap to mean anything
-against a hostile peer; the default build does not give you that protection.
+them to the requester's `client_tuple` — its position as `ntk-peerservices`' routing resolved it,
+not a value the requester declares (`crates/ntk-andna/src/counter.rs:12-14`). That holds only if
+the request's origin is authenticated: `client_tuple` travels end-to-end through relays, and only
+an origin-auth signature (`crates/ntk-peerservices/src/origin_auth.rs`) stops a relay — or the
+requester itself — from claiming any position it likes.
+
+That verification used to be a no-op whenever `Config::require_auth` was `false`, which is the
+default. The default is deliberate and stays: the wire `Auth` field is optional upstream, so
+*enforcing* it globally is what breaks interoperability, not carrying it
+(`crates/ntkd/src/kernel/config.rs:114-117`).
+
+But that reasoning never applied to ANDNA. Vala has no ANDNA to interoperate with —
+`research/impl/vala/andna/andna.vala` is 36 lines, its `serializables.vala` is empty, and
+`ntkdrpc` declares no ANDNA method — so there is no unmodified upstream peer that enforcement
+could lock out. And vanilla, whose C implementation this port reconstructs ANDNA from, verifies a
+signature on every registration (`research/impl/c/netsukuku/src/andna.c:829-841`, rejecting with
+`E_INVALID_SIGNATURE`) and again on the counter check (`:1181-1191`), with no toggle at all.
+
+So `AndnaService`/`CounterService` now declare those two requests as requiring a verified origin
+regardless of `require_auth` (`PeerService::requires_origin_auth`). Resolution stays open, which
+is exactly where vanilla draws the line too (`andna.c:1604-1609` verifies nothing on a lookup).
+
+Operational consequence: **a node needs `node_key_path` set to register a hostname on another
+node.** Registering a name it happens to hash-own locally still works without one, since a local
+request is provably attributable. Resolution never needs a key.
 
 Two more defects this same audit found — a route-installer state desync that could wedge kernel
 routing permanently, and a missing bootstrap-phase gate letting a still-hooking node inject

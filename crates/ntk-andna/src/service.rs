@@ -113,6 +113,20 @@ impl PeerService for AndnaService {
             }
         })
     }
+
+    /// Registration is a write that claims a name, so it must be attributable regardless of
+    /// `require_auth`; resolution is a read and stays open. That is exactly where vanilla draws
+    /// the line: the C daemon verifies a signature on a registration request
+    /// (`research/impl/c/netsukuku/src/andna.c:829-841`, rejecting with `E_INVALID_SIGNATURE`)
+    /// and never on a lookup (`andna.c:1604-1609`).
+    ///
+    /// Enforcing here costs no interoperability, unlike flipping `require_auth` globally: Vala
+    /// has no ANDNA to interoperate with at all — `research/impl/vala/andna/andna.vala` is 36
+    /// lines, its `serializables.vala` is empty, and `ntkdrpc` carries no ANDNA method — so
+    /// there is no unmodified upstream ANDNA peer that this could lock out.
+    fn requires_origin_auth(&self, request: &TypedValue) -> bool {
+        requires_verified_origin(&request.type_tag)
+    }
 }
 
 /// The `Counter` service (NTK_RFC 0007): per-registrant hostname-count capping.
@@ -175,5 +189,60 @@ impl PeerService for CounterService {
                 }
             }
         })
+    }
+
+    /// The anti-Sybil cap (NTK_RFC 0007) is only a cap if the requester cannot be forged: it
+    /// keys reservations by `client_tuple`, so an unattributable request makes the whole
+    /// mechanism decorative. Vanilla verifies a signature on the counter check too, separately
+    /// from the registration itself (`research/impl/c/netsukuku/src/andna.c:1181-1191`), and
+    /// keys its own record on the verified key (`counter_c_add(&rfrom, req->pubkey)`,
+    /// `andna.c:1235`). See [`AndnaService::requires_origin_auth`] for why enforcing this
+    /// regardless of `require_auth` costs no interoperability.
+    fn requires_origin_auth(&self, request: &TypedValue) -> bool {
+        requires_verified_origin(&request.type_tag)
+    }
+}
+
+/// The request tags that must be attributable regardless of
+/// [`ntk_peerservices::Config::require_auth`].
+///
+/// One list rather than one per service, so vanilla's line appears in exactly one place: the C
+/// daemon verifies a signature on a registration (`research/impl/c/netsukuku/src/andna.c:829-841`,
+/// rejecting with `E_INVALID_SIGNATURE`) and again on the counter check (`andna.c:1181-1191`),
+/// and never on a lookup (`andna.c:1604-1609`).
+fn requires_verified_origin(type_tag: &str) -> bool {
+    matches!(type_tag, "andna.RegisterRequest" | "andna.CounterRequest")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::requires_verified_origin;
+
+    /// Pins the port to vanilla's three answers. The distinction matters because
+    /// `AndnaService::exec` mixes a write and a read behind one entry point, which is why
+    /// `PeerService::requires_origin_auth` is per-request rather than per-service.
+    #[test]
+    fn only_the_write_requests_demand_a_verified_origin() {
+        assert!(
+            requires_verified_origin("andna.RegisterRequest"),
+            "a registration claims a name and must be attributable"
+        );
+        assert!(
+            requires_verified_origin("andna.CounterRequest"),
+            "the anti-Sybil cap keys on client_tuple, so it is only a cap if the origin is real"
+        );
+        assert!(
+            !requires_verified_origin("andna.ResolveRequest"),
+            "a lookup must stay open — vanilla does not sign one, and requiring it here would \
+             lock out any unauthenticated resolver, including ntkd's own andna-resolve"
+        );
+    }
+
+    /// An unknown tag must not inherit enforcement: `exec` already rejects it as malformed, and
+    /// reporting it as an auth failure instead would misattribute the cause.
+    #[test]
+    fn an_unknown_request_tag_demands_nothing() {
+        assert!(!requires_verified_origin("andna.NotAThing"));
+        assert!(!requires_verified_origin(""));
     }
 }

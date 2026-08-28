@@ -120,4 +120,25 @@ pub trait PeerService: Send + Sync {
         request: TypedValue,
         client_tuple: &'a [u32],
     ) -> BoxFuture<'a, Result<TypedValue, ExecError>>;
+
+    /// Whether this service demands a verified origin signature for `request`, regardless of
+    /// [`crate::Config::require_auth`].
+    ///
+    /// `require_auth` defaults to `false` because the wire `Auth` field is optional upstream:
+    /// adding it is compatible, *enforcing* it is not, so a node that enforced globally could
+    /// not talk to an unmodified Vala peer. That reasoning is sound for the services Vala
+    /// actually implements — but not for one it does not, and not for a request whose whole
+    /// security model rests on knowing who asked.
+    ///
+    /// So a service may opt individual requests in. Granularity is per-request, not per-service,
+    /// because a single service legitimately mixes both: ANDNA's records service answers
+    /// registrations (which must be attributable) and resolutions (which need not be) behind one
+    /// `exec`. Vanilla draws the line in exactly the same place — the C daemon verifies a
+    /// signature on a registration (`andna.c:829-841`) and on the counter check
+    /// (`andna.c:1181-1191`), and never on a lookup (`andna.c:1604-1609`).
+    ///
+    /// Defaults to `false`: a service that says nothing keeps today's behaviour exactly.
+    fn requires_origin_auth(&self, _request: &TypedValue) -> bool {
+        false
+    }
 }

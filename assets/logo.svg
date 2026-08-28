@@ -13,7 +13,7 @@
   <title id="ntk-title">netsukuku-rs</title>
   <desc id="ntk-desc">
     A filled Sierpinski triangle with an empty centre and three accent dots
-    at its outer points, over the wordmark "netsukuku" and the project
+    at its outer points, over the wordmark "netsukuku-rs" and the project
     motto "Close the world, txEn eht nepO".
   </desc>
   <style>
@@ -39,8 +39,8 @@
   <!-- wordmark + motto, generic monospace stack: no embedded font needed,
        renders identically enough on GitHub's default font set -->
   <text x="160" y="232" text-anchor="middle" class="ink"
-        textLength="230" lengthAdjust="spacingAndGlyphs"
-        style="font: 700 42px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;">netsukuku</text>
+        textLength="276" lengthAdjust="spacingAndGlyphs"
+        style="font: 700 38px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;">netsukuku-rs</text>
   <text x="160" y="260" text-anchor="middle" class="dim"
         textLength="288" lengthAdjust="spacingAndGlyphs"
         style="font: 500 16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;">- Close the world, txEn eht nepO -</text>

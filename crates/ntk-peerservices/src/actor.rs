@@ -848,8 +848,19 @@ impl Handle {
         p_id: ServiceId,
         request: &TypedValue,
     ) -> Result<(), crate::origin_auth::OriginAuthError> {
+        // `require_auth` is the global, interop-driven default. A service may still demand a
+        // verified origin for a specific request — see `PeerService::requires_origin_auth` for
+        // why that is per-request and why the global default cannot simply be flipped.
         if !self.config.require_auth {
-            return Ok(());
+            let demanded = match self.lookup_service(p_id).await {
+                Some(service) => service.requires_origin_auth(request),
+                // No such service registered here: nothing to enforce on behalf of. The request
+                // fails later on its own merits rather than as an auth error.
+                None => false,
+            };
+            if !demanded {
+                return Ok(());
+            }
         }
         let auth = auth.ok_or(crate::origin_auth::OriginAuthError::Missing)?;
         let payload = crate::origin_auth::origin_signing_payload(client_tuple, p_id, request);
