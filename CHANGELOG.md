@@ -4,6 +4,44 @@ All notable changes to this project are documented here. Versions follow [Semant
 Versioning](https://semver.org/spec/v2.0.0.html); the twelve `ntk-*` crates and `ntkd` are
 released in lockstep, so they always share a version even when only some of them changed.
 
+## [0.1.5]
+
+A partial answer to the migration gap, and the packaged unit and config move into this repository.
+
+### Added
+
+- **A departing node now tells its neighbours instead of letting them time it out.**
+  `QspnHandle::announce_destroy` ports upstream's `destroy`
+  (`research/impl/vala/qspn/qspn.vala:2481-2505`): every neighbour is told the identity is going
+  away, drops the arc, and lets implicit withdrawal retract whatever was only reachable through
+  it. Graceful shutdown calls it, so peers reconverge immediately rather than each waiting out a
+  ~28-30s liveness probe. The receiving half (`got_destroy` → `arc_remove`) was already ported and
+  wired; only the announcement was missing.
+  It is deliberately **not** called on migration, which is a finding rather than an omission. With
+  one identity per process, the arcs the successor must enter through are the same ones the
+  announcement tells peers to drop; wiring it there leaves the entering generation with nothing to
+  bootstrap against, so `is_bootstrap_complete` never fires and kernel installation stays
+  suppressed. Upstream can announce mid-migration only because a connectivity identity
+  (`qspn.vala:2226-2505`) still serves the old position. `README.md` §6 records both halves.
+- `contrib/systemd/` — the systemd unit and default config, with a README documenting every
+  capability the unit grants and why. Previously these lived only in the Arch packaging
+  repository, where they drifted: the unit shipped without `CAP_NET_BIND_SERVICE` for three
+  releases, so no packaged install could bind the default port 269. Both files encode facts this
+  tree defines — the capability set follows from where the daemon binds, and the config comments
+  quote the daemon's own error text — so they belong beside the code. The Arch packages now install
+  them from the release instead of carrying copies.
+
+### Fixed
+
+- **A config parse failure did not say which file failed.** `missing field \`nics\`` named the
+  field but not the path, and the daemon is normally started by a unit the operator never typed a
+  path into. Both load failures now carry it: `failed to load config /etc/ntkd/ntkd.toml: ...
+  missing field \`nics\``. This matters because the packaged config ships `nics` unset on purpose —
+  there is no safe default, since one naming an interface that happens to exist would quietly mesh
+  over the operator's uplink, and `eth0` is the worst candidate precisely because it often does
+  exist (containers, or any host booted with `net.ifnames=0`). An empty list was the alternative
+  and is worse: it parses, starts, and meshes over nothing.
+
 ## [0.1.4]
 
 One security fix, from the last open finding of 0.1.3's parity audit. Its premise turned out to be
@@ -243,6 +281,7 @@ them over native netlink, never by shelling out to `ip`.
 Only five of the twelve crates reached crates.io under this version, for the rate-limit reason
 described under 0.1.1. Use 0.1.2 instead.
 
+[0.1.5]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.1...v0.1.2

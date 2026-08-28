@@ -88,6 +88,9 @@ shape, not a substitute for reading them.
 
 - **From source**: `cargo install ntkd` (crates.io) or `cargo build --release -p ntkd` from a
   checkout — see §4 for the full workspace toolchain commands.
+- **systemd**: `contrib/systemd/` holds the unit and default config, with
+  `contrib/systemd/README.md` explaining every capability the unit grants and why. The Arch
+  packages install these exact files from the release rather than carrying copies.
 - **Arch Linux**: `netsukuku-rs` (built from source) and `netsukuku-rs-bin` are maintained at
   [M0Rf30/PKGBUILD](https://github.com/M0Rf30/PKGBUILD).
 - **OpenWrt**: `contrib/openwrt/net/netsukuku-rs/` is a standard package; add it as a feed
@@ -250,6 +253,23 @@ the count.
     (`research/impl/vala/identities/identities.vala:441-577`) — which this daemon cannot build
     today because it holds one live dispatcher target per process, never two identities
     simultaneously reachable (`crates/ntkd/src/node/lifecycle.rs:137-149`).
+
+    A departing node *does* now announce itself. Upstream's `destroy`
+    (`research/impl/vala/qspn/qspn.vala:2481-2505`) tells every neighbour the identity is going
+    away so each drops the arc and withdraws whatever ran through it, and unlike
+    `prepare_destroy` it is explicitly not connectivity-only ("connectivity or not", and
+    `connectivity_from_level` "could be also 0"), so it is portable without the mechanism above.
+    `QspnHandle::announce_destroy` implements it and graceful shutdown calls it, so a node
+    leaving no longer makes its peers wait out a ~28-30s liveness probe.
+
+    It is deliberately **not** called on migration, and that is the finding rather than an
+    omission. With one identity per process, the arcs the successor must enter through are the
+    same ones the announcement tells peers to drop. Wiring it there was tried: the peer removes
+    the arc, the entering generation has nothing to bootstrap against, `is_bootstrap_complete`
+    never fires, and kernel installation stays suppressed — caught by
+    `discovering_a_peer_joins_and_adopts_the_negotiated_position`. Upstream can announce mid
+    migration only because the connectivity identity is still serving the old position. So the
+    *stale-position* half of this gap stays open too, for the same missing mechanism.
   - **A host that already uses `10.0.0.0/8` is now detected, but only warned about.**
     `crates/ntkd/src/kernel/preflight.rs`'s `warn_address_space_conflicts` lists every host
     address inside the range this daemon routes in

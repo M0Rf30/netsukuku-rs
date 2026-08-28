@@ -43,7 +43,7 @@ use crate::path::{Destination, EtpMessage, EtpPath, NodePath, to_route_path};
 use crate::revise::revise_etp;
 use crate::snapshot::RouteSnapshot;
 use crate::state::{InternalArc, QspnState, SplitSignal};
-use crate::stub::{MissingArcHandler, QspnStubFactory};
+use crate::stub::{MissingArcHandler, QspnStub, QspnStubFactory};
 use crate::validate::check_incoming_message;
 
 /// Commands the actor processes serially off its `mpsc` queue. A mutating
@@ -118,6 +118,16 @@ enum Command {
     GotDestroy {
         arc: ArcId,
         reply: oneshot::Sender<()>,
+    },
+    /// Hands out one broadcast stub addressing every current arc, so
+    /// [`QspnHandle::announce_destroy`] can await the send *outside* this
+    /// command loop. The actor cannot make the call itself: awaiting an
+    /// outbound RPC here would block every other command (this crate's own
+    /// module doc), and spawning it into `timers` would lose the race against
+    /// the caller cancelling this generation immediately afterwards — which is
+    /// exactly when a retirement is announced.
+    DestroyStub {
+        reply: oneshot::Sender<Option<Arc<dyn QspnStub>>>,
     },
     ResendEtp {
         arc: ArcId,
@@ -453,6 +463,35 @@ impl QspnHandle {
     /// [`QspnError::ActorGone`].
     pub async fn handle_got_destroy(&self, arc: ArcId) -> Result<(), QspnError> {
         call(&self.cmd_tx, |reply| Command::GotDestroy { arc, reply }).await
+    }
+
+    /// Outbound `destroy` (`qspn.vala:2481-2505`): tell every neighbour this identity is going
+    /// away, so each removes the arc to it and lets implicit withdrawal retract every
+    /// destination that was only reachable through it.
+    ///
+    /// Unlike `prepare_destroy`, upstream's `destroy` is explicitly not connectivity-only — its
+    /// own doc says "connectivity or not" and its `connectivity_from_level` "could be also 0"
+    /// (`qspn.vala:2479-2484`) — so it is portable without the connectivity-identity mechanism
+    /// this crate does not implement (see [`Self::check_connectivity`]'s docs).
+    ///
+    /// Awaits the broadcast rather than spawning it. The caller announces retirement immediately
+    /// before tearing this generation down, so a spawned send would race that teardown and
+    /// usually lose. See [`Command::DestroyStub`] for why the actor cannot make the call itself.
+    ///
+    /// Returns `Ok(())` when there are no arcs to tell, and swallows a transport failure: a
+    /// neighbour that cannot be reached is one that will reap the arc on its own liveness probe,
+    /// and a retirement must not be blocked by a peer that has already gone.
+    ///
+    /// # Errors
+    /// [`QspnError::ActorGone`].
+    pub async fn announce_destroy(&self) -> Result<(), QspnError> {
+        let stub = call(&self.cmd_tx, |reply| Command::DestroyStub { reply }).await?;
+        if let Some(stub) = stub
+            && let Err(e) = stub.got_destroy().await
+        {
+            warn!(?e, "destroy: broadcast failed");
+        }
+        Ok(())
     }
 
     /// The actor's own live address. Differs from [`Self::my_naddr`] (a
@@ -1112,6 +1151,25 @@ impl Actor {
             Command::GotDestroy { arc, reply } => {
                 self.do_remove_arc(arc, false);
                 let _ = reply.send(());
+            }
+            Command::DestroyStub { reply } => {
+                let arcs: Vec<ArcId> = self.state.arcs().collect();
+                // Upstream picks the *outer* arcs, `lvl >= connectivity_from_level - 1`
+                // (`qspn.vala:2484-2491`). This port has no connectivity identity, so the
+                // retiring identity is always the main one: upstream's own comment allows
+                // `connectivity_from_level == 0`, making `i == -1` and every arc outer. Hence
+                // every arc, with no level filter to apply.
+                let stub = if arcs.is_empty() {
+                    None
+                } else {
+                    // `missing: None` — no reliable-unicast resend, unlike upstream's
+                    // `MissingArcDestroy` (`qspn.vala:2496`). A peer that misses the broadcast
+                    // reaps the arc on its own liveness probe instead, which is precisely the
+                    // behaviour before this existed, so the degradation is to the status quo
+                    // rather than to something worse.
+                    Some(self.stub_factory.broadcast(&arcs, None))
+                };
+                let _ = reply.send(stub);
             }
             Command::ResendEtp { arc, etp, is_full } => {
                 if !self.state.contains_arc(arc) {

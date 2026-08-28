@@ -1391,6 +1391,28 @@ where
     let outgoing_coordinator = ctx.generation_handles_tx.borrow().coordinator.clone();
     let coordinator_handoff = outgoing_coordinator.hand_off().await;
 
+    // No `destroy` announcement here, and that is a finding rather than an omission.
+    //
+    // Upstream's `destroy` (`research/impl/vala/qspn/qspn.vala:2481-2505`) tells every neighbour
+    // the identity is going away so each removes the arc, letting implicit withdrawal retract
+    // whatever ran through it. That is exactly what would clear a departing position from peers'
+    // maps instead of leaving it to age out on their liveness probes, so it looks like the fix
+    // for the stale half of the migration gap. It is not — not from here.
+    //
+    // Upstream can announce during a migration only because a *connectivity* identity keeps the
+    // old position's arcs serving while the new identity re-hooks (`qspn.vala:2226-2505`);
+    // `destroy` then retires that connectivity identity after the fact. This port has one
+    // identity per process, so the arcs the successor must enter through are the same ones the
+    // announcement tells peers to drop. Wiring it here was tried: the peer removes the arc, the
+    // entering generation has nothing left to bootstrap against, `is_bootstrap_complete` never
+    // fires, and kernel installation stays suppressed forever — caught by
+    // `crate::node::negotiation_tests::discovering_a_peer_joins_and_adopts_the_negotiated_position`.
+    //
+    // So `QspnHandle::announce_destroy` is wired into graceful shutdown
+    // (`crate::node::supervisor`), where a node genuinely is leaving, and a migration keeps
+    // relying on `reattach_known_arcs` plus the successor's own ETPs. The stale-position half of
+    // the gap therefore stays open until the connectivity identity exists (README §6).
+
     // -- tear down the previous generation: cancel its tasks, wait for them, then remove
     // exactly the kernel state it installed — before anything about the new generation touches
     // the kernel, so there is never a moment with both generations' routes installed at once. --

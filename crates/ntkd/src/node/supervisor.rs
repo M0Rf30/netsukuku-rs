@@ -129,6 +129,25 @@ pub async fn run(
 
     wait_for_shutdown_signal().await;
     tracing::info!("shutdown signal received, cancelling every actor");
+
+    // Tell the neighbours before the actors die — upstream's `destroy`
+    // (`research/impl/vala/qspn/qspn.vala:2481-2505`). Each peer removes the arc to this node and
+    // lets implicit withdrawal retract whatever was only reachable through it, so the network
+    // reconverges now instead of waiting out every peer's ~28-30s liveness probe.
+    //
+    // Here rather than in `migrate`: this is the one case where the identity really is going
+    // away. A migration reuses the same physical arcs, so announcing there tells peers to drop
+    // the arcs the successor still needs — see the long comment at the `destroy` site in
+    // `crate::node::lifecycle`'s `migrate` for the failure that proved it.
+    //
+    // Before `root_cancel`, because `announce_destroy` awaits the broadcast and the actor is
+    // gone once cancelled. Best-effort: a peer that cannot be reached is one already reaping the
+    // arc itself, and shutdown must not hang on it.
+    let shutdown_qspn = running.generation.borrow().qspn.clone();
+    if let Err(err) = shutdown_qspn.announce_destroy().await {
+        tracing::warn!(%err, "qspn: announcing this node's departure failed");
+    }
+
     root_cancel.cancel();
     let outstanding = drain_tasks(&mut tasks, SHUTDOWN_DRAIN_TIMEOUT).await;
     if outstanding > 0 {
