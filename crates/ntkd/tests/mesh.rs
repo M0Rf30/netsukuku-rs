@@ -189,7 +189,7 @@ async fn chain_of_four_converges_to_exact_multi_hop_routes() {
         .collect();
 
     let fds: Vec<RawFd> = workers.iter().map(NamespaceWorker::fd).collect();
-    let root = netns::root_handle().expect("root rtnetlink handle");
+    let (root, root_driver) = netns::root_handle_with_driver().expect("root rtnetlink handle");
     let segments = vec![
         Segment {
             name: "s0",
@@ -231,7 +231,7 @@ async fn chain_of_four_converges_to_exact_multi_hop_routes() {
             ],
         },
     ];
-    netns::wire(&root, &segments, &fds)
+    let mesh = netns::wire(&root, &segments, &fds)
         .await
         .expect("wire chain segments");
     for w in &workers {
@@ -246,6 +246,7 @@ async fn chain_of_four_converges_to_exact_multi_hop_routes() {
                 .unwrap_or_else(|e| panic!("chain worker failed: {e:?}")),
         );
     }
+    netns::teardown_mesh(mesh, root, root_driver).await;
 
     let topo = chain_topology();
 
@@ -441,7 +442,7 @@ async fn level1_destination_installs_correct_cidr_route() {
         .collect();
 
     let fds: Vec<RawFd> = workers.iter().map(NamespaceWorker::fd).collect();
-    let root = netns::root_handle().expect("root rtnetlink handle");
+    let (root, root_driver) = netns::root_handle_with_driver().expect("root rtnetlink handle");
     let segments = vec![Segment {
         name: "seg",
         members: vec![
@@ -459,7 +460,7 @@ async fn level1_destination_installs_correct_cidr_route() {
             },
         ],
     }];
-    netns::wire(&root, &segments, &fds)
+    let mesh = netns::wire(&root, &segments, &fds)
         .await
         .expect("wire level1 segment");
     for w in &workers {
@@ -474,6 +475,7 @@ async fn level1_destination_installs_correct_cidr_route() {
                 .unwrap_or_else(|e| panic!("level1 worker failed: {e:?}")),
         );
     }
+    netns::teardown_mesh(mesh, root, root_driver).await;
 
     let topo = Topology::new(LEVEL1_GSIZES).unwrap();
     let naddr = |idx: u32| Naddr::new(topo.clone(), level1_position(idx)).unwrap();
@@ -710,7 +712,7 @@ async fn partition_clean_severance_drops_exactly_the_unreachable_destinations() 
         .collect();
     let fds: Vec<RawFd> = workers.iter().map(NamespaceWorker::fd).collect();
 
-    let root = netns::root_handle().expect("root rtnetlink handle");
+    let (root, root_driver) = netns::root_handle_with_driver().expect("root rtnetlink handle");
     let segments = vec![
         Segment {
             name: "slot0",
@@ -764,6 +766,7 @@ async fn partition_clean_severance_drops_exactly_the_unreachable_destinations() 
             .await
             .unwrap_or_else(|e| panic!("severance worker failed: {e:?}"));
     }
+    netns::teardown_mesh(mesh, root, root_driver).await;
 }
 
 /// A triangle inside one level-1 g-node: `a` sits alone in slot 0 (`[0,0]`); `b1`/`b2` are the
@@ -965,7 +968,7 @@ async fn partition_signals_split_only_after_the_documented_debounce() {
     let fd_b1 = worker_b1.fd();
     let fd_b2 = worker_b2.fd();
 
-    let root = netns::root_handle().expect("root rtnetlink handle");
+    let (root, root_driver) = netns::root_handle_with_driver().expect("root rtnetlink handle");
     let segments = vec![
         Segment {
             name: "ab1",
@@ -1035,6 +1038,7 @@ async fn partition_signals_split_only_after_the_documented_debounce() {
         .join(PARTITION_TIMEOUT + Duration::from_secs(60) + netns::JOIN_MARGIN)
         .await
         .unwrap_or_else(|e| panic!("worker b2 failed: {e:?}"));
+    netns::teardown_mesh(mesh, root, root_driver).await;
 
     let PartitionReport::A {
         report: report_a,
@@ -1311,7 +1315,7 @@ async fn two_star_groups_merge_into_one_network() {
         .collect();
     let fds: Vec<RawFd> = workers.iter().map(NamespaceWorker::fd).collect();
 
-    let root = netns::root_handle().expect("root rtnetlink handle");
+    let (root, root_driver) = netns::root_handle_with_driver().expect("root rtnetlink handle");
     let segments = vec![
         Segment {
             name: "grpa",
@@ -1380,6 +1384,7 @@ async fn two_star_groups_merge_into_one_network() {
                 .unwrap_or_else(|e| panic!("merge worker failed: {e:?}")),
         );
     }
+    netns::teardown_mesh(mesh, root, root_driver).await;
 
     for r in &reports {
         eprintln!(
@@ -1556,7 +1561,7 @@ async fn two_level_gnode_migrates_as_a_unit_into_merged_network() {
         .collect();
     let fds: Vec<RawFd> = workers.iter().map(NamespaceWorker::fd).collect();
 
-    let root = netns::root_handle().expect("root rtnetlink handle");
+    let (root, root_driver) = netns::root_handle_with_driver().expect("root rtnetlink handle");
     let segments = vec![
         Segment {
             name: "ugrpa",
@@ -1619,6 +1624,7 @@ async fn two_level_gnode_migrates_as_a_unit_into_merged_network() {
                 .unwrap_or_else(|e| panic!("unit-migration worker failed: {e:?}")),
         );
     }
+    netns::teardown_mesh(mesh, root, root_driver).await;
 
     for r in &reports {
         eprintln!(
@@ -2086,7 +2092,7 @@ async fn isolated_merge_migrates_a_preformed_losing_gnode_as_a_unit() {
         .collect();
     let fds: Vec<RawFd> = workers.iter().map(NamespaceWorker::fd).collect();
 
-    let root = netns::root_handle().expect("root rtnetlink handle");
+    let (root, root_driver) = netns::root_handle_with_driver().expect("root rtnetlink handle");
     let segments = vec![
         Segment {
             name: "igrpa",
@@ -2152,6 +2158,7 @@ async fn isolated_merge_migrates_a_preformed_losing_gnode_as_a_unit() {
                 .unwrap_or_else(|e| panic!("isolated-merge worker failed: {e:?}")),
         );
     }
+    netns::teardown_mesh(mesh, root, root_driver).await;
 
     for r in &reports {
         eprintln!(

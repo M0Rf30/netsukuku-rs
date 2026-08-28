@@ -145,6 +145,16 @@ pub struct ElectionRecord {
     pub network_id: i64,
     pub evaluate_enter_id: i32,
     pub granted_at_millis: u64,
+    /// Set (to the wall-clock millisecond the elected candidate reported success) the
+    /// instant `completed_enter` fires for this election — `None`/`0` (the wire sentinel;
+    /// a real epoch timestamp is never `0`) while the episode is still in flight. See
+    /// [`crate::node::adapters::EnterArbiter::complete`]'s own doc for why this exists:
+    /// unlike `granted_at_millis`+`ELECTED_TTL`, which only ever frees the slot for a
+    /// *different* target network as a crash/never-reported backstop, this lets that
+    /// release happen immediately once the real answer is known, without waiting out the
+    /// TTL — while a stray, later ask for the *same* network (a sibling that has not yet
+    /// observed `finish_enter`) still finds this record and is still told `IgnoreNetwork`.
+    pub completed_at_millis: Option<u64>,
 }
 
 /// The Coordinator-held Hooking-module shared memory
@@ -170,8 +180,10 @@ pub struct HookingMemory {
 struct WireHookingMemory {
     /// `(neighbor_network_id, decision, decided_at_millis)`.
     merge_decisions: Vec<(i64, bool, u64)>,
-    /// `(chosen_lvl, network_id, evaluate_enter_id, granted_at_millis)`.
-    elections: Vec<(u32, i64, i32, u64)>,
+    /// `(chosen_lvl, network_id, evaluate_enter_id, granted_at_millis, completed_at_millis)`
+    /// — `completed_at_millis == 0` means "not yet completed" ([`ElectionRecord::completed_at_millis`]'s
+    /// own doc on why `0` is a safe sentinel).
+    elections: Vec<(u32, i64, i32, u64, u64)>,
 }
 
 /// Wall-clock milliseconds since the Unix epoch — the timestamp [`encode_hooking_memory`]
@@ -205,6 +217,7 @@ pub fn encode_hooking_memory(mem: &HookingMemory) -> TypedValue {
                         e.network_id,
                         e.evaluate_enter_id,
                         e.granted_at_millis,
+                        e.completed_at_millis.unwrap_or(0),
                     )
                 })
                 .collect(),
@@ -225,13 +238,15 @@ pub fn decode_hooking_memory(tv: &TypedValue) -> Result<HookingMemory, CodecErro
             .elections
             .into_iter()
             .map(
-                |(level, network_id, evaluate_enter_id, granted_at_millis)| {
+                |(level, network_id, evaluate_enter_id, granted_at_millis, completed_at_millis)| {
                     (
                         level as usize,
                         ElectionRecord {
                             network_id,
                             evaluate_enter_id,
                             granted_at_millis,
+                            completed_at_millis: (completed_at_millis != 0)
+                                .then_some(completed_at_millis),
                         },
                     )
                 },
@@ -384,6 +399,7 @@ mod tests {
                 network_id: 42,
                 evaluate_enter_id: 7,
                 granted_at_millis: 3_000,
+                completed_at_millis: None,
             },
         );
         let decoded = decode_hooking_memory(&encode_hooking_memory(&mem)).unwrap();
@@ -402,6 +418,7 @@ mod tests {
                 network_id: 1,
                 evaluate_enter_id: 1,
                 granted_at_millis: 500,
+                completed_at_millis: None,
             },
         );
         let mut mem = decode_hooking_memory(&encode_hooking_memory(&mem)).unwrap();
@@ -414,8 +431,29 @@ mod tests {
                 network_id: 1,
                 evaluate_enter_id: 1,
                 granted_at_millis: 500,
+                completed_at_millis: None,
             })
         );
+    }
+
+    /// `completed_at_millis` round-trips as `Some`, not just the default `None` the other
+    /// tests exercise — pins the `0`-is-"not completed" wire sentinel
+    /// ([`ElectionRecord::completed_at_millis`]'s own doc) against silently collapsing a real
+    /// completion timestamp back to `None`.
+    #[test]
+    fn a_completed_election_round_trips_its_completed_at_millis() {
+        let mut mem = HookingMemory::default();
+        mem.elections.insert(
+            2,
+            ElectionRecord {
+                network_id: 7,
+                evaluate_enter_id: 3,
+                granted_at_millis: 1_000,
+                completed_at_millis: Some(1_500),
+            },
+        );
+        let decoded = decode_hooking_memory(&encode_hooking_memory(&mem)).unwrap();
+        assert_eq!(decoded, mem);
     }
 
     /// Every variant, including the unit ones — these are exactly what panicked before this

@@ -662,11 +662,17 @@ impl QspnState {
         if d.level == 0 {
             return Ok(dest.paths.clone());
         }
-        let (valid_fp, _, _) = dest.evaluate(|a| self.arc_cost(a))?;
+        let (valid_fp, valid_fp_nodes_inside, _) = dest.evaluate(|a| self.arc_cost(a))?;
         Ok(dest
             .paths
             .iter()
-            .filter(|p| p.path.fingerprint.same_branch(&valid_fp))
+            .filter(|p| {
+                p.path.fingerprint.same_branch(
+                    &valid_fp,
+                    p.path.nodes_inside,
+                    valid_fp_nodes_inside,
+                )
+            })
             .cloned()
             .collect())
     }
@@ -857,11 +863,15 @@ impl QspnState {
         // fingerprint object currently represents it looks like a brand new
         // fingerprint next round and spuriously re-triggers
         // `first_detection_split` below.
-        let mut f1: Vec<Fingerprint<Vec<u8>>> = Vec::new();
+        let mut f1: Vec<(Fingerprint<Vec<u8>>, u32)> = Vec::new();
         if d.level > 0 {
             for np in &md_set {
-                if !f1.iter().any(|f| f.same_branch(&np.path.fingerprint)) {
-                    f1.push(np.path.fingerprint.clone());
+                let ni = np.path.nodes_inside;
+                if !f1
+                    .iter()
+                    .any(|(f, fni)| f.same_branch(&np.path.fingerprint, *fni, ni))
+                {
+                    f1.push((np.path.fingerprint.clone(), ni));
                 }
             }
         }
@@ -1054,6 +1064,18 @@ impl QspnState {
         } else {
             None
         };
+        // `same_branch`'s companion group-size argument for `valid_fp_d`:
+        // the `od_set` entry `winning_fingerprint` picked it from already
+        // carries it (`Destination::evaluate` does the same lookup).
+        let valid_fp_d_nodes_inside: u32 = valid_fp_d
+            .as_ref()
+            .and_then(|fp| {
+                od_set
+                    .iter()
+                    .find(|o| o.path.fingerprint.identity_eq(fp))
+                    .map(|o| o.path.nodes_inside)
+            })
+            .unwrap_or_default();
 
         let mut sd: Vec<QspnEvent> = Vec::new();
         let mut all_paths_set: Vec<EtpPath> = Vec::new();
@@ -1067,11 +1089,11 @@ impl QspnState {
             all_paths_set.push(prepare_for_sending(p, arc_cost(p.arc)));
             if d.level == 0 {
                 sd.push(QspnEvent::PathAdded(to_route_path(p, arc_cost(p.arc))));
-            } else if p
-                .path
-                .fingerprint
-                .same_branch(valid_fp_d.as_ref().expect("d.level > 0"))
-            {
+            } else if p.path.fingerprint.same_branch(
+                valid_fp_d.as_ref().expect("d.level > 0"),
+                p.path.nodes_inside,
+                valid_fp_d_nodes_inside,
+            ) {
                 sd.push(QspnEvent::PathAdded(to_route_path(p, arc_cost(p.arc))));
                 p.exposed = true;
             }
@@ -1080,6 +1102,7 @@ impl QspnState {
         // Existing paths: removed, changed, or untouched (qspn.vala:1662-1717).
         for p in &md_set {
             let fp_d_p = p.path.fingerprint.clone();
+            let fp_d_p_nodes_inside = p.path.nodes_inside;
             match od_set.iter().position(|o| o.hops_arcs_equal(&p.path)) {
                 None => {
                     let mut pp = prepare_for_sending(p, arc_cost(p.arc));
@@ -1106,7 +1129,11 @@ impl QspnState {
                         // new winner, not the replacement's — literal
                         // upstream behavior (qspn.vala:1696-1705), preserved
                         // as-is even though it looks asymmetric.
-                        if fp_d_p.same_branch(valid_fp_d.as_ref().expect("d.level > 0")) {
+                        if fp_d_p.same_branch(
+                            valid_fp_d.as_ref().expect("d.level > 0"),
+                            fp_d_p_nodes_inside,
+                            valid_fp_d_nodes_inside,
+                        ) {
                             sd.push(QspnEvent::PathChanged(to_route_path(
                                 &od_set[idx],
                                 arc_cost(od_set[idx].arc),
@@ -1115,7 +1142,11 @@ impl QspnState {
                         } else {
                             sd.push(QspnEvent::PathRemoved(to_route_path(p, arc_cost(p.arc))));
                         }
-                    } else if fp_d_p.same_branch(valid_fp_d.as_ref().expect("d.level > 0")) {
+                    } else if fp_d_p.same_branch(
+                        valid_fp_d.as_ref().expect("d.level > 0"),
+                        fp_d_p_nodes_inside,
+                        valid_fp_d_nodes_inside,
+                    ) {
                         sd.push(QspnEvent::PathAdded(to_route_path(
                             &od_set[idx],
                             arc_cost(od_set[idx].arc),
@@ -1161,14 +1192,21 @@ impl QspnState {
         if d.level > 0
             && let Some(dest_now) = self.destinations[d.level].get(&d.pos)
         {
-            let mut f2: Vec<Fingerprint<Vec<u8>>> = Vec::new();
+            let mut f2: Vec<(Fingerprint<Vec<u8>>, u32)> = Vec::new();
             for np in &dest_now.paths {
-                if !f2.iter().any(|f| f.same_branch(&np.path.fingerprint)) {
-                    f2.push(np.path.fingerprint.clone());
+                let ni = np.path.nodes_inside;
+                if !f2
+                    .iter()
+                    .any(|(f, fni)| f.same_branch(&np.path.fingerprint, *fni, ni))
+                {
+                    f2.push((np.path.fingerprint.clone(), ni));
                 }
             }
             if f2.len() > 1 {
-                if f2.iter().any(|fp| !f1.iter().any(|f| f.same_branch(fp))) {
+                if f2
+                    .iter()
+                    .any(|(fp, ni)| !f1.iter().any(|(f, fni)| f.same_branch(fp, *fni, *ni)))
+                {
                     first_detection_split = true;
                 }
                 // Indistinguishable (tied, differently-identified) fingerprints
@@ -1176,26 +1214,38 @@ impl QspnState {
                 // `winning_fingerprint`'s docs for why that outcome is
                 // ordinary between two real members of the same g-node. The
                 // fold just keeps its current `fp_eldest` deterministically.
-                let mut fp_eldest = f2[0].clone();
-                for fp in &f2[1..] {
+                let (mut fp_eldest, mut fp_eldest_nodes_inside) = f2[0].clone();
+                for (fp, ni) in &f2[1..] {
                     match fp.elder_seed(&fp_eldest) {
-                        Ok(true) => fp_eldest = fp.clone(),
+                        Ok(true) => {
+                            fp_eldest = fp.clone();
+                            fp_eldest_nodes_inside = *ni;
+                        }
                         Ok(false) | Err(ntk_common::Error::IndistinguishableFingerprints) => {}
                         Err(e) => return Err(QspnError::Common(e)),
                     }
                 }
-                let cheapest_with = |fp: &Fingerprint<Vec<u8>>| -> NodePath {
+                let cheapest_with = |fp: &Fingerprint<Vec<u8>>, fp_nodes_inside: u32| -> NodePath {
                     dest_now
                         .paths
                         .iter()
-                        .filter(|np| np.path.fingerprint.same_branch(fp))
+                        .filter(|np| {
+                            np.path.fingerprint.same_branch(
+                                fp,
+                                np.path.nodes_inside,
+                                fp_nodes_inside,
+                            )
+                        })
                         .min_by_key(|np| np.total_cost(arc_cost(np.arc)))
                         .cloned()
                         .expect("fp came from this destination's own path set")
                 };
-                let bp_eldest = cheapest_with(&fp_eldest);
-                for fp in f2.iter().filter(|fp| !fp.same_branch(&fp_eldest)) {
-                    let bp = cheapest_with(fp);
+                let bp_eldest = cheapest_with(&fp_eldest, fp_eldest_nodes_inside);
+                for (fp, ni) in f2
+                    .iter()
+                    .filter(|(fp, ni)| !fp.same_branch(&fp_eldest, *ni, fp_eldest_nodes_inside))
+                {
+                    let bp = cheapest_with(fp, *ni);
                     split_signals.push(SplitSignal {
                         destination: d,
                         fp_eldest: fp_eldest.clone(),
@@ -1245,7 +1295,16 @@ impl QspnState {
     /// `d` should now actually emit `GnodeSplitted` for `fp`
     /// (`signal_split`'s re-check after its wait, `qspn.vala:1852-1883`).
     /// Empty if the eldest fingerprint is no longer present at `d` (the fork
-    /// healed) or `d` is not (or no longer) a direct-neighbor gnode.
+    /// healed), `d` is not (or no longer) a direct-neighbor gnode, or `fp`
+    /// and `fp_eldest` now read as [`Fingerprint::same_branch`] — the split
+    /// was only ever a coincidental snapshot mid-bootstrap (e.g. `fp`'s
+    /// member count was still `1` when this signal was first queued and has
+    /// since grown past `1` as its side finished discovering its sibling),
+    /// not a real, still-standing fork, by the time the debounce elapsed.
+    /// Detection (`update_map_one_destination`'s split check) already gates
+    /// on `same_branch`; the re-check must apply the same gate against
+    /// *current* state or a fork that heals during the debounce window
+    /// fires anyway on stale, identity-only evidence.
     #[must_use]
     pub fn split_still_live(
         &self,
@@ -1256,10 +1315,22 @@ impl QspnState {
         let Some(dest) = self.destinations.get(d.level).and_then(|m| m.get(&d.pos)) else {
             return Vec::new();
         };
-        if !dest
+        let Some(eldest_now) = dest
             .paths
             .iter()
-            .any(|np| np.path.fingerprint.identity_eq(fp_eldest))
+            .find(|np| np.path.fingerprint.identity_eq(fp_eldest))
+        else {
+            return Vec::new();
+        };
+        if let Some(fp_now) = dest
+            .paths
+            .iter()
+            .find(|np| np.path.fingerprint.identity_eq(fp))
+            && fp_now.path.fingerprint.same_branch(
+                &eldest_now.path.fingerprint,
+                fp_now.path.nodes_inside,
+                eldest_now.path.nodes_inside,
+            )
         {
             return Vec::new();
         }

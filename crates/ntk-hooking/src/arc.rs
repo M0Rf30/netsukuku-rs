@@ -22,6 +22,7 @@ use crate::snapshot::ArcPhase;
 use crate::stub::{HookingStub, HookingStubFactory};
 use crate::view::QspnView;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Opaque identifier for one identity-arc — the Rust replacement for
 /// `IIdentityArc` object identity (`api.vala:86-89`). Minted and owned by
@@ -47,6 +48,25 @@ pub struct ArcId(pub u64);
 /// retries bridges exactly that narrow window without weakening upstream's
 /// eventual-abort semantics for a target that is genuinely unreachable.
 const EVALUATE_ENTER_UNREACHABLE_RETRIES: u32 = 5;
+
+/// Bound on how many times [`ask_again_backoff`] doubles the wait before it stops growing
+/// (still clamped to `cap` regardless) — `2^4 = 16x` the base `ask_again_wait`, enough spread
+/// that a stuck contention is not spinning at a fixed interval while never approaching `cap`.
+const ASK_AGAIN_MAX_DOUBLINGS: u32 = 4;
+
+/// Bounded exponential backoff for consecutive `AskAgain` retries of the *same*
+/// `evaluate_enter` ask: `base` (`HookingConfig::ask_again_wait`, upstream's own
+/// `global_timeout(n) / 4`, `arc_handler.vala:236-239`) doubles with each consecutive miss,
+/// capped at `cap` (`HookingConfig::restart_wait`, the same bound this arc handler already
+/// uses elsewhere to decide "this has taken long enough"). Before this existed, every
+/// `AskAgain` waited the exact same fixed interval forever — harmless once the server side
+/// releases a contended level promptly (`EnterArbiter::complete`'s own doc), but still an
+/// unbounded hot loop in the crash/never-reported case `ELECTED_TTL` backstops: this bounds
+/// the client's own contribution to that case too, rather than relying on the server alone.
+fn ask_again_backoff(base: Duration, cap: Duration, streak: u32) -> Duration {
+    base.saturating_mul(1u32 << streak.min(ASK_AGAIN_MAX_DOUBLINGS))
+        .min(cap)
+}
 
 /// Everything one arc's handler task needs, bundled so [`crate::manager`]
 /// can spawn one of these per arc without a long parameter list.
@@ -313,19 +333,26 @@ pub(crate) async fn run_arc_handler(ctx: ArcHandlerCtx, arc: ArcId, cancel: Canc
             evaluate_enter_id: crate::idgen::next_i32(),
         };
         let mut unreachable_retries = 0u32;
+        let mut ask_again_streak = 0u32;
         let ask_lvl = loop {
             match ctx.coord.evaluate_enter(evaluate_req.clone()).await {
                 Ok(lvl) => break lvl,
                 Err(CoordinatorError::AskAgain) => {
+                    let wait = ask_again_backoff(
+                        ctx.config.ask_again_wait(ctx.view.n_nodes()),
+                        ctx.config.restart_wait(ctx.view.n_nodes()),
+                        ask_again_streak,
+                    );
                     info!(
                         ?arc,
                         network_id = evaluate_req.network_id,
                         evaluate_enter_id = evaluate_req.evaluate_enter_id,
+                        streak = ask_again_streak,
+                        ?wait,
                         "hooking arc: evaluate_enter -> AskAgain, retrying same id"
                     );
-                    if sleep_or_cancelled(ctx.config.ask_again_wait(ctx.view.n_nodes()), &cancel)
-                        .await
-                    {
+                    ask_again_streak = ask_again_streak.saturating_add(1);
+                    if sleep_or_cancelled(wait, &cancel).await {
                         return;
                     }
                     continue;
@@ -537,6 +564,34 @@ mod tests {
 
     fn topo() -> Topology {
         Topology::new([4]).expect("valid topology")
+    }
+
+    /// Pure, deterministic pin of [`ask_again_backoff`]'s own doubling/cap contract — no
+    /// `tokio` timer involved: successive misses double the wait up to
+    /// `ASK_AGAIN_MAX_DOUBLINGS`, after which it stops growing but stays clamped to `cap`
+    /// regardless. Reproduces the livelock's client-side half: before this existed, every
+    /// `AskAgain` waited the exact same fixed interval (`ask_again_wait`, ~250ms for a small
+    /// network) forever, an unbounded hot loop once nothing on the server ever released the
+    /// slot.
+    #[test]
+    fn ask_again_backoff_doubles_then_caps() {
+        let base = Duration::from_millis(250);
+        let cap = Duration::from_secs(20);
+        assert_eq!(ask_again_backoff(base, cap, 0), base);
+        assert_eq!(ask_again_backoff(base, cap, 1), base * 2);
+        assert_eq!(ask_again_backoff(base, cap, 2), base * 4);
+        assert_eq!(
+            ask_again_backoff(base, cap, ASK_AGAIN_MAX_DOUBLINGS),
+            base * (1 << ASK_AGAIN_MAX_DOUBLINGS)
+        );
+        // Growth stops past the doubling bound, not just at `cap`.
+        assert_eq!(
+            ask_again_backoff(base, cap, ASK_AGAIN_MAX_DOUBLINGS + 5),
+            base * (1 << ASK_AGAIN_MAX_DOUBLINGS)
+        );
+        // A small `cap` still wins even before the doubling bound is reached.
+        let tiny_cap = Duration::from_millis(400);
+        assert_eq!(ask_again_backoff(base, tiny_cap, 5), tiny_cap);
     }
 
     async fn wait_for(mut check: impl FnMut() -> bool, max_rounds: usize) -> bool {

@@ -578,12 +578,14 @@ proptest! {
     /// Two admitted paths to the same level-above-0 destination, reached
     /// via two genuinely disjoint arcs, must signal a split
     /// (`UpdateMapOutcome::split_signals`) if and only if their
-    /// fingerprints are actually distinguishable by elder-seed. Tied
-    /// (`elder_seed` indistinguishable) or identical fingerprints are the
-    /// ordinary outcome of a densely-connected g-node observed through more
-    /// than one gateway (see `Fingerprint::same_branch`'s docs) and must
-    /// never be reported as a fork; genuinely orderable fingerprints from
-    /// two distinct g-nodes must still be reported. This pins the defect
+    /// fingerprints are actually distinguishable by elder-seed *or* one of
+    /// them is no longer part of a live multi-member g-node. A real,
+    /// still-connected 2-member tie (`elder_seed` indistinguishable,
+    /// `nodes_inside > 1` on both sides) is the ordinary outcome of a
+    /// densely-connected g-node observed through more than one gateway
+    /// (see `Fingerprint::same_branch`'s docs) and must never be reported
+    /// as a fork; genuinely orderable fingerprints from two distinct
+    /// g-nodes must still be reported. This pins the defect
     /// `crates/ntk-qspn/tests/k4_mesh.rs` found: the split check used to
     /// dedupe by bare `Fingerprint::identity_eq`, so two tied-but-distinct
     /// identities always looked like two different g-nodes in conflict.
@@ -607,16 +609,38 @@ proptest! {
         let my_naddr = Naddr::new(topo.clone(), [0, 0]).unwrap();
         let levels = topo.levels();
 
-        let fp_a = Fingerprint::new(vec![id_a], eldership_a, vec![0u32; levels])
-            .construct(&[], false)
-            .unwrap();
-        let fp_b = Fingerprint::new(vec![id_b], eldership_b, vec![0u32; levels])
-            .construct(&[], false)
-            .unwrap();
-        let distinguishable = !matches!(
-            fp_a.elder_seed(&fp_b),
-            Err(ntk_common::Error::IndistinguishableFingerprints)
-        );
+        let level0_a = Fingerprint::new(vec![id_a], eldership_a, vec![0u32; levels]);
+        let level0_b = Fingerprint::new(vec![id_b], eldership_b, vec![0u32; levels]);
+        // A live tie only ever arises between two real siblings that still
+        // see each other (`Fingerprint::construct`'s champion race needs a
+        // real candidate to depose `self`) — model that directly, with
+        // `nodes_inside` reflecting the shared g-node's full 2-member
+        // count, rather than two independently `construct`-ed loners
+        // (`nodes_inside = 1`, each alone). The latter is the *disconnected*
+        // shape `Fingerprint::same_branch`'s `*_nodes_inside` gate exists to
+        // tell apart from this test's "still one live g-node" scenario (see
+        // its docs).
+        let (fp_a, nodes_inside_a) = if tie_eldership {
+            (
+                level0_a
+                    .construct(std::slice::from_ref(&level0_b), false)
+                    .unwrap(),
+                2,
+            )
+        } else {
+            (level0_a.construct(&[], false).unwrap(), 1)
+        };
+        let (fp_b, nodes_inside_b) = if tie_eldership {
+            (level0_b.construct(&[level0_a], false).unwrap(), 2)
+        } else {
+            (level0_b.construct(&[], false).unwrap(), 1)
+        };
+        // `same_branch`, not bare `elder_seed`, is the actual gate
+        // `update_map`'s split check applies post-fix: two branches can be
+        // `elder_seed`-indistinguishable yet still not `same_branch` (e.g.
+        // a coincidental eldership collision on the "untied" side, whose
+        // `nodes_inside` never claims more than one member).
+        let same_branch = fp_a.same_branch(&fp_b, nodes_inside_a, nodes_inside_b);
 
         let mut state = QspnState::new(
             my_naddr,
@@ -634,7 +658,7 @@ proptest! {
             arcs: vec![arc_a],
             cost: Cost::Null,
             fingerprint: fp_a,
-            nodes_inside: 1,
+            nodes_inside: nodes_inside_a,
             ignore_outside: vec![false; levels],
         });
         let path_b = NodePath::new(arc_b, EtpPath {
@@ -642,21 +666,21 @@ proptest! {
             arcs: vec![arc_b],
             cost: Cost::Null,
             fingerprint: fp_b,
-            nodes_inside: 1,
+            nodes_inside: nodes_inside_b,
             ignore_outside: vec![false; levels],
         });
 
         let outcome = state.update_map(&[path_a, path_b], None).unwrap();
-        if distinguishable {
+        if same_branch {
             prop_assert!(
-                !outcome.split_signals.is_empty(),
-                "two genuinely distinguishable fingerprints for one destination must signal a split"
+                outcome.split_signals.is_empty(),
+                "same-branch fingerprints must never signal a false split: {:?}",
+                outcome.split_signals
             );
         } else {
             prop_assert!(
-                outcome.split_signals.is_empty(),
-                "tied/indistinguishable fingerprints must never signal a false split: {:?}",
-                outcome.split_signals
+                !outcome.split_signals.is_empty(),
+                "two fingerprints that are not the same branch must signal a split"
             );
         }
     }

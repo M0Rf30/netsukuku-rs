@@ -236,7 +236,8 @@ impl<Id: Clone + PartialEq> Fingerprint<Id> {
     /// True if `self` and `other` should be treated as naming the *same*
     /// admitted branch of a destination for exposure purposes: either they
     /// share an identity ([`Self::identity_eq`]), or [`Self::elder_seed`]
-    /// cannot order them at all.
+    /// cannot order them at all *and* both sides currently report more than
+    /// one member for the g-node they name.
     ///
     /// That second case is the ordinary — not anomalous — outcome between
     /// two real members of the very same g-node: [`Self::construct`]'s
@@ -255,13 +256,47 @@ impl<Id: Clone + PartialEq> Fingerprint<Id> {
     /// Any other [`Self::elder_seed`] error (e.g. mismatched levels) is a
     /// genuine bug in the caller's input, not this ordinary case, and is
     /// reported as "not the same branch" rather than swallowed here.
+    ///
+    /// # `self_nodes_inside`/`other_nodes_inside` scope the tie to a *live* g-node
+    /// The rationale above silently assumes a real sibling sat on the other
+    /// end of that `construct` call. It does not have to: `construct`-ing
+    /// with *no* siblings at all (`siblings = &[]`) also leaves a
+    /// fingerprint's own claim and `id` untouched — at the value level,
+    /// indistinguishable from the tied-with-a-sibling case above. That
+    /// coincidence is exactly what a g-node split produces: after a sever,
+    /// every former member independently `construct`s alone (no sibling
+    /// left to contend with), and because every node in this codebase
+    /// bootstraps eldership at `0` (matching upstream,
+    /// `research/impl/vala/qspn/testsuites/system_peer/system_peer.vala:259-260`),
+    /// two now-*disconnected* halves derive the same all-zero seed by pure
+    /// coincidence, not by a live tie. Folding that into one branch here
+    /// would mean a g-node whose members all started at eldership `0` — the
+    /// ordinary case, not an edge case — could never be observed to split.
+    ///
+    /// `self_nodes_inside`/`other_nodes_inside` — each fingerprint's own
+    /// reported member count for the g-node it names (the call site's
+    /// `EtpPath::nodes_inside`) — resolve the ambiguity: a real, live
+    /// 2-member tie has *both* sides reporting the shared g-node's full
+    /// membership (`>1`), because both members still see each other; a
+    /// solo, no-sibling `construct` reports only itself (`1`). The
+    /// indistinguishable-seed fallback above therefore only fires when
+    /// *both* sides currently claim more than one member — the literal
+    /// "two members of one g-node" case the rest of this doc describes —
+    /// never when either side is, numerically, alone.
     #[must_use]
-    pub fn same_branch(&self, other: &Fingerprint<Id>) -> bool {
+    pub fn same_branch(
+        &self,
+        other: &Fingerprint<Id>,
+        self_nodes_inside: u32,
+        other_nodes_inside: u32,
+    ) -> bool {
         self.identity_eq(other)
-            || matches!(
-                self.elder_seed(other),
-                Err(Error::IndistinguishableFingerprints)
-            )
+            || (self_nodes_inside > 1
+                && other_nodes_inside > 1
+                && matches!(
+                    self.elder_seed(other),
+                    Err(Error::IndistinguishableFingerprints)
+                ))
     }
 
     /// Decomposes this fingerprint into its plain-data [`FingerprintParts`]
@@ -423,5 +458,61 @@ mod tests {
         let a = fp(1, 0, &[0]);
         let b = a.construct(&[], false).unwrap();
         assert!(!a.identity_eq(&b));
+    }
+
+    #[test]
+    fn same_branch_folds_two_real_members_of_one_still_tied_gnode() {
+        // b1/b2, mutually adjacent, both bootstrapped at the default
+        // eldership 0: each one's own `construct` sees the other as a real
+        // sibling and is dethroned by the tie, so they name each other.
+        let b1_l0 = fp(1, 0, &[0]);
+        let b2_l0 = fp(2, 0, &[0]);
+        let b1 = b1_l0
+            .construct(std::slice::from_ref(&b2_l0), false)
+            .unwrap();
+        let b2 = b2_l0.construct(&[b1_l0], false).unwrap();
+        assert_ne!(*b1.id(), *b2.id(), "the tie dethrones each side's own id");
+        assert_eq!(
+            b1.elder_seed(&b2),
+            Err(Error::IndistinguishableFingerprints)
+        );
+        assert!(
+            b1.same_branch(&b2, 2, 2),
+            "two members of one still-tied 2-member g-node must be the same branch"
+        );
+    }
+
+    #[test]
+    fn same_branch_does_not_fold_two_disconnected_gnodes_with_a_coincidental_seed_tie() {
+        // b1/b2 after a sever: each `construct`s with no siblings at all, so
+        // neither is dethroned, yet the shared eldership-0 bootstrap still
+        // makes their seeds coincide.
+        let b1 = fp(1, 0, &[0]).construct(&[], false).unwrap();
+        let b2 = fp(2, 0, &[0]).construct(&[], false).unwrap();
+        assert_eq!(
+            b1.elder_seed(&b2),
+            Err(Error::IndistinguishableFingerprints)
+        );
+        assert!(
+            !b1.same_branch(&b2, 1, 1),
+            "two disconnected, now-single-member g-nodes must not be folded \
+             into one branch just because their seeds coincide"
+        );
+    }
+
+    #[test]
+    fn same_branch_requires_both_sides_to_report_more_than_one_member() {
+        // Only one side is actually part of a live multi-member g-node; the
+        // other is alone. A coincidental seed tie still must not fold them.
+        let alone = fp(1, 0, &[0]).construct(&[], false).unwrap();
+        let c1_l0 = fp(2, 0, &[0]);
+        let c2_l0 = fp(3, 0, &[0]);
+        let tied = c1_l0.construct(&[c2_l0], false).unwrap();
+        assert_eq!(
+            alone.elder_seed(&tied),
+            Err(Error::IndistinguishableFingerprints)
+        );
+        assert!(!alone.same_branch(&tied, 1, 2));
+        assert!(!tied.same_branch(&alone, 2, 1));
     }
 }

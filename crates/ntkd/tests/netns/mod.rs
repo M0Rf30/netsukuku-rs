@@ -33,7 +33,7 @@ use ntk_neighborhood::{
 use ntk_netlink::{AddressEntry, AddressTable, RouteSpec, RouteTable};
 use ntkd::kernel::config::NtkdConfig;
 use ntkd::node::lifecycle::{self, NodeInputs, PreformedNetwork, StartedNode};
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 /// The fixed RTT every scenario's [`FixedRttProbe`] reports, chosen (not zero) so a converged
@@ -163,16 +163,56 @@ pub mod link {
             .await
             .with_context(|| format!("moving {name:?} into namespace"))
     }
+
+    /// `ip link delete <ifindex>` — deletes a link outright: for a veth, both ends of the pair
+    /// disappear together (standard veth-pair semantics); for a bridge, the bridge device
+    /// itself is removed (its ports are detached, not deleted).
+    pub async fn delete(handle: &rtnetlink::Handle, index: u32) -> anyhow::Result<()> {
+        handle
+            .link()
+            .del(index)
+            .execute()
+            .await
+            .with_context(|| format!("deleting link ifindex {index}"))
+    }
+}
+
+/// Opens a real `NETLINK_ROUTE` connection and returns both the handle and an owned
+/// [`tokio::task::JoinHandle`] for its background I/O driver task, instead of spawning it and
+/// discarding the handle — a bare `tokio::spawn`-and-forget lets a driver panic pass silently
+/// (`AGENTS.md`'s own documented case for why an unjoined task is a defect class, not a style
+/// nit) and gives nothing a caller can wait on for deterministic shutdown.
+///
+/// Dropping every clone of the returned `Handle` closes the driver's own request channel, which
+/// lets its future finish on its own (checked directly by this module's own
+/// `root_connection_driver_exits_once_its_handle_is_dropped` test) — so the returned
+/// `JoinHandle` is genuinely joinable, not decorative: [`teardown_mesh`] drops the handle, then
+/// awaits this join, bounded, exactly like every other task this harness manages.
+pub fn root_handle_with_driver() -> anyhow::Result<(rtnetlink::Handle, tokio::task::JoinHandle<()>)>
+{
+    let (connection, handle, _) = rtnetlink::new_connection().context("rtnetlink connection")?;
+    Ok((handle, tokio::spawn(connection)))
 }
 
 /// Opens a real `NETLINK_ROUTE` connection and spawns its background I/O driver onto the
 /// caller's current runtime — the coordinator's own handle, used for every link-plumbing call
 /// that must run in the root (un-unshared) test namespace: creating bridges/veths, moving veth
 /// ends into node namespaces, and later severing/healing a segment.
+///
+/// A thin, driver-discarding wrapper over [`root_handle_with_driver`] for callers whose own
+/// connection is already scoped to a single throwaway per-test-function runtime: dropping a
+/// `tokio::Runtime` cancels every task spawned on it, this driver included, so nothing here
+/// outlives that runtime's own life regardless of whether its `JoinHandle` was kept. A
+/// multi-scenario-per-process suite can't rely on "this test's own runtime" as a concept, so
+/// [`teardown_mesh`] uses [`root_handle_with_driver`] directly instead of this wrapper.
+///
+/// `#[allow(dead_code)]`: this module is compiled separately into every integration-test binary
+/// that declares it, so a helper only some of them use is genuinely dead in the others.
+/// `wireless.rs` and `andna_e2e.rs` call this; `mesh.rs` uses [`root_handle_with_driver`]
+/// throughout, so the `mesh` target alone would fail `-D dead-code` without this.
+#[allow(dead_code)]
 pub fn root_handle() -> anyhow::Result<rtnetlink::Handle> {
-    let (connection, handle, _) = rtnetlink::new_connection().context("rtnetlink connection")?;
-    tokio::spawn(connection);
-    Ok(handle)
+    Ok(root_handle_with_driver()?.0)
 }
 
 // -------------------------------------------------------------------------------------------
@@ -200,10 +240,19 @@ pub struct Segment {
 /// A fully-wired set of segments: every bridge is up, every member's veth end has been moved
 /// into that member's namespace (left down — each node's own worker brings its own devices up,
 /// matching `tests/multi_node.rs`'s convention), and every segment's root-side port indices
-/// (plus each segment's own bridge `ifindex`) are recorded for later [`sever`]/[`link_bridges`].
+/// (plus each segment's own bridge `ifindex`) are recorded for later [`sever`]/[`link_bridges`]/
+/// [`WiredMesh::teardown`].
 pub struct WiredMesh {
     ports: HashMap<&'static str, Vec<u32>>,
     bridges: HashMap<&'static str, u32>,
+    /// Root-namespace-only veth pairs [`link_bridges`] created. Unlike a member port (whose
+    /// node-side end lives inside a [`NamespaceWorker`]'s own netns and is destroyed
+    /// automatically — peer included, standard veth-pair semantics — the moment that namespace
+    /// is reclaimed), an uplink's *both* ends live in the coordinator's own namespace for the
+    /// whole test and have no namespace teardown to ride along with; one ifindex per uplink is
+    /// enough since deleting either end of a veth pair deletes both. Drained by
+    /// [`WiredMesh::teardown`].
+    uplinks: Vec<u32>,
 }
 
 /// Wires every segment in `segments`: for each member, creates a veth pair (node-side `dev`,
@@ -240,7 +289,11 @@ pub async fn wire(
         ports.insert(seg.name, port_indices);
         bridges.insert(seg.name, bridge_index);
     }
-    Ok(WiredMesh { ports, bridges })
+    Ok(WiredMesh {
+        ports,
+        bridges,
+        uplinks: Vec::new(),
+    })
 }
 
 impl WiredMesh {
@@ -294,7 +347,61 @@ impl WiredMesh {
             .await
             .with_context(|| format!("uplink {name:?}: attach to {b:?}"))?;
         self.ports.insert(name, vec![index_a, index_b]);
+        self.uplinks.push(index_a);
         Ok(())
+    }
+
+    /// Explicit, deterministic teardown for everything [`wire`]/[`Self::link_bridges`] created
+    /// directly in the coordinator's own (root) namespace: every uplink veth, plus every bridge
+    /// device. Matches this module's own call-it-explicitly-not-`Drop` discipline
+    /// ([`teardown`]'s own doc: `Drop` cannot `.await`, and deleting a link is a netlink round
+    /// trip). A per-member port veth needs no entry here — this struct's own `uplinks` field
+    /// doc explains why — so call this only after every one of this mesh's own
+    /// [`NamespaceWorker::join`] calls has already returned, which is exactly when that becomes
+    /// true. Logs (never panics on) an individual deletion failure, matching [`teardown`]'s own
+    /// best-effort convention for cleanup-time errors: by the time this runs, the scenario's
+    /// actual assertions have already had their chance to fail loudly.
+    pub async fn teardown(&self, handle: &rtnetlink::Handle) {
+        for &index in &self.uplinks {
+            if let Err(err) = link::delete(handle, index).await {
+                tracing::warn!(%err, index, "WiredMesh::teardown: uplink veth");
+            }
+        }
+        for (&name, &index) in &self.bridges {
+            if let Err(err) = link::delete(handle, index).await {
+                tracing::warn!(%err, %name, index, "WiredMesh::teardown: bridge");
+            }
+        }
+    }
+}
+
+/// Budget for [`teardown_mesh`]'s own join of the root connection driver, after dropping the
+/// `rtnetlink::Handle` that was its only reason to keep running: closing that channel is
+/// immediate, and everything before it ([`WiredMesh::teardown`]'s own bridge/uplink deletions)
+/// is a handful of point-to-point netlink round trips — generous, not tight, margin over both.
+pub const ROOT_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bundled, bounded teardown for a mesh coordinator's own root-namespace resources: every
+/// bridge/uplink [`wire`]/[`WiredMesh::link_bridges`] created, plus the
+/// [`root_handle_with_driver`] connection driver, whose lifetime otherwise outlives the
+/// `rtnetlink::Handle` used to build them. Call once, from the coordinator thread, only after
+/// every one of this mesh's own [`NamespaceWorker::join`] calls has already returned — see
+/// [`WiredMesh::teardown`]'s own doc for why that ordering matters. A driver that panics, or
+/// fails to notice its handle was dropped within [`ROOT_TEARDOWN_TIMEOUT`], fails the calling
+/// test outright, matching every other bounded join in this module
+/// ([`NamespaceWorker::join`]'s own convention) instead of letting a wedged or panicking
+/// background task go unnoticed the way a bare `tokio::spawn` would.
+pub async fn teardown_mesh(mesh: WiredMesh, handle: rtnetlink::Handle, driver: JoinHandle<()>) {
+    mesh.teardown(&handle).await;
+    drop(handle);
+    match tokio::time::timeout(ROOT_TEARDOWN_TIMEOUT, driver).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => panic!("root rtnetlink connection driver panicked: {err}"),
+        Err(_) => panic!(
+            "root rtnetlink connection driver did not exit within {ROOT_TEARDOWN_TIMEOUT:?} of \
+             its handle being dropped — every WiredMesh bridge/uplink is still deleted, but the \
+             driver task itself would otherwise leak for the rest of this process"
+        ),
     }
 }
 
@@ -681,4 +788,25 @@ pub async fn observe(
         dev_index,
         arcs,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`root_handle_with_driver`]'s own load-bearing assumption, checked directly: the
+    /// connection driver task exits promptly once every `rtnetlink::Handle` referencing it is
+    /// dropped, rather than running forever. Without this, [`teardown_mesh`]'s own join would
+    /// hang every scenario that calls it instead of tearing anything down. Needs no namespace or
+    /// `CAP_NET_ADMIN`: opening a `NETLINK_ROUTE` socket doesn't require it, only mutating link
+    /// state does.
+    #[tokio::test]
+    async fn root_connection_driver_exits_once_its_handle_is_dropped() {
+        let (handle, driver) = root_handle_with_driver().expect("open rtnetlink connection");
+        drop(handle);
+        tokio::time::timeout(Duration::from_secs(2), driver)
+            .await
+            .expect("connection driver did not exit within 2s of its handle being dropped")
+            .expect("connection driver task panicked");
+    }
 }

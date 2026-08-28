@@ -1064,21 +1064,42 @@ impl ntk_coordinator::CoordinatorMap for CoordinatorMapAdapter {
 ///
 /// # Design
 /// The first ask at a free level is granted `Accepted` immediately and remembered as
-/// `elected` — kept alive across `completed_enter` (which no longer touches it at all, matching
-/// upstream) and released only by `abort_enter` (the elected candidate itself giving up) or
-/// after [`ELECTED_TTL`] with no `abort_enter`, a bounded self-heal for the case propagation
-/// never lands. A different id asking about the *same* `network_id` while `elected` is live is
-/// refused with `IgnoreNetwork` — upstream's `NOTIFIED` outcome — instead of independently
-/// accepted; a different `network_id` is told to ask again later rather than starting a second,
-/// concurrent election at the same level.
+/// `elected` — released by `completed_enter` (once the elected candidate reports real
+/// success, which unblocks a *different* network immediately instead of making it wait out
+/// [`ELECTED_TTL`] — see [`EnterArbiter`]'s own doc, "The livelock this fixes"), by
+/// `abort_enter` (the elected candidate itself giving up, a full reset), or after
+/// [`ELECTED_TTL`] with neither ever arriving, a bounded self-heal for a crashed or
+/// never-reporting candidate. A different id asking about the *same* `network_id` while
+/// `elected` is live is refused with `IgnoreNetwork` — upstream's own `NOTIFIED` outcome —
+/// instead of independently accepted, even after `completed_enter`'s release; a different
+/// `network_id` is told to ask again only until that release, not until `ELECTED_TTL`.
 #[derive(Debug, Default)]
 struct LevelState {
-    /// `(network_id, evaluate_enter_id, granted_at)` of this level's currently-granted
-    /// election, if any, as *this process* last observed it — either because it granted the
-    /// election itself, or because it adopted the Coordinator-replicated record (see
-    /// [`EnterArbiter::decide`]'s own doc) on an earlier ask. `None` means this process has no
-    /// opinion yet: the next ask must consult the replicated record before granting anything.
-    elected: Option<(i64, i32, Instant)>,
+    /// This level's currently-granted election, if any, as *this process* last observed it —
+    /// either because it granted the election itself, or because it adopted the
+    /// Coordinator-replicated record (see [`EnterArbiter::decide`]'s own doc) on an earlier
+    /// ask. `None` means this process has no opinion yet: the next ask must consult the
+    /// replicated record before granting anything.
+    elected: Option<Election>,
+}
+
+/// One level's currently-granted `evaluate_enter` election, plus how it gets released — see
+/// [`EnterArbiter`]'s own doc, "The livelock this fixes", for why `completed_at` exists
+/// separately from `granted_at`/[`ELECTED_TTL`].
+#[derive(Debug, Clone, Copy)]
+struct Election {
+    network_id: i64,
+    evaluate_enter_id: i32,
+    granted_at: Instant,
+    /// `None` while the elected candidate's episode is still in flight — only [`ELECTED_TTL`]
+    /// (a backstop for a candidate that crashes or simply never reports) frees this level for
+    /// a *different* network. Set the instant [`EnterArbiter::complete`] runs
+    /// (`completed_enter`, the elected candidate reporting real success): from then on a
+    /// **different** network's ask is admitted immediately. A **same**-network sibling still
+    /// gets `IgnoreNetwork` regardless of this field — only `abort_enter`
+    /// ([`EnterArbiter::release`]) fully clears the record, because an aborted entry never
+    /// really happened, so even a same-network retry deserves a wholly fresh election.
+    completed_at: Option<Instant>,
 }
 
 /// How long a granted election is trusted before a fresh one may start for the same
@@ -1137,17 +1158,47 @@ const ELECTED_TTL: Duration = Duration::from_millis(60_000);
 /// by this fix) is what actually reaches every member of the *entering* g-node, this struct
 /// only ever decided who that elected candidate is.
 ///
+/// # The livelock this fixes: `completed_enter` never released the level for anyone else
+/// [`CompletedEnterHandler::completed_enter`] used to be a pure no-op on this struct's own
+/// state (see the historical note this replaces, kept in `git log` — the reasoning was sound
+/// for *same*-network siblings, see "The bug this fixes" above, but over-applied to every
+/// *other* network too). With no release edge but `abort_enter`/[`ELECTED_TTL`], a
+/// genuinely different network contending for the same level was told `AskAgain` and retried
+/// forever whenever the elected candidate *succeeded* (called `completed_enter`, never
+/// `abort_enter`) — the winner's own episode ties up the level for [`ELECTED_TTL`] (60s)
+/// regardless of how quickly it actually finished. Live trace evidence: two real severed
+/// halves each running their own bootstrap-time `evaluate_enter` against the same target
+/// level, one elected and eventually completing, the other logging `AskAgain, retrying same
+/// id` roughly every 250ms for the full 39+ seconds the test observed before its 40s
+/// `SEVERANCE_TIMEOUT` fired — never resolving. Upstream has no analogue of this failure mode
+/// at all: `execute_evaluate_enter`'s single per-network `evaluate_enter_status`
+/// (`research/impl/vala/hooking/proxy_coord.vala:88-340`) only ever serializes *simultaneous
+/// candidates of the same network* against each other during one bounded `global_timeout(n)`
+/// PENDING window, then self-drains as each collected candidate is served — it never blocks a
+/// *different* network's entry at all; the actual per-level exclusion upstream uses is
+/// `execute_begin_enter`'s own, separate `begin_enter_timeout` guard (`:370-388`), a 5-minute
+/// re-entrancy lock with no election semantics. [`ELECTED_TTL`] itself — a single record that
+/// blocks every other network at a level until one explicit release or a fixed timeout —
+/// is this daemon's own invention, not a port of anything upstream does; the fix is not to
+/// shrink [`ELECTED_TTL`] (that would only shrink the livelock's window, not close it) but to
+/// give the invented design the release edge it was missing: [`Self::complete`], called from
+/// [`CompletedEnterHandler::completed_enter`], marks [`Election::completed_at`] the instant
+/// the winner reports real success, and [`Self::decide`] treats that as an immediate release
+/// for any *different* network's ask — while a *same*-network sibling still finds the record
+/// and still gets `IgnoreNetwork`, so the original "second entrant" fix is untouched.
+///
 /// # Design
 /// The first ask at a free level is granted `Accepted` immediately: checked first against this
 /// process's own local memory (no network round trip — the common case of the same candidate
 /// re-asking, or a second local caller for a level this process itself already decided), then,
 /// on a local miss, against the Coordinator's replicated record before granting anything new.
-/// Kept alive across `completed_enter` (which no longer touches it at all, matching upstream)
-/// and released — both locally and in the replicated record — only by `abort_enter` (the
-/// elected candidate itself giving up) or after `ELECTED_TTL` with no `abort_enter`. A
-/// different id asking about the *same* `network_id` while `elected` is live is refused with
-/// `IgnoreNetwork`; a different `network_id` is told to ask again later rather than starting a
-/// second, concurrent election at the same level.
+/// Released — both locally and in the replicated record — by `completed_enter` (for a
+/// *different* network's ask only, immediately, see "The livelock this fixes" above), by
+/// `abort_enter` (a full reset — the elected candidate itself giving up), or after
+/// `ELECTED_TTL` with neither ever arriving (the crash/never-reported backstop). A different
+/// id asking about the *same* `network_id` while `elected` is live is refused with
+/// `IgnoreNetwork` regardless of `completed_enter`; a different `network_id` is told to ask
+/// again only until one of those releases, not until `ELECTED_TTL` unconditionally.
 ///
 /// The replicated write is a best-effort read-modify-write, not a compare-and-swap — this
 /// memory has no such primitive (see [`CoordinatorClientAdapter::decide_merge`]'s own doc) — so
@@ -1193,20 +1244,26 @@ impl EnterArbiter {
     ) -> codec::EvaluateEnterAnswer {
         let mut levels = self.levels.lock().await;
         let st = levels.entry(level).or_default();
-        if let Some((_, _, granted_at)) = st.elected
-            && granted_at.elapsed() >= ELECTED_TTL
-        {
-            st.elected = None;
+        if let Some(e) = st.elected {
+            let ttl_expired = e.granted_at.elapsed() >= ELECTED_TTL;
+            // The winner already reported real success: a *different* network no longer needs
+            // to wait out `ELECTED_TTL` (see this struct's own doc, "The livelock this
+            // fixes"). A same-network ask must still see the record below, unaffected.
+            let released_for_other_networks =
+                e.completed_at.is_some() && e.network_id != network_id;
+            if ttl_expired || released_for_other_networks {
+                st.elected = None;
+            }
         }
         // Fast, purely local path: no round trip at all for the overwhelmingly common case of
         // the same candidate re-asking, or a second local caller for a level this process
         // itself already decided (either by granting it or by adopting the shared record
         // below on an earlier ask).
         match st.elected {
-            Some((elected_network, _, _)) if elected_network != network_id => {
+            Some(e) if e.network_id != network_id => {
                 return codec::EvaluateEnterAnswer::AskAgain;
             }
-            Some((_, elected_id, _)) if elected_id == evaluate_enter_id => {
+            Some(e) if e.evaluate_enter_id == evaluate_enter_id => {
                 return codec::EvaluateEnterAnswer::Accepted { chosen_lvl: level };
             }
             Some(_) => return codec::EvaluateEnterAnswer::IgnoreNetwork,
@@ -1226,11 +1283,12 @@ impl EnterArbiter {
             Some(tv) => codec::decode_hooking_memory(&tv).unwrap_or_default(),
             None => codec::HookingMemory::default(),
         };
-        let shared = mem
-            .elections
-            .get(&level)
-            .filter(|e| now_ms.saturating_sub(e.granted_at_millis) < ttl_ms)
-            .copied();
+        let shared = mem.elections.get(&level).copied().filter(|e| {
+            let ttl_expired = now_ms.saturating_sub(e.granted_at_millis) >= ttl_ms;
+            let released_for_other_networks =
+                e.completed_at_millis.is_some() && e.network_id != network_id;
+            !ttl_expired && !released_for_other_networks
+        });
 
         let answer = match shared {
             Some(e) if e.network_id != network_id => codec::EvaluateEnterAnswer::AskAgain,
@@ -1245,6 +1303,7 @@ impl EnterArbiter {
                         network_id,
                         evaluate_enter_id,
                         granted_at_millis: now_ms,
+                        completed_at_millis: None,
                     },
                 );
                 service
@@ -1255,7 +1314,12 @@ impl EnterArbiter {
         };
 
         if matches!(answer, codec::EvaluateEnterAnswer::Accepted { .. }) {
-            st.elected = Some((network_id, evaluate_enter_id, Instant::now()));
+            st.elected = Some(Election {
+                network_id,
+                evaluate_enter_id,
+                granted_at: Instant::now(),
+                completed_at: None,
+            });
         }
         answer
     }
@@ -1279,6 +1343,38 @@ impl EnterArbiter {
             && let Ok(mut mem) = codec::decode_hooking_memory(&tv)
             && mem.elections.remove(&level).is_some()
         {
+            service
+                .set_hooking_memory_locally(top, Some(codec::encode_hooking_memory(&mem)))
+                .await;
+        }
+    }
+
+    /// The elected candidate at `level` reported real success (`finish_enter` propagation
+    /// sent) — unblock a **different** network waiting on this same level immediately rather
+    /// than making it wait out [`ELECTED_TTL`], while keeping this network's own record alive
+    /// so a straggling sibling of the *same* network (one that has not yet observed the
+    /// winner's own `finish_enter`) is still told `IgnoreNetwork`, exactly as before this
+    /// method existed — see [`Election::completed_at`]'s own doc and this struct's own doc,
+    /// "The livelock this fixes", for the full story of why this release edge was missing and
+    /// why it must not simply clear the record the way [`Self::release`] does.
+    async fn complete(
+        &self,
+        service: &ntk_coordinator::CoordinatorService,
+        top: usize,
+        level: usize,
+    ) {
+        {
+            let mut levels = self.levels.lock().await;
+            if let Some(e) = levels.entry(level).or_default().elected.as_mut() {
+                e.completed_at.get_or_insert_with(Instant::now);
+            }
+        }
+        if let Some(tv) = service.hooking_memory_locally(top).await
+            && let Ok(mut mem) = codec::decode_hooking_memory(&tv)
+            && let Some(e) = mem.elections.get_mut(&level)
+            && e.completed_at_millis.is_none()
+        {
+            e.completed_at_millis = Some(codec::now_millis());
             service
                 .set_hooking_memory_locally(top, Some(codec::encode_hooking_memory(&mem)))
                 .await;
@@ -1432,12 +1528,15 @@ impl ntk_coordinator::BeginEnterHandler for EnterHandlersAdapter {
 }
 
 impl ntk_coordinator::CompletedEnterHandler for EnterHandlersAdapter {
-    /// Deliberately does **not** touch [`EnterArbiter`]'s own election state — see that
-    /// struct's own doc for why releasing it here (the prior bug) let a second, independent
-    /// election proceed before this completed episode's own `finish_enter` propagation had
-    /// reached anyone. Upstream's `execute_completed_enter`
+    /// Reports the elected candidate's real success to [`EnterArbiter::complete`] — see that
+    /// method's own doc, and [`EnterArbiter`]'s own doc "The livelock this fixes", for why
+    /// this must release the level for a *different* network immediately rather than being a
+    /// no-op (the prior, over-corrected behavior) or fully clearing the record the way
+    /// `abort_enter` does (which would reopen the "second entrant" bug this struct's own doc
+    /// also explains). Upstream's `execute_completed_enter`
     /// (`research/impl/vala/hooking/proxy_coord.vala:412-420`) only ever clears a *different*,
-    /// unrelated re-entrancy guard the same way.
+    /// unrelated re-entrancy guard — this daemon's own election machinery has no 1:1 upstream
+    /// analogue to defer to here (`EnterArbiter`'s own doc).
     fn completed_enter(
         &self,
         top: usize,
@@ -1446,6 +1545,9 @@ impl ntk_coordinator::CompletedEnterHandler for EnterHandlersAdapter {
     ) -> BoxFuture<'_, TypedValue> {
         let level = top.saturating_sub(1);
         Box::pin(async move {
+            let service = wait_for_coordinator_service(&self.coordinator_service).await;
+            let coord_top = self.qspn.my_naddr().topology().levels();
+            self.arbiter.complete(&service, coord_top, level).await;
             tracing::info!(level, "coordinator: completed_enter");
             codec::encode_unit()
         })
@@ -2211,7 +2313,10 @@ mod enter_arbiter_tests {
     /// completed — was granted its own, independent `Accepted`, going on to reserve a fresh
     /// sibling slot on the target instead of being told to fall back and observe `SameNetwork`.
     /// This reproduces that scenario against the current code and pins the fix: the second
-    /// entrant must be refused (`IgnoreNetwork`), not accepted again.
+    /// entrant must be refused (`IgnoreNetwork`), not accepted again — even now that
+    /// `completed_enter` (via [`EnterArbiter::complete`]) *does* touch this record again (see
+    /// this struct's own doc, "The livelock this fixes"): completion only ever releases the
+    /// level for a *different* network, never for a same-network sibling.
     #[tokio::test]
     async fn a_second_concurrent_entrant_for_the_same_network_is_refused_not_reelected() {
         let (service, _cancel) = build_service().await;
@@ -2223,9 +2328,10 @@ mod enter_arbiter_tests {
             arbiter.decide(&service, top, level, network_id, 1).await,
             EvaluateEnterAnswer::Accepted { chosen_lvl: level }
         );
-        // Entrant 1 completes its own episode — must NOT reopen the level.
-        // (completed_enter's real handler no longer calls anything on the arbiter at all;
-        // there being nothing to call here *is* the fix.)
+        // Entrant 1 completes its own episode — must NOT reopen the level for its own
+        // network's siblings, only for a genuinely different network (see the dedicated test
+        // below for that half of the fix).
+        arbiter.complete(&service, top, level).await;
 
         // Entrant 2, a different member of the same g-node asking about the same target
         // network, must be refused rather than independently elected.
@@ -2237,6 +2343,43 @@ mod enter_arbiter_tests {
         assert_eq!(
             arbiter.decide(&service, top, level, network_id, 1).await,
             EvaluateEnterAnswer::Accepted { chosen_lvl: level }
+        );
+    }
+
+    /// The livelock fix itself: a concurrent ask for a genuinely *different* target network is
+    /// told `AskAgain` while the winner's episode is still in flight, but is admitted
+    /// immediately — not after waiting out [`ELECTED_TTL`] — the instant the winner reports
+    /// real success via `completed_enter`/[`EnterArbiter::complete`]. Reproduces, and pins the
+    /// fix for, the real-kernel livelock: two concurrent `evaluate_enter` askers for the same
+    /// level, one elected and eventually completing, the other retrying `AskAgain` forever
+    /// because nothing but `abort_enter`/`ELECTED_TTL` ever released the slot (see
+    /// [`EnterArbiter`]'s own doc, "The livelock this fixes").
+    #[tokio::test]
+    async fn a_different_network_is_admitted_immediately_after_the_winner_completes() {
+        let (service, _cancel) = build_service().await;
+        let arbiter = EnterArbiter::new();
+        let (level, top) = (0, 1);
+
+        assert_eq!(
+            arbiter.decide(&service, top, level, 1, 1).await,
+            EvaluateEnterAnswer::Accepted { chosen_lvl: level },
+            "the first asker (network 1) wins the election"
+        );
+        assert_eq!(
+            arbiter.decide(&service, top, level, 2, 2).await,
+            EvaluateEnterAnswer::AskAgain,
+            "a different network (2) must wait while network 1's episode is in flight"
+        );
+
+        // Network 1 reports real success — this is the missing release edge.
+        arbiter.complete(&service, top, level).await;
+
+        // Network 2 is admitted on its very next ask, immediately, not after `ELECTED_TTL`.
+        assert_eq!(
+            arbiter.decide(&service, top, level, 2, 2).await,
+            EvaluateEnterAnswer::Accepted { chosen_lvl: level },
+            "both concurrent askers must eventually be accepted: the loser proceeds once the \
+             winner releases, rather than retrying forever"
         );
     }
 
@@ -2321,6 +2464,7 @@ mod enter_arbiter_tests {
                 network_id: 1,
                 evaluate_enter_id: 1,
                 granted_at_millis: stale_millis,
+                completed_at_millis: None,
             },
         );
         service
