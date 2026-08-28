@@ -148,7 +148,7 @@ pub struct ElectionRecord {
     /// Set (to the wall-clock millisecond the elected candidate reported success) the
     /// instant `completed_enter` fires for this election — `None`/`0` (the wire sentinel;
     /// a real epoch timestamp is never `0`) while the episode is still in flight. See
-    /// [`crate::node::adapters::EnterArbiter::complete`]'s own doc for why this exists:
+    /// `crate::node::adapters::EnterArbiter::complete` (private)'s own doc for why this exists:
     /// unlike `granted_at_millis`+`ELECTED_TTL`, which only ever frees the slot for a
     /// *different* target network as a crash/never-reported backstop, this lets that
     /// release happen immediately once the real answer is known, without waiting out the

@@ -64,7 +64,7 @@ pub enum DomainDecodeError {
     #[error("failed to decode TypedValue payload: {0}")]
     PayloadDecode(String),
 
-    /// [`v1::UnicastId`]'s `kind` oneof had no arm set.
+    /// [`crate::v1::UnicastId`]'s `kind` oneof had no arm set.
     #[error("UnicastId message is missing its `kind` oneof")]
     MissingUnicastIdKind,
 }

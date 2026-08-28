@@ -58,7 +58,7 @@ pub struct RouteInstaller<K> {
 
 impl<K> RouteInstaller<K> {
     /// Whether this installer still has kernel state applied for its identity — its address on
-    /// [`IDENTITY_ADDRESS_INTERFACE`], its catch-all rule, or any route from a prior
+    /// `IDENTITY_ADDRESS_INTERFACE`, its catch-all rule, or any route from a prior
     /// [`Self::apply`] — `false` only once [`Self::teardown`] has actually removed all three (or
     /// before anything was ever installed). [`release_generation_table`] uses this to refuse
     /// releasing a still-installed generation's table back to a [`ntk_netlink::TableAllocator`].

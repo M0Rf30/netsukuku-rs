@@ -1198,13 +1198,13 @@ const ELECTED_TTL: Duration = Duration::from_millis(60_000);
 /// only ever decided who that elected candidate is.
 ///
 /// # The livelock this fixes: `completed_enter` never released the level for anyone else
-/// [`CompletedEnterHandler::completed_enter`] used to be a pure no-op on this struct's own
+/// [`ntk_coordinator::CompletedEnterHandler::completed_enter`] used to be a pure no-op on this struct's own
 /// state (see the historical note this replaces, kept in `git log` — the reasoning was sound
 /// for *same*-network siblings, see "The bug this fixes" above, but over-applied to every
-/// *other* network too). With no release edge but `abort_enter`/[`ELECTED_TTL`], a
+/// *other* network too). With no release edge but `abort_enter`/`ELECTED_TTL`, a
 /// genuinely different network contending for the same level was told `AskAgain` and retried
 /// forever whenever the elected candidate *succeeded* (called `completed_enter`, never
-/// `abort_enter`) — the winner's own episode ties up the level for [`ELECTED_TTL`] (60s)
+/// `abort_enter`) — the winner's own episode ties up the level for `ELECTED_TTL` (60s)
 /// regardless of how quickly it actually finished. Live trace evidence: two real severed
 /// halves each running their own bootstrap-time `evaluate_enter` against the same target
 /// level, one elected and eventually completing, the other logging `AskAgain, retrying same
@@ -1216,13 +1216,13 @@ const ELECTED_TTL: Duration = Duration::from_millis(60_000);
 /// PENDING window, then self-drains as each collected candidate is served — it never blocks a
 /// *different* network's entry at all; the actual per-level exclusion upstream uses is
 /// `execute_begin_enter`'s own, separate `begin_enter_timeout` guard (`:370-388`), a 5-minute
-/// re-entrancy lock with no election semantics. [`ELECTED_TTL`] itself — a single record that
+/// re-entrancy lock with no election semantics. `ELECTED_TTL` itself — a single record that
 /// blocks every other network at a level until one explicit release or a fixed timeout —
 /// is this daemon's own invention, not a port of anything upstream does; the fix is not to
-/// shrink [`ELECTED_TTL`] (that would only shrink the livelock's window, not close it) but to
-/// give the invented design the release edge it was missing: [`Self::complete`], called from
-/// [`CompletedEnterHandler::completed_enter`], marks [`Election::completed_at`] the instant
-/// the winner reports real success, and [`Self::decide`] treats that as an immediate release
+/// shrink `ELECTED_TTL` (that would only shrink the livelock's window, not close it) but to
+/// give the invented design the release edge it was missing: `Self::complete` (private), called from
+/// [`ntk_coordinator::CompletedEnterHandler::completed_enter`], marks `Election::completed_at` the instant
+/// the winner reports real success, and `Self::decide` (private) treats that as an immediate release
 /// for any *different* network's ask — while a *same*-network sibling still finds the record
 /// and still gets `IgnoreNetwork`, so the original "second entrant" fix is untouched.
 ///
@@ -1567,7 +1567,7 @@ impl ntk_coordinator::BeginEnterHandler for EnterHandlersAdapter {
 }
 
 impl ntk_coordinator::CompletedEnterHandler for EnterHandlersAdapter {
-    /// Reports the elected candidate's real success to [`EnterArbiter::complete`] — see that
+    /// Reports the elected candidate's real success to `EnterArbiter::complete` (private) — see that
     /// method's own doc, and [`EnterArbiter`]'s own doc "The livelock this fixes", for why
     /// this must release the level for a *different* network immediately rather than being a
     /// no-op (the prior, over-corrected behavior) or fully clearing the record the way

@@ -647,9 +647,23 @@ where
                 }
             }
         }
-        for nic in self.nics.values() {
-            nic.radar_cancel.cancel();
+        // Reclaim every NIC's kernel state before returning, not just the in-process tasks.
+        // `teardown_nic` cancels the radar, drops each arc (removing its per-neighbor `/32`
+        // on-link route) and removes the link-local address this generation assigned — the same
+        // work `stop_monitor` does, minus the peer notification (see `teardown_nic`'s doc).
+        //
+        // Before this, the epilogue cancelled tasks and returned, so the link-local address
+        // survived the process. Since `crate::manager`'s allocator derives it from a fresh
+        // `NodeId` each start, a restarted daemon added a second address and kept the first:
+        // observed on a real host as four `169.254.*/16` addresses on one NIC after exactly four
+        // starts. That is not cosmetic — neighbour discovery is UDP broadcast sourced from that
+        // interface, and several candidate link-locals let the kernel pick a source this
+        // generation never announced as its own.
+        let devs: Vec<String> = self.nics.keys().cloned().collect();
+        for dev in devs {
+            self.teardown_nic(&dev, false).await;
         }
+        // Any arc whose NIC was already gone has no `teardown_nic` to reach it.
         for entry in self.arcs.values() {
             entry.monitor_cancel.cancel();
         }
@@ -953,6 +967,21 @@ where
     }
 
     async fn stop_monitor(&mut self, dev: &str) {
+        self.teardown_nic(dev, true).await;
+    }
+
+    /// The kernel-state half of [`Self::stop_monitor`], with the peer notification made optional.
+    ///
+    /// `notify_peers` is forwarded to [`Self::remove_my_arc`]'s `is_still_usable`, which is what
+    /// decides whether a `NeighborhoodRemoveArc` broadcast goes out. An operator-driven
+    /// `StopMonitor`, or a NIC that `sync_interfaces` saw disappear, passes `true`: the node is
+    /// still running and its peers should hear about the arc immediately. Daemon shutdown passes
+    /// `false` — outbound RPC while tearing down is exactly what this crate's own actor rules
+    /// forbid, and it is unnecessary: a departing node announcing nothing is the documented
+    /// model ("Quando un nodo muore o si sgancia, non dice nulla a nessuno ... Ci pensera' il
+    /// QSPN", `research/specs/c-doc--main_doc-netsukuku.ita` §5.2.1). The kernel state this
+    /// process installed is still reclaimed either way.
+    async fn teardown_nic(&mut self, dev: &str, notify_peers: bool) {
         if !self.nics.contains_key(dev) {
             return;
         }
@@ -964,7 +993,7 @@ where
             .map(|(key, _)| key.clone())
             .collect();
         for mac in macs {
-            self.remove_my_arc(&mac, true).await;
+            self.remove_my_arc(&mac, notify_peers).await;
         }
         if let Some(nic) = self.nics.remove(dev) {
             nic.radar_cancel.cancel();
@@ -4174,6 +4203,74 @@ mod tests {
         assert_eq!(
             mgr.arcs["bb:bb"].verified_key, None,
             "an unauthenticated handshake must never pin a key"
+        );
+    }
+
+    /// Daemon shutdown must reclaim every NIC's kernel state, not only its in-process tasks.
+    ///
+    /// Pinned bug: `Manager::run`'s epilogue cancelled the radar and arc-monitor tasks and
+    /// returned, leaving the link-local address `start_monitor` installed on the interface.
+    /// `crate::manager`'s allocator derives that address from a fresh `NodeId` each start, so a
+    /// restarted daemon added a second address and kept the first — observed on a real host as
+    /// four `169.254.*/16` addresses on one NIC after exactly four `systemctl start`s.
+    ///
+    /// Not cosmetic: neighbour discovery is UDP broadcast sourced from that interface, and with
+    /// several candidate link-locals present the kernel can pick a source this generation never
+    /// announced as its own, so a peer learns an address that answers for nobody.
+    ///
+    /// Asserts on [`FakeIpRouteManager::operations`] — the ordered operation log — rather than on
+    /// `mgr.nics`, per this crate's convention: the bug was precisely that in-process state was
+    /// cleaned up while the kernel's was not.
+    #[tokio::test]
+    async fn cancellation_removes_every_nic_address_it_installed() {
+        let ip_route_manager = StdArc::new(FakeIpRouteManager::new());
+        let config = NeighborhoodConfig {
+            my_id: NodeId::from_raw(1).unwrap(),
+            max_arcs: 8,
+            kernel: FakeNetlink::with_links(vec![LinkInfo {
+                index: 1,
+                name: "eth0".to_owned(),
+                is_up: true,
+            }]),
+            stub_factory: StdArc::new(NullStubFactory { can_export: true }),
+            ip_route_manager: ip_route_manager.clone(),
+            rtt_probe: StdArc::new(FixedRttProbe(Some(10))),
+            timing: fast_timing(),
+            new_linklocal_address: Box::new(|| "169.254.1.1".to_owned()),
+            signing_key: None,
+            require_auth: false,
+        };
+        let cancel = CancellationToken::new();
+        let (handle, join) = Manager::spawn(config, cancel.clone());
+        handle
+            .start_monitor(LocalNic {
+                dev: "eth0".to_owned(),
+                mac: "aa:aa".to_owned(),
+            })
+            .await
+            .expect("start_monitor on an up link");
+
+        let installed = IpRouteOperation::AddAddress {
+            dev: "eth0".to_owned(),
+            addr: "169.254.1.1".to_owned(),
+        };
+        assert!(
+            ip_route_manager.operations().contains(&installed),
+            "precondition: start_monitor installs the link-local, got {:?}",
+            ip_route_manager.operations()
+        );
+
+        cancel.cancel();
+        join.await.expect("manager task joins cleanly after cancel");
+
+        let reclaimed = IpRouteOperation::RemoveAddress {
+            dev: "eth0".to_owned(),
+            addr: "169.254.1.1".to_owned(),
+        };
+        assert!(
+            ip_route_manager.operations().contains(&reclaimed),
+            "shutdown must remove the address it installed, or every restart leaks one: {:?}",
+            ip_route_manager.operations()
         );
     }
 }

@@ -5,7 +5,7 @@
 //! dispatcher's job is exact routing, never fallback/retry across handlers.
 //!
 //! Which qspn/peers/coordinator/hooking generation a call reaches is itself now a routing
-//! decision, resolved from `Request.unicast_id` by [`Dispatcher::resolve_stack`] rather than
+//! decision, resolved from `Request.unicast_id` by `Dispatcher::resolve_stack` (private) rather than
 //! hardcoded to a single [`IdentityStack`] — see that method's doc for the
 //! `ntk_proto::domain::UnicastId` cases and [`Dispatcher::register_identity`] for how a second
 //! identity (e.g. mig-01's connectivity fork, `research/impl/vala/qspn/qspn.vala:2226-2505`)
@@ -56,7 +56,7 @@ pub struct IdentityStack {
 /// One shared instance per bound listener (TCP or a NIC's UDP broadcast), dispatching to
 /// whichever of the six per-module handlers a call's oneof arm names, and — for the four
 /// generation-scoped ones — to whichever locally-hosted identity `Request.unicast_id` names
-/// (see [`Self::resolve_stack`]). `identity_stack` stays an `RwLock` exactly as before so
+/// (see `Self::resolve_stack` (private)). `identity_stack` stays an `RwLock` exactly as before so
 /// [`Dispatcher::replace_identity_stack`] can still swap the *main* identity's four handlers
 /// atomically without rebinding the listener that owns this `Dispatcher` — see
 /// [`IdentityStack`]'s doc; `secondary` is the same shape for every other identity this node
@@ -109,11 +109,11 @@ impl Dispatcher {
 
     /// Registers `id` as an additional locally-hosted identity: from now on, an inbound call
     /// whose `unicast_id` is `UnicastId::IdentityAware` naming `id` reaches `stack` instead of
-    /// being rejected as unknown (see [`Self::resolve_stack`]). Replaces any stack already
+    /// being rejected as unknown (see `Self::resolve_stack` (private)). Replaces any stack already
     /// registered under `id`, same swap-in-place semantics as
     /// [`Self::replace_identity_stack`].
     ///
-    /// `id` should not be the current main identity — [`Self::resolve_stack`] checks that first,
+    /// `id` should not be the current main identity — `Self::resolve_stack` (private) checks that first,
     /// so registering it here would simply never be consulted.
     pub async fn register_identity(&self, id: ntk_identities::IdentityId, stack: IdentityStack) {
         self.secondary.write().await.insert(id, Arc::new(stack));

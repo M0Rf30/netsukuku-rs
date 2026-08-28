@@ -150,10 +150,10 @@
 //! successor hooks.
 //!
 //! # What closing the blackout actually requires
-//! Less than "spawn a second complete stack". [`migrate`] cancels the outgoing generation and
+//! Less than "spawn a second complete stack". `migrate` (private) cancels the outgoing generation and
 //! tears down its kernel state *before* bootstrapping the successor, and that ordering is the
 //! blackout. An entering generation's kernel state is already suppressed until its own bootstrap
-//! confirms (see [`virtual_placeholder`]), so the two never need routes installed at once:
+//! confirms (see `virtual_placeholder` (private)), so the two never need routes installed at once:
 //!
 //! 1. Register the outgoing generation's stack as a second identity and leave it running — it
 //!    keeps answering for the old position, on the main table, throughout.

@@ -319,7 +319,7 @@ impl LinkRegistry {
     }
 
     /// Debounces `crate::node::lifecycle::retry_removed_arc` per link — see
-    /// [`Self::bad_link_last_retry`]'s own doc for why this exists. Returns `true` (and
+    /// `Self::bad_link_last_retry` (private)'s own doc for why this exists. Returns `true` (and
     /// records `now`) only if `min_interval` has elapsed since this link's last retry, or it
     /// has never retried before.
     pub fn should_retry_bad_link(&self, link: LinkId, min_interval: std::time::Duration) -> bool {

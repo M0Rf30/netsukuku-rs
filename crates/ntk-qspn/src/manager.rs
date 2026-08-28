@@ -476,7 +476,8 @@ impl QspnHandle {
     ///
     /// Awaits the broadcast rather than spawning it. The caller announces retirement immediately
     /// before tearing this generation down, so a spawned send would race that teardown and
-    /// usually lose. See [`Command::DestroyStub`] for why the actor cannot make the call itself.
+    /// usually lose. See `Command::DestroyStub` (private) for why the actor cannot make the call
+    /// itself.
     ///
     /// Returns `Ok(())` when there are no arcs to tell, and swallows a transport failure: a
     /// neighbour that cannot be reached is one that will reap the arc on its own liveness probe,

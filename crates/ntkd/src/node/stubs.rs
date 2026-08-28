@@ -8,11 +8,11 @@
 //! `RpcClient`, encoding/decoding with each crate's already-exported `wire` helpers.
 //!
 //! # `unicast_id`
-//! Every call built here names [`main_identity_unicast_id`] — "whichever identity is currently
+//! Every call built here names `main_identity_unicast_id` (private) — "whichever identity is currently
 //! main" (`research/impl/vala/ntkd/serializables.vala:492`'s `MainIdentityUnicastID`).
 //!
 //! Deliberately *not* the identity-aware variant, even though the dispatcher can now resolve it
-//! and [`identity_aware_unicast_id`] exists for when it is needed. Naming a destination identity
+//! and `identity_aware_unicast_id` exists for when it is needed. Naming a destination identity
 //! requires knowing the id the receiver will match against — its own
 //! `NeighborhoodConfig::my_id`. The only candidate available here is
 //! `LinkRegistry::entry(link).neighbour_id`, and sending that regressed real-kernel convergence

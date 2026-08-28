@@ -73,6 +73,46 @@ released in lockstep, so they always share a version even when only some of them
   here, so `chosen_lvl = 0` is correct and shifting that index would have regressed the
   single-level path).
 
+- **Daemon shutdown leaked one link-local address per start.** `ntk_neighborhood::Manager::run`'s
+  epilogue cancelled the radar and arc-monitor tasks and returned, but the only code path that
+  removes a NIC's link-local address is `stop_monitor`, reachable solely from a `StopMonitor`
+  command or a NIC that `sync_interfaces` saw disappear. Since the address is derived from a fresh
+  `NodeId` each start, a restarted daemon added another and kept the previous one — observed on a
+  real host as four `169.254.*/16` addresses on one interface after exactly four `systemctl`
+  starts. Not cosmetic: neighbour discovery is UDP broadcast sourced from that interface, and with
+  several candidate link-locals the kernel can pick a source this generation never announced,
+  so a peer learns an address that answers for nobody.
+  `stop_monitor` is now a thin wrapper over a new `teardown_nic(dev, notify_peers)`, and the
+  shutdown epilogue calls it for every live NIC with `notify_peers = false`. The kernel state this
+  process installed — per-arc `/32` on-link routes and the link-local address — is reclaimed
+  either way, but no `NeighborhoodRemoveArc` broadcast goes out: outbound RPC while tearing down
+  is what this crate's own actor rules forbid, and a departing node announcing nothing is the
+  documented model ("Quando un nodo muore o si sgancia, non dice nulla a nessuno ... Ci pensera'
+  il QSPN", `research/specs/c-doc--main_doc-netsukuku.ita` §5.2.1).
+  Pinned by `cancellation_removes_every_nic_address_it_installed`, which asserts on
+  `FakeIpRouteManager::operations` rather than in-process state — the bug was precisely that
+  in-process state was cleaned up while the kernel's was not. Verified against real processes:
+  three start/stop cycles now end with zero leftover addresses instead of three.
+
+### Documentation
+
+- **`ntkd`'s crate docs shipped a dead link to `https://docs.rs/ntkd/latest/src/main.rs`.**
+  `crates/ntkd/src/lib.rs` linked `[`src/main.rs`](../src/main.rs)`; rustdoc resolves that
+  relative path against the output root, and the URL can never exist because rustdoc documents
+  the library and drops the `[[bin]]` target. Now plain inline code, with no link.
+
+- **22 further intra-doc links across 7 `ntkd` files, plus one each in `ntk-proto` and
+  `ntk-qspn`, did not resolve** — either pointing at private items or at paths unreachable from
+  the crate root — so rustdoc rendered them as bare unlinked text. Links to private items are
+  demoted to inline code; `ntk_coordinator::CompletedEnterHandler::completed_enter` and
+  `crate::v1::UnicastId` are properly qualified instead, being genuinely public.
+
+- **CI now gates generated documentation.** `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
+  --no-deps` promotes rustdoc's `broken_intra_doc_links`/`private_intra_doc_links` — warnings by
+  default, which is how all of the above degraded docs.rs silently — to hard failures. It does
+  **not** cover relative markdown links: rustdoc has no lint for that class, so the `src/main.rs`
+  defect above would still slip past and continues to rely on review.
+
 ## [0.1.7]
 
 One correctness fix in 0.1.6's groundwork, and the mig-01 plan corrected after tracing it properly.
