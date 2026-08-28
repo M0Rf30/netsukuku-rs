@@ -93,6 +93,20 @@ pub struct LinkRegistry {
     next: AtomicU64,
     by_mac: Mutex<HashMap<String, LinkEntry>>,
     by_id: Mutex<HashMap<LinkId, String>>,
+    /// Last time `crate::node::lifecycle::retry_removed_arc` actually retried each link, since
+    /// that function's own bad-link retry has no natural stopping point otherwise: a peer whose
+    /// connection is permanently gone (e.g. its whole generation torn down at shutdown) fails
+    /// every fresh `add_arc` the exact same way, forever, with no backoff of its own —
+    /// real-kernel confirmation: `two_star_groups_merge_into_one_network` teardown produced
+    /// hundreds of `retried a bad-link arc` retries within a single millisecond once a peer's
+    /// connection closed for good. Debounced by
+    /// [`crate::node::lifecycle::BAD_LINK_RETRY_MIN_INTERVAL`] rather than capped by a fixed
+    /// attempt count: a genuine, eventually-resolving collision (the coincidental
+    /// `derive_initial_position` clash this retry exists to recover from) can legitimately need
+    /// more attempts than any small count would allow, spread over the real tens-of-seconds
+    /// this daemon's own merge negotiation already budgets — throttling by elapsed time bounds
+    /// CPU/log volume without ever giving up while the underlying link might still recover.
+    bad_link_last_retry: Mutex<HashMap<LinkId, std::time::Instant>>,
 }
 
 impl LinkRegistry {
@@ -249,5 +263,24 @@ impl LinkRegistry {
             .values()
             .cloned()
             .collect()
+    }
+
+    /// Debounces `crate::node::lifecycle::retry_removed_arc` per link — see
+    /// [`Self::bad_link_last_retry`]'s own doc for why this exists. Returns `true` (and
+    /// records `now`) only if `min_interval` has elapsed since this link's last retry, or it
+    /// has never retried before.
+    pub fn should_retry_bad_link(&self, link: LinkId, min_interval: std::time::Duration) -> bool {
+        let mut last = self
+            .bad_link_last_retry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        match last.get(&link) {
+            Some(prev) if now.duration_since(*prev) < min_interval => false,
+            _ => {
+                last.insert(link, now);
+                true
+            }
+        }
     }
 }

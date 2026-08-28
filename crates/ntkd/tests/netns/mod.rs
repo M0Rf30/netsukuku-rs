@@ -534,6 +534,37 @@ impl<T: Send + 'static> NamespaceWorker<T> {
     }
 }
 
+/// Joins every worker unconditionally, even once an earlier one has already failed — never
+/// short-circuits partway through the list.
+///
+/// A caller that instead panics inside its own join loop (this suite's original shape, on every
+/// scenario) abandons every `NamespaceWorker` from that point on without ever awaiting it: the
+/// underlying OS thread and its `current_thread` tokio runtime (radar/arc-monitor polling, UDP
+/// broadcast, TCP server) keep running for up to that worker's own timeout budget — tens to
+/// hundreds of seconds — while `cargo test`, with the panic already unwound, has moved on to the
+/// *next* test in the same process. That is real, unbounded-looking cross-test CPU/network
+/// contention self-inflicted by the harness, not the daemon: confirmed live by
+/// `partition_clean_severance_drops_exactly_the_unreachable_destinations`, whose own first
+/// `ensure!` (this file's `severance_worker_body`) fails on every observed run — via the old
+/// per-worker-panic loop, its three still-converged siblings' threads (each polling every
+/// 20-200ms) ran to completion in the background, unjoined, well past this scenario's own test
+/// function returning.
+///
+/// Joining every worker first — and only then letting the caller decide whether to panic, always
+/// after [`teardown_mesh`] has run — bounds every worker's lifetime to its own declared timeout
+/// and guarantees the root-namespace mesh (bridges/veths) this scenario created is reclaimed
+/// before the test function returns, pass or fail.
+pub async fn join_all<T: Send + 'static>(
+    workers: Vec<NamespaceWorker<T>>,
+    timeout: Duration,
+) -> Vec<anyhow::Result<T>> {
+    let mut results = Vec::with_capacity(workers.len());
+    for w in workers {
+        results.push(w.join(timeout).await);
+    }
+    results
+}
+
 // -------------------------------------------------------------------------------------------
 // Node composition + report — run inside a `NamespaceWorker`'s `body`.
 // -------------------------------------------------------------------------------------------

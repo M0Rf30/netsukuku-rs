@@ -1071,6 +1071,87 @@ async fn reattach_known_arcs<K>(
     }
 }
 
+/// Retries establishing a qspn arc that qspn itself gave up on after a failed round trip
+/// (`QspnEvent::ArcRemoved { bad_link: true, .. }` — e.g. a transient `get_full_etp` timeout
+/// during exit-bootstrap re-fetch, or the `EtpFromSelf` self-loop guard rejecting a peer whose
+/// address coincidentally equalled this identity's own at the time — a real, deterministic
+/// case `derive_initial_position`/a small `Topology` gsize alone can produce for two of three
+/// group members, see `crate::node::adapters`'s own module doc, "Fixed: `fp_id`" section, for
+/// the identical `NodeId`-hash collision class). The underlying physical link never went down
+/// (`ntk_neighborhood::Event::ArcRemoved` never fired for it), so [`LinkRegistry`]'s entry is
+/// untouched — but nothing else will ever ask qspn to re-add this specific arc:
+/// [`ntk_neighborhood::Event::ArcAdded`] fires "at first successful cost measurement", at most
+/// once per physical link's whole life (`ntk_neighborhood::manager`'s own doc), and this
+/// identity's own [`reattach_known_arcs`] only runs on ITS OWN migration — no help when the
+/// side whose address collision resolves is the *peer*, or when neither side ever migrates
+/// again. Without this, a same-generation `bad_link` removal is permanent for as long as the
+/// physical link stays up, even once whatever made it fail stops being true.
+///
+/// Real-kernel confirmation: `crates/ntkd/tests/mesh.rs`'s `two_star_groups_merge_into_one_network`
+/// has `a0`/`a2` (`NodeId` 601/603) deterministically collide at level-0 position 3 under
+/// `MERGE_GSIZES = [8]` (`derive_initial_position`'s own hash) — `EtpFromSelf` rejects their
+/// direct arc; once `a2` later migrates away from position 3, [`reattach_known_arcs`] does
+/// retry it and qspn accepts the (no-longer-colliding) fresh `add_arc`, but the very next
+/// full-ETP exchange with `a0` (real-kernel CPU contention across six concurrently-negotiating
+/// nodes) times out, and qspn's own `handle_exit_bootstrap_gathered` responds by calling
+/// `do_remove_arc(arc, true)` — silently dropping the arc a second time, this time for good,
+/// stranding `a2` on an indirect-only (through its other sibling) route to `a0` for the rest of
+/// the run and permanently failing this scenario's own pre-uplink "converged to my own group's
+/// two siblings" check.
+///
+/// # Debounced, not unconditional
+/// A peer whose connection is gone for good (its whole generation torn down, e.g. at test/
+/// process shutdown) fails every fresh `add_arc` the identical way, forever — real-kernel
+/// confirmation: this scenario's own teardown window produced hundreds of retries within a
+/// single millisecond, a tight loop with no backoff of its own, once a peer's connection
+/// closed permanently. [`crate::node::registry::LinkRegistry::should_retry_bad_link`] throttles
+/// this to at most one retry per [`BAD_LINK_RETRY_MIN_INTERVAL`] per link — bounding CPU/log
+/// volume without a fixed attempt cap, since the coincidental-position-collision case this
+/// retry exists to recover from can legitimately need more attempts than any small count would
+/// allow, spread over the real tens-of-seconds this daemon's own merge negotiation budgets.
+const BAD_LINK_RETRY_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+async fn retry_removed_arc<K>(ctx: &SteadyStateCtx<K>, arc: ntk_qspn::ArcId)
+where
+    K: SendNetlink + 'static,
+{
+    let Some(link) = ctx.registry.link_of_qspn_arc(arc) else {
+        return;
+    };
+    if !ctx
+        .registry
+        .should_retry_bad_link(link, BAD_LINK_RETRY_MIN_INTERVAL)
+    {
+        return;
+    }
+    let Some(entry) = ctx.registry.entry(link) else {
+        return;
+    };
+    let arcs = ctx.neighborhood.snapshot().borrow().clone();
+    let Some(current) = arcs.iter().find(|a| a.neighbour_mac == entry.mac) else {
+        return;
+    };
+    let Some(cost) = current.cost else {
+        return;
+    };
+    let new_arc = match ctx.qspn.add_arc(cost).await {
+        Ok(new_arc) => new_arc,
+        Err(err) => {
+            tracing::warn!(?link, %err, "qspn: retrying a bad-link arc failed");
+            return;
+        }
+    };
+    tracing::debug!(?link, ?cost, "qspn: retried a bad-link arc, succeeded");
+    ctx.registry.set_qspn_arc(link, new_arc);
+    if let Ok(via) = current.neighbour_nic_addr.parse() {
+        ctx.route_installer.lock().await.set_arc_endpoint(
+            new_arc,
+            via,
+            Interface::name(&current.my_dev),
+        );
+    }
+}
+
 /// Combines a propagated `finish_enter`'s target — `entry_pos`, covering levels
 /// `[guest_gnode_level, topology.levels())`, the levels the negotiation actually resolved — with
 /// this identity's own retained `current_positions` below `guest_gnode_level` into the full
@@ -1523,9 +1604,15 @@ where
         // `QspnHandle::fingerprint_id` on *every* qspn event, not just this one — see that
         // module's own "Fixed: `fp_id`" doc section.
         QspnEvent::PresenceNotified
-        | QspnEvent::ArcRemoved { .. }
+        | QspnEvent::ArcRemoved {
+            bad_link: false, ..
+        }
         | QspnEvent::ChangedFingerprint(_)
         | QspnEvent::ChangedNodesInside(_) => {}
+        QspnEvent::ArcRemoved {
+            arc,
+            bad_link: true,
+        } => retry_removed_arc(ctx, arc).await,
     }
 }
 

@@ -156,7 +156,12 @@ async fn chain_worker_body(
     );
 
     let report = netns::observe(&format!("node{idx}"), &started, dev_index).await?;
-    barrier.wait().await;
+    // Bounded: if a *sibling* node's own convergence `ensure!` above failed, it never reaches
+    // this barrier, and an unbounded wait here would leave this (converged) node's thread
+    // running forever in the background — well past this test's own coordinator having already
+    // panicked and `cargo test` having moved on to the next one (see `netns::join_all`'s own
+    // doc for the cross-test corruption this class of bug causes).
+    let _ = tokio::time::timeout(CHAIN_TIMEOUT + Duration::from_secs(5), barrier.wait()).await;
     netns::teardown(&started, cancel, &mut tasks).await;
     Ok(report)
 }
@@ -238,15 +243,16 @@ async fn chain_of_four_converges_to_exact_multi_hop_routes() {
         w.signal_moved();
     }
 
-    let mut reports = Vec::with_capacity(4);
-    for w in workers {
-        reports.push(
-            w.join(CHAIN_TIMEOUT + netns::JOIN_MARGIN)
-                .await
-                .unwrap_or_else(|e| panic!("chain worker failed: {e:?}")),
-        );
-    }
+    // Join every worker unconditionally, teardown the mesh, and only then panic on any
+    // failure — see `netns::join_all`'s own doc for why panicking mid-loop (this scenario's old
+    // shape) leaked still-running worker threads into whichever test ran next.
+    let results = netns::join_all(workers, CHAIN_TIMEOUT + netns::JOIN_MARGIN).await;
     netns::teardown_mesh(mesh, root, root_driver).await;
+    let reports: Vec<NodeReport> = results
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| r.unwrap_or_else(|e| panic!("chain worker {i} failed: {e:?}")))
+        .collect();
 
     let topo = chain_topology();
 
@@ -412,7 +418,9 @@ async fn level1_worker_body(idx: u32, barrier: Arc<Barrier>) -> anyhow::Result<N
     }
 
     let report = netns::observe(&format!("node{idx}"), &started, dev_index).await?;
-    barrier.wait().await;
+    // Bounded — see `chain_worker_body`'s identical fix for why an unbounded wait here would
+    // leave this node's thread running forever if a sibling's own convergence `ensure!` failed.
+    let _ = tokio::time::timeout(LEVEL1_TIMEOUT + Duration::from_secs(5), barrier.wait()).await;
     netns::teardown(&started, cancel, &mut tasks).await;
     Ok(report)
 }
@@ -467,15 +475,15 @@ async fn level1_destination_installs_correct_cidr_route() {
         w.signal_moved();
     }
 
-    let mut reports = Vec::with_capacity(3);
-    for w in workers {
-        reports.push(
-            w.join(LEVEL1_TIMEOUT + netns::JOIN_MARGIN)
-                .await
-                .unwrap_or_else(|e| panic!("level1 worker failed: {e:?}")),
-        );
-    }
+    // Join every worker unconditionally, teardown the mesh, and only then panic — see
+    // `netns::join_all`'s own doc.
+    let results = netns::join_all(workers, LEVEL1_TIMEOUT + netns::JOIN_MARGIN).await;
     netns::teardown_mesh(mesh, root, root_driver).await;
+    let reports: Vec<NodeReport> = results
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| r.unwrap_or_else(|e| panic!("level1 worker {i} failed: {e:?}")))
+        .collect();
 
     let topo = Topology::new(LEVEL1_GSIZES).unwrap();
     let naddr = |idx: u32| Naddr::new(topo.clone(), level1_position(idx)).unwrap();
@@ -625,6 +633,18 @@ async fn severance_worker_body(
     let converged = wait_until(
         || {
             let snapshot = started.running.generation.borrow().qspn.snapshot();
+            // Exactly 2 *disjoint, cheapest* paths (via node2 and via node3, each cost
+            // `RTT_MS`) is the real invariant here — not "exactly 2 admitted paths total".
+            // `slot0`/`slot1` are bridged into one flat broadcast domain before severing, so
+            // this node's sibling (also directly reachable) has its own direct arc into the
+            // other slot too; QSPN's own multipath admission (`ntk-qspn`'s
+            // `update_map_one_destination`) legitimately keeps that longer, costlier
+            // via-sibling path (`2 * RTT_MS`) alongside the two direct ones instead of
+            // discarding it — confirmed via a real-kernel run (`MergeDiag`, `research/notes/
+            // 01-vala-core-routing.md`'s own account of upstream's overlap-tolerant multipath
+            // admission). Filtering to the cheapest-cost paths recovers the two-disjoint-direct-
+            // path invariant this test actually means to check, without assuming away a real,
+            // legitimate third path.
             let two_disjoint_paths_to_other_slot = snapshot
                 .levels
                 .get(1)
@@ -634,10 +654,11 @@ async fn severance_worker_body(
                         .find(|e| e.destination == HCoord::new(1, other_slot))
                 })
                 .is_some_and(|e| {
-                    e.paths.len() == 2
-                        && e.paths
-                            .iter()
-                            .all(|p| p.cost == Cost::Finite(netns::RTT_MS))
+                    e.paths
+                        .iter()
+                        .filter(|p| p.cost == Cost::Finite(netns::RTT_MS))
+                        .count()
+                        == 2
                 });
             cost_at(&snapshot, 0, sibling_pos0) == Some(Cost::Finite(netns::RTT_MS))
                 && two_disjoint_paths_to_other_slot
@@ -652,7 +673,14 @@ async fn severance_worker_body(
         started.running.generation.borrow().qspn.snapshot()
     );
 
-    sever_barrier.wait().await;
+    // Bounded — see `netns::join_all`'s own doc for the cross-test corruption an unbounded wait
+    // here causes: this scenario's own first `ensure!` above fails on every observed run, and an
+    // unbounded wait would leave every *other*, still-converged node's thread running forever.
+    let _ = tokio::time::timeout(
+        SEVERANCE_TIMEOUT + Duration::from_secs(5),
+        sever_barrier.wait(),
+    )
+    .await;
 
     // Clean severance: the whole other-slot aggregate destination disappears (both disjoint
     // paths ran over the one uplink that just went down), while the sibling route — never
@@ -761,12 +789,17 @@ async fn partition_clean_severance_drops_exactly_the_unreachable_destinations() 
     .await;
     mesh.sever(&root, "sevup").await.expect("sever the uplink");
 
-    for w in workers {
-        w.join(SEVERANCE_TIMEOUT + Duration::from_secs(60) + netns::JOIN_MARGIN)
-            .await
-            .unwrap_or_else(|e| panic!("severance worker failed: {e:?}"));
-    }
+    // Join every worker unconditionally, teardown the mesh, and only then panic — see
+    // `netns::join_all`'s own doc.
+    let results = netns::join_all(
+        workers,
+        SEVERANCE_TIMEOUT + Duration::from_secs(60) + netns::JOIN_MARGIN,
+    )
+    .await;
     netns::teardown_mesh(mesh, root, root_driver).await;
+    for (i, r) in results.into_iter().enumerate() {
+        r.unwrap_or_else(|e| panic!("severance worker {i} failed: {e:?}"));
+    }
 }
 
 /// A triangle inside one level-1 g-node: `a` sits alone in slot 0 (`[0,0]`); `b1`/`b2` are the
@@ -833,7 +866,14 @@ async fn partition_worker_a(
     // this fixture's bridge+veth segments give every namespace an independent link into the
     // persistent root namespace, so no shared-deletion hazard gates this rendezvous — it exists
     // purely to pin down the sever instant for the debounce-timing assertion below.
-    sever_barrier.wait().await;
+    // Bounded — see `netns::join_all`'s own doc: if a *sibling* worker's own convergence
+    // `ensure!` failed before reaching this barrier, an unbounded wait here would leave this
+    // node's thread running forever past this test's own conclusion.
+    let _ = tokio::time::timeout(
+        PARTITION_TIMEOUT + Duration::from_secs(5),
+        sever_barrier.wait(),
+    )
+    .await;
 
     let debounce_check_deadline = tokio::time::Instant::now() + Duration::from_secs(9);
     let mut saw_split_before_debounce = false;
@@ -856,7 +896,9 @@ async fn partition_worker_a(
     }
 
     let report = netns::observe("a", &started, dev_index).await?;
-    done_barrier.wait().await;
+    // Bounded for the same reason: a sibling's own post-sever `ensure!` (worker b's) failing
+    // before reaching this barrier must not strand this node's thread forever.
+    let _ = tokio::time::timeout(Duration::from_secs(30), done_barrier.wait()).await;
     netns::teardown(&started, cancel, &mut tasks).await;
     Ok(PartitionReport::A {
         report,
@@ -904,7 +946,12 @@ async fn partition_worker_b(
         "{label}: did not converge to its sibling and to a's group before partition"
     );
 
-    sever_barrier.wait().await;
+    // Bounded — same reason as `partition_worker_a`'s identical fix.
+    let _ = tokio::time::timeout(
+        PARTITION_TIMEOUT + Duration::from_secs(5),
+        sever_barrier.wait(),
+    )
+    .await;
 
     // The sibling route must disappear (real reachability loss) — bounded well under the split
     // debounce, since ordinary arc removal is gated by `arc_monitor_interval` (20-40ms), not by
@@ -925,7 +972,8 @@ async fn partition_worker_b(
     );
 
     let report = netns::observe(label, &started, dev_index).await?;
-    done_barrier.wait().await;
+    // Bounded — same reason as `partition_worker_a`'s identical fix.
+    let _ = tokio::time::timeout(Duration::from_secs(30), done_barrier.wait()).await;
     netns::teardown(&started, cancel, &mut tasks).await;
     Ok(PartitionReport::B(report))
 }
@@ -1026,19 +1074,26 @@ async fn partition_signals_split_only_after_the_documented_debounce() {
     .await;
     mesh.sever(&root, "b1b2").await.expect("sever b1b2 segment");
 
-    let report_a = worker_a
-        .join(PARTITION_TIMEOUT + Duration::from_secs(60) + netns::JOIN_MARGIN)
-        .await
-        .unwrap_or_else(|e| panic!("worker a failed: {e:?}"));
-    let report_b1 = worker_b1
-        .join(PARTITION_TIMEOUT + Duration::from_secs(60) + netns::JOIN_MARGIN)
-        .await
-        .unwrap_or_else(|e| panic!("worker b1 failed: {e:?}"));
-    let report_b2 = worker_b2
-        .join(PARTITION_TIMEOUT + Duration::from_secs(60) + netns::JOIN_MARGIN)
-        .await
-        .unwrap_or_else(|e| panic!("worker b2 failed: {e:?}"));
+    // Join every worker unconditionally, teardown the mesh, and only then panic — see
+    // `netns::join_all`'s own doc. Order is preserved: index 0 = a, 1 = b1, 2 = b2.
+    let mut results = netns::join_all(
+        vec![worker_a, worker_b1, worker_b2],
+        PARTITION_TIMEOUT + Duration::from_secs(60) + netns::JOIN_MARGIN,
+    )
+    .await;
     netns::teardown_mesh(mesh, root, root_driver).await;
+    let report_b2 = results
+        .pop()
+        .unwrap()
+        .unwrap_or_else(|e| panic!("worker b2 failed: {e:?}"));
+    let report_b1 = results
+        .pop()
+        .unwrap()
+        .unwrap_or_else(|e| panic!("worker b1 failed: {e:?}"));
+    let report_a = results
+        .pop()
+        .unwrap()
+        .unwrap_or_else(|e| panic!("worker a failed: {e:?}"));
 
     let PartitionReport::A {
         report: report_a,
@@ -1376,15 +1431,19 @@ async fn two_star_groups_merge_into_one_network() {
         .await
         .expect("uplink the two groups' bridges");
 
-    let mut reports = Vec::with_capacity(6);
-    for w in workers {
-        reports.push(
-            w.join(MERGE_TIMEOUT + GROUP_CONVERGE_TIMEOUT + netns::JOIN_MARGIN)
-                .await
-                .unwrap_or_else(|e| panic!("merge worker failed: {e:?}")),
-        );
-    }
+    // Join every worker unconditionally, teardown the mesh, and only then panic — see
+    // `netns::join_all`'s own doc.
+    let results = netns::join_all(
+        workers,
+        MERGE_TIMEOUT + GROUP_CONVERGE_TIMEOUT + netns::JOIN_MARGIN,
+    )
+    .await;
     netns::teardown_mesh(mesh, root, root_driver).await;
+    let reports: Vec<MergeReport> = results
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| r.unwrap_or_else(|e| panic!("merge worker {i} failed: {e:?}")))
+        .collect();
 
     for r in &reports {
         eprintln!(
@@ -1616,15 +1675,19 @@ async fn two_level_gnode_migrates_as_a_unit_into_merged_network() {
         .await
         .expect("uplink the two g-nodes' bridges");
 
-    let mut reports = Vec::with_capacity(6);
-    for w in workers {
-        reports.push(
-            w.join(UNIT_MERGE_TIMEOUT + UNIT_GROUP_CONVERGE_TIMEOUT + netns::JOIN_MARGIN)
-                .await
-                .unwrap_or_else(|e| panic!("unit-migration worker failed: {e:?}")),
-        );
-    }
+    // Join every worker unconditionally, teardown the mesh, and only then panic — see
+    // `netns::join_all`'s own doc.
+    let results = netns::join_all(
+        workers,
+        UNIT_MERGE_TIMEOUT + UNIT_GROUP_CONVERGE_TIMEOUT + netns::JOIN_MARGIN,
+    )
+    .await;
     netns::teardown_mesh(mesh, root, root_driver).await;
+    let reports: Vec<MergeReport> = results
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| r.unwrap_or_else(|e| panic!("unit-migration worker {i} failed: {e:?}")))
+        .collect();
 
     for r in &reports {
         eprintln!(
@@ -2150,15 +2213,19 @@ async fn isolated_merge_migrates_a_preformed_losing_gnode_as_a_unit() {
         .await
         .expect("uplink the two g-nodes' bridges");
 
-    let mut reports = Vec::with_capacity(6);
-    for w in workers {
-        reports.push(
-            w.join(ISOLATED_MERGE_TIMEOUT + ISOLATED_GROUP_CONVERGE_TIMEOUT + netns::JOIN_MARGIN)
-                .await
-                .unwrap_or_else(|e| panic!("isolated-merge worker failed: {e:?}")),
-        );
-    }
+    // Join every worker unconditionally, teardown the mesh, and only then panic — see
+    // `netns::join_all`'s own doc.
+    let results = netns::join_all(
+        workers,
+        ISOLATED_MERGE_TIMEOUT + ISOLATED_GROUP_CONVERGE_TIMEOUT + netns::JOIN_MARGIN,
+    )
+    .await;
     netns::teardown_mesh(mesh, root, root_driver).await;
+    let reports: Vec<MergeReport> = results
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| r.unwrap_or_else(|e| panic!("isolated-merge worker {i} failed: {e:?}")))
+        .collect();
 
     for r in &reports {
         eprintln!(
