@@ -11,6 +11,23 @@
 //! identity (e.g. mig-01's connectivity fork, `research/impl/vala/qspn/qspn.vala:2226-2505`)
 //! joins the routing table. `neighborhood`/`identity` stay exactly as before: node-level,
 //! unconditional, never consulting `unicast_id` at all.
+//!
+//! # Before mig-01 lands: `secondary` is keyed on the wrong id
+//!
+//! [`ntk_neighborhood::NodeId`] identifies the *node*, not an identity: it is
+//! `NeighborhoodConfig::my_id`, fixed for the process's whole life. A connectivity fork and the
+//! successor it bridges for would therefore share it and collide in `secondary`. Upstream keys
+//! the equivalent lookup on an identities-level id — `IdentityAwareUnicastID(NodeID)` carries the
+//! identity's own id, and `get_identity_skeleton` matches it against each entry of
+//! `local_identities` (`research/impl/vala/ntkd/rpc/skeleton_factory.vala:284-291`).
+//!
+//! This is not a live defect: `secondary` is always empty today, and the main identity resolves
+//! via `main_id` before `secondary` is consulted, so every path in use is correct and tested. It
+//! simply does not extend. Whoever builds the fork must first re-key on
+//! [`ntk_identities::IdentityId`] — which `ntk_identities::Handle::migrate` already returns for
+//! the successor, and which identity arcs already carry for peers (`my_peer_old_id`/
+//! `my_peer_new_id`), so a peer can name it. The wire needs no change: `identity_aware`'s payload
+//! is an opaque `TypedValue`.
 
 use std::collections::HashMap;
 use std::sync::Arc;

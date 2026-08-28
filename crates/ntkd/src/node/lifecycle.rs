@@ -136,17 +136,41 @@
 //! models upstream's *connectivity identity* (`make_connectivity`/`check_connectivity`,
 //! `identities.vala:441-577`) — a bridge kept alive so a still-migrating g-node's external arcs
 //! stay reachable throughout, with the guest re-hooking concurrently rather than after a
-//! synchronous teardown. `migrate`'s own "Why not a true concurrent fork" section gives the two
-//! structural reasons this daemon cannot do that today regardless of `guest_gnode_level` (one
-//! live dispatcher target per process; never two identities simultaneously reachable, so
-//! either bridging call would violate its own concurrent-fork precondition before
-//! `guest_gnode_level` is even relevant — see `migrate`'s own doc for the detail).
+//! synchronous teardown.
+//!
+//! The two structural reasons this was impossible are now **gone** (0.1.6): the dispatcher
+//! resolves `Request.unicast_id` to a specific identity rather than holding one live target
+//! (`crate::node::dispatch`), and a generation can be bootstrapped on an allocated peer table
+//! rather than every generation claiming the main one. What remains is this function's own
+//! ordering.
+//!
 //! `ntk_hooking::HookingEvent::DoPrepareMigration`/`DoFinishMigration` are wired to
 //! [`ntk_identities::Handle::prepare_migration`]/`migrate` — real, working identity-registry
-//! bookkeeping — but this daemon does not spin up a second full protocol stack for the identity
-//! `migrate` resolves: `ntk-qspn`'s own scope note says it "never models `enter_net`". A fully
-//! faithful port would spawn that second complete stack the moment `migrate` returns its id — a
-//! substantial addition kept out of this pass and reported rather than half-built.
+//! bookkeeping — but this daemon still does not keep the outgoing generation serving while the
+//! successor hooks.
+//!
+//! # What closing the blackout actually requires
+//! Less than "spawn a second complete stack". [`migrate`] cancels the outgoing generation and
+//! tears down its kernel state *before* bootstrapping the successor, and that ordering is the
+//! blackout. An entering generation's kernel state is already suppressed until its own bootstrap
+//! confirms (see [`virtual_placeholder`]), so the two never need routes installed at once:
+//!
+//! 1. Register the outgoing generation's stack as a second identity and leave it running — it
+//!    keeps answering for the old position, on the main table, throughout.
+//! 2. Bootstrap the successor concurrently. It installs nothing until its bootstrap completes.
+//! 3. Only then announce the bridge's retirement ([`ntk_qspn::QspnHandle::announce_destroy`]),
+//!    cancel it, tear down its kernel state — freeing the main table — and unregister it.
+//! 4. Install the successor's kernel state and make it main.
+//!
+//! The successor's own position is unreachable before the migration anyway, so a gap there costs
+//! nothing; what the bridge covers is the traffic that already existed — this node's old
+//! destination *and* the transit it forwards for others, which is the half
+//! `crates/ntkd/tests/mesh.rs` fails on.
+//!
+//! Two prerequisites, both recorded where they bite: `crate::node::dispatch`'s `secondary` map
+//! must be re-keyed on [`ntk_identities::IdentityId`] (a fork shares the node's
+//! `ntk_neighborhood::NodeId`), and outbound calls must then name their destination identity,
+//! which `crate::node::stubs` deliberately does not do yet and explains why.
 
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
