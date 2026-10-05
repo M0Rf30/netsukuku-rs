@@ -11,8 +11,12 @@
 //! of panicking or closing silently.
 
 use std::net::Ipv4Addr;
-use std::path::Path;
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Context as _;
 
 use ntk_andna::{Hostname, RegisterOutcome, RegisterRequest, SnsdTarget};
 use serde::{Deserialize, Serialize};
@@ -183,10 +187,118 @@ pub fn report<K>(node: &RunningNode<K>, bootstrapped: bool) -> StatusReport {
     }
 }
 
+/// File name of the control socket inside the runtime directory.
+const SOCKET_FILE_NAME: &str = "ntkd.sock";
+
+/// Runtime directory used when systemd's `RuntimeDirectory=` is not in effect.
+const FALLBACK_RUNTIME_DIR: &str = "/run/ntkd";
+
+/// Longest request line the server reads: the longest legitimate line is
+/// `andna-register <hostname>`, and a hostname is at most a few hundred bytes.
+const MAX_REQUEST_LINE_BYTES: u64 = 4096;
+
+/// How much of an oversized request the server discards after refusing it.
+const OVERSIZED_DRAIN_BYTES: u64 = 256 * 1024;
+
+/// How long a client gets to deliver its request line before the server gives up on it.
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The control socket path used by `run`/`status`/`andna-*` when `--status-socket`/`--socket`
+/// is not given: `$RUNTIME_DIRECTORY/ntkd.sock` (the first entry, when systemd passes several
+/// colon-separated directories), else `/run/ntkd/ntkd.sock`. Never a world-writable directory
+/// such as `/tmp`, where another local user could pre-create or squat the path.
+#[must_use]
+pub fn default_socket_path() -> PathBuf {
+    socket_path_in(std::env::var_os("RUNTIME_DIRECTORY").as_deref())
+}
+
+fn socket_path_in(runtime_directory: Option<&std::ffi::OsStr>) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = runtime_directory
+        .and_then(|value| value.as_bytes().split(|&b| b == b':').next())
+        .filter(|first| !first.is_empty())
+        .map_or_else(
+            || PathBuf::from(FALLBACK_RUNTIME_DIR),
+            |first| PathBuf::from(std::ffi::OsStr::from_bytes(first)),
+        );
+    dir.join(SOCKET_FILE_NAME)
+}
+
+/// Makes `socket_path` free to bind: creates its parent directory (mode 0700) when missing,
+/// removes a stale socket left behind by a crashed daemon, and refuses to touch anything that is
+/// not a dead socket.
+///
+/// # Errors
+/// A live daemon is already listening on `socket_path`, `socket_path` exists but is not a
+/// socket, or the filesystem refuses the directory creation/removal.
+fn prepare_socket_path(socket_path: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = socket_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+            .with_context(|| {
+                format!("creating the status socket directory {}", parent.display())
+            })?;
+    }
+    let metadata = match std::fs::symlink_metadata(socket_path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(err).with_context(|| format!("inspecting {}", socket_path.display()));
+        }
+    };
+    anyhow::ensure!(
+        metadata.file_type().is_socket(),
+        "{} exists and is not a socket; refusing to remove it",
+        socket_path.display()
+    );
+    if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
+        anyhow::bail!(
+            "another ntkd is already listening on {}; refusing to steal its socket",
+            socket_path.display()
+        );
+    }
+    std::fs::remove_file(socket_path)
+        .with_context(|| format!("removing the stale socket {}", socket_path.display()))
+}
+
+/// Binds `socket_path` with mode 0600 and no window in which it is reachable with looser
+/// permissions or replaceable by a racing daemon: binds under a private temporary name,
+/// restricts the mode, then hard-links it into place (which fails if `socket_path` appeared in
+/// the meantime).
+fn bind_private(socket_path: &Path) -> anyhow::Result<UnixListener> {
+    let mut staging = socket_path.as_os_str().to_owned();
+    staging.push(format!(".{}.tmp", std::process::id()));
+    let staging = PathBuf::from(staging);
+    let _ = std::fs::remove_file(&staging);
+    let listener = UnixListener::bind(&staging)
+        .with_context(|| format!("binding the status socket {}", staging.display()))?;
+    let published = std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("restricting {} to mode 0600", staging.display()))
+        .and_then(|()| {
+            std::fs::hard_link(&staging, socket_path).with_context(|| {
+                format!(
+                    "publishing the status socket at {} (is another ntkd running?)",
+                    socket_path.display()
+                )
+            })
+        });
+    let _ = std::fs::remove_file(&staging);
+    published?;
+    Ok(listener)
+}
+
 /// Serves [`StatusReport`]s and ANDNA register/resolve requests over a unix socket at
 /// `socket_path` until `cancel` fires. `andna_key_path` is passed straight through to every
 /// connection's `andna-register` handling, unchanged — see
 /// [`crate::node::andna_key::load_or_generate`].
+///
+/// The socket is created with mode 0600. A stale socket from a crashed daemon is replaced, but a
+/// socket another daemon is still listening on, or any non-socket file, is never removed.
+///
+/// # Errors
+/// The socket path cannot be prepared or bound; the message names the path.
 pub async fn serve<K>(
     socket_path: std::path::PathBuf,
     node: Arc<RunningNode<K>>,
@@ -197,8 +309,8 @@ pub async fn serve<K>(
 where
     K: SendNetlink + 'static,
 {
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path)?;
+    prepare_socket_path(&socket_path)?;
+    let listener = bind_private(&socket_path)?;
     loop {
         tokio::select! {
             () = cancel.cancelled() => {
@@ -211,7 +323,11 @@ where
                 let net = net.clone();
                 let andna_key_path = andna_key_path.clone();
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, &node, &net, andna_key_path.as_deref()).await;
+                    if let Err(err) =
+                        handle_connection(stream, &node, &net, andna_key_path.as_deref()).await
+                    {
+                        tracing::debug!(error = %format!("{err:#}"), "status: connection failed");
+                    }
                 });
             }
         }
@@ -227,7 +343,37 @@ async fn handle_connection<K>(
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
-    reader.read_line(&mut line).await?;
+    // Bounded in both size and time: an unauthenticated peer on the socket must not be able to
+    // make the daemon buffer an unbounded line or hold the connection open forever.
+    let read = tokio::time::timeout(
+        REQUEST_READ_TIMEOUT,
+        (&mut reader)
+            .take(MAX_REQUEST_LINE_BYTES)
+            .read_line(&mut line),
+    )
+    .await;
+    let Ok(read) = read else {
+        anyhow::bail!("timed out waiting for a request line");
+    };
+    let read = u64::try_from(read?).unwrap_or(u64::MAX);
+    if read >= MAX_REQUEST_LINE_BYTES && !line.ends_with('\n') {
+        let text = toml::to_string(&ErrorReply {
+            error: format!("request line exceeds {MAX_REQUEST_LINE_BYTES} bytes"),
+        })?;
+        write_half.write_all(text.as_bytes()).await?;
+        write_half.shutdown().await?;
+        // Discard what the client already sent (bounded): closing with unread input would reset
+        // the connection and could destroy the reply before the client reads it.
+        let _ = tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::io::copy(
+                &mut (&mut reader).take(OVERSIZED_DRAIN_BYTES),
+                &mut tokio::io::sink(),
+            ),
+        )
+        .await;
+        return Ok(());
+    }
     let request = line.trim();
     let (command, arg) = request
         .split_once(' ')
@@ -380,7 +526,12 @@ pub async fn resolve_hostname(
 /// Sends `line` to `socket_path` and returns the reply text read to EOF — the shared transport
 /// for every client function in this module.
 async fn request_line(socket_path: &std::path::Path, line: &str) -> anyhow::Result<String> {
-    let stream = UnixStream::connect(socket_path).await?;
+    let stream = UnixStream::connect(socket_path).await.with_context(|| {
+        format!(
+            "connecting to the ntkd status socket {} (is the daemon running?)",
+            socket_path.display()
+        )
+    })?;
     let (read_half, mut write_half) = stream.into_split();
     write_half.write_all(line.as_bytes()).await?;
     write_half.shutdown().await?;
@@ -609,5 +760,120 @@ mod andna_socket_tests {
         let _ = server.await;
         let _ = std::fs::remove_file(&socket_path);
         let _ = std::fs::remove_file(&key);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_request_line_is_refused_with_an_error_reply() {
+        let (node, net, _tasks) = single_node().await;
+        let socket_path = unique_socket_path("oversized");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_connection(stream, &node, &net, None).await.unwrap();
+        });
+        let client = UnixStream::connect(&socket_path).await.unwrap();
+        let (client_read, mut client_write) = client.into_split();
+        client_write
+            .write_all(&vec![b'a'; 64 * 1024])
+            .await
+            .unwrap();
+        client_write.shutdown().await.unwrap();
+        let mut text = String::new();
+        BufReader::new(client_read)
+            .read_to_string(&mut text)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        let reply: ErrorReply = toml::from_str(&text).expect("oversized request yields ErrorReply");
+        assert!(reply.error.contains("exceeds"), "{}", reply.error);
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
+    fn unique_socket_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "ntkd-status-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[tokio::test]
+    async fn the_bound_status_socket_is_private_to_its_owner() {
+        let socket_path = unique_socket_path("mode");
+        prepare_socket_path(&socket_path).unwrap();
+        let _listener = bind_private(&socket_path).unwrap();
+        let mode = std::fs::metadata(&socket_path)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
+    #[tokio::test]
+    async fn a_live_status_socket_is_never_stolen_by_a_second_daemon() {
+        let socket_path = unique_socket_path("live");
+        prepare_socket_path(&socket_path).unwrap();
+        let _live = bind_private(&socket_path).unwrap();
+        let err = prepare_socket_path(&socket_path).unwrap_err();
+        assert!(format!("{err:#}").contains("already listening"), "{err:#}");
+        assert!(
+            UnixStream::connect(&socket_path).await.is_ok(),
+            "the live daemon's socket must survive the refused takeover"
+        );
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
+    #[tokio::test]
+    async fn a_stale_status_socket_from_a_crashed_daemon_is_replaced() {
+        let socket_path = unique_socket_path("stale");
+        {
+            let _crashed = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        }
+        assert!(
+            socket_path.exists(),
+            "dropping a listener leaves the file behind"
+        );
+        prepare_socket_path(&socket_path).unwrap();
+        let _fresh = bind_private(&socket_path).unwrap();
+        assert!(UnixStream::connect(&socket_path).await.is_ok());
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
+    #[test]
+    fn a_regular_file_at_the_status_socket_path_is_not_removed() {
+        let path = unique_socket_path("regular");
+        std::fs::write(&path, b"precious").unwrap();
+        let err = prepare_socket_path(&path).unwrap_err();
+        assert!(format!("{err:#}").contains("not a socket"), "{err:#}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"precious");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_default_status_socket_lives_in_the_runtime_directory_not_tmp() {
+        use std::ffi::OsStr;
+        assert_eq!(
+            socket_path_in(Some(OsStr::new("/run/custom:/run/other"))),
+            PathBuf::from("/run/custom/ntkd.sock")
+        );
+        assert_eq!(socket_path_in(None), PathBuf::from("/run/ntkd/ntkd.sock"));
+        assert_eq!(
+            socket_path_in(Some(OsStr::new(""))),
+            PathBuf::from("/run/ntkd/ntkd.sock")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_status_client_error_names_the_socket_path() {
+        let socket_path = unique_socket_path("missing");
+        let err = query(&socket_path).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains(&socket_path.display().to_string()),
+            "{err:#}"
+        );
     }
 }

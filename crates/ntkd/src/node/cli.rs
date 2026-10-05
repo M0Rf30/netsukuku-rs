@@ -28,14 +28,15 @@ pub enum Command {
         /// Log verbosity: `error`, `warn`, `info`, `debug`, or `trace`.
         #[arg(long, default_value = "info")]
         log_level: String,
-        /// Unix socket path the `status` subcommand connects to.
+        /// Unix socket path the `status` subcommand connects to. Defaults to
+        /// `$RUNTIME_DIRECTORY/ntkd.sock`, else `/run/ntkd/ntkd.sock`.
         #[arg(long)]
         status_socket: Option<PathBuf>,
     },
     /// Queries a running daemon's status over its unix socket.
     Status {
         /// Unix socket path a running daemon's `run --status-socket` is listening on.
-        #[arg(long, default_value = "/tmp/ntkd.sock")]
+        #[arg(long, default_value_os_t = crate::node::status::default_socket_path())]
         socket: PathBuf,
     },
     /// Registers or renews a hostname against a running daemon's ANDNA.
@@ -43,7 +44,7 @@ pub enum Command {
         /// The hostname to register or renew.
         hostname: String,
         /// Unix socket path a running daemon's `run --status-socket` is listening on.
-        #[arg(long, default_value = "/tmp/ntkd.sock")]
+        #[arg(long, default_value_os_t = crate::node::status::default_socket_path())]
         socket: PathBuf,
     },
     /// Resolves a hostname against a running daemon's ANDNA.
@@ -51,7 +52,7 @@ pub enum Command {
         /// The hostname to resolve.
         hostname: String,
         /// Unix socket path a running daemon's `run --status-socket` is listening on.
-        #[arg(long, default_value = "/tmp/ntkd.sock")]
+        #[arg(long, default_value_os_t = crate::node::status::default_socket_path())]
         socket: PathBuf,
     },
 }

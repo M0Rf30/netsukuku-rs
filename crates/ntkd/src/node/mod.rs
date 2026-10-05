@@ -33,8 +33,7 @@ pub fn main() {
                 log_level,
                 status_socket,
             } => {
-                let socket =
-                    status_socket.unwrap_or_else(|| std::path::PathBuf::from("/tmp/ntkd.sock"));
+                let socket = status_socket.unwrap_or_else(status::default_socket_path);
                 supervisor::run(config, nics, &log_level, socket).await
             }
             cli::Command::Status { socket } => supervisor::status(socket).await,
