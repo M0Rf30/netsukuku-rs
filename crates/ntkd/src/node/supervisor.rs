@@ -59,11 +59,12 @@ pub async fn drain_tasks(tasks: &mut JoinSet<()>, timeout: Duration) -> usize {
     while tokio::time::Instant::now() < deadline {
         let tick = (deadline - tokio::time::Instant::now()).min(Duration::from_secs(5));
         tokio::select! {
-            joined = tasks.join_next() => {
-                if joined.is_none() {
-                    return 0;
+            joined = tasks.join_next() => match joined {
+                None => return 0,
+                Some(result) => {
+                    log_join_result(result);
                 }
-            }
+            },
             () = tokio::time::sleep(tick) => {
                 tracing::warn!(remaining = tasks.len(), "shutdown: still draining tasks");
             }
@@ -79,10 +80,52 @@ pub async fn drain_tasks(tasks: &mut JoinSet<()>, timeout: Duration) -> usize {
     );
     tasks.abort_all();
     let _ = tokio::time::timeout(ABORT_REAP_WINDOW, async {
-        while tasks.join_next().await.is_some() {}
+        while let Some(result) = tasks.join_next().await {
+            log_join_result(result);
+        }
     })
     .await;
     tasks.len()
+}
+
+/// Logs a panicked task loudly; a cancelled (aborted) task is expected during shutdown.
+/// Returns `true` when the task panicked.
+fn log_join_result(result: Result<(), tokio::task::JoinError>) -> bool {
+    match result {
+        Ok(()) => false,
+        Err(err) if err.is_panic() => {
+            tracing::error!(%err, "a daemon task panicked");
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Removes every piece of kernel state this daemon (or a crashed predecessor) could have left:
+/// the generic [`ntk_netlink::cleanup`] sweep plus the neighbor on-link route table.
+/// Best-effort and idempotent, so it runs both before the first install (a crash-restart would
+/// otherwise hit `EEXIST` on the fixed identity rule/address) and on every exit path.
+async fn cleanup_kernel(kernel: &ntk_netlink::RealNetlink, nics: &[String], when: &str) {
+    let table_allocator: TableAllocator<()> = TableAllocator::new();
+    match ntk_netlink::cleanup(
+        kernel,
+        &table_allocator,
+        &nics
+            .iter()
+            .map(ntk_netlink::Interface::name)
+            .collect::<Vec<_>>(),
+    )
+    .await
+    {
+        Ok(report) if !report.is_empty() => {
+            tracing::info!(?report, when, "cleanup removed leftover kernel state");
+        }
+        Ok(_) => {}
+        Err(err) => tracing::warn!(%err, when, "kernel cleanup failed"),
+    }
+    if let Err(err) = crate::node::ip_route::cleanup_neighbor_routes(kernel).await {
+        tracing::warn!(%err, when, "neighbor on-link route cleanup failed");
+    }
 }
 
 /// Entry point for `ntkd run`.
@@ -109,7 +152,26 @@ pub async fn run(
     let root_cancel = CancellationToken::new();
     let mut tasks = JoinSet::new();
 
-    let started = transport::start(config, &nics, &mut tasks, root_cancel.child_token()).await?;
+    // Startup sweep: a crash (or SIGKILL) skips the shutdown cleanup below, and the fixed
+    // identity rule/address would then fail `install_identity` with EEXIST on every restart.
+    let startup_kernel = ntk_netlink::RealNetlink::new()?;
+    cleanup_kernel(&startup_kernel, &nics, "startup").await;
+
+    let started = match transport::start(config, &nics, &mut tasks, root_cancel.child_token()).await
+    {
+        Ok(started) => started,
+        Err(err) => {
+            // `transport::start` may have installed kernel state (identity address, rules)
+            // before failing; leaving it would wedge the next start.
+            root_cancel.cancel();
+            let outstanding = drain_tasks(&mut tasks, SHUTDOWN_DRAIN_TIMEOUT).await;
+            if outstanding > 0 {
+                tracing::error!(outstanding, "startup failure: some actors never stopped");
+            }
+            cleanup_kernel(&startup_kernel, &nics, "startup failure").await;
+            return Err(err);
+        }
+    };
     let running = Arc::new(started.running);
     let net = running.net.clone();
     let kernel = running.kernel.clone();
@@ -130,8 +192,36 @@ pub async fn run(
         }
     });
 
-    wait_for_shutdown_signal().await;
-    tracing::info!("shutdown signal received, cancelling every actor");
+    let mut failure: Option<anyhow::Error> = None;
+    {
+        let signal = wait_for_shutdown_signal();
+        tokio::pin!(signal);
+        loop {
+            tokio::select! {
+                biased;
+                () = &mut signal => {
+                    tracing::info!("shutdown signal received, cancelling every actor");
+                    break;
+                }
+                joined = tasks.join_next() => match joined {
+                    // Every actor is expected to run until `root_cancel` fires, so any
+                    // completion now is abnormal; a panic leaves a live-looking daemon that no
+                    // longer routes, so it is fatal.
+                    Some(result) => {
+                        if log_join_result(result) {
+                            failure = Some(anyhow::anyhow!("a daemon task panicked; shutting down"));
+                            break;
+                        }
+                        tracing::warn!("a daemon task exited before shutdown");
+                    }
+                    None => {
+                        failure = Some(anyhow::anyhow!("every daemon task exited; shutting down"));
+                        break;
+                    }
+                },
+            }
+        }
+    }
 
     // Tell the neighbours before the actors die — upstream's `destroy`
     // (`research/impl/vala/qspn/qspn.vala:2481-2505`). Each peer removes the arc to this node and
@@ -165,28 +255,9 @@ pub async fn run(
     if let Err(err) = running.route_installer.lock().await.teardown().await {
         tracing::warn!(%err, "graceful route teardown failed");
     }
-    let table_allocator: TableAllocator<()> = TableAllocator::new();
-    match ntk_netlink::cleanup(
-        kernel.as_ref(),
-        &table_allocator,
-        &nics
-            .iter()
-            .map(ntk_netlink::Interface::name)
-            .collect::<Vec<_>>(),
-    )
-    .await
-    {
-        Ok(report) if !report.is_empty() => {
-            tracing::info!(?report, "final cleanup removed leftover kernel state")
-        }
-        Ok(_) => {}
-        Err(err) => tracing::warn!(%err, "final cleanup failed"),
-    }
-    if let Err(err) = crate::node::ip_route::cleanup_neighbor_routes(kernel.as_ref()).await {
-        tracing::warn!(%err, "neighbor on-link route cleanup failed");
-    }
+    cleanup_kernel(kernel.as_ref(), &nics, "shutdown").await;
 
-    Ok(())
+    failure.map_or(Ok(()), Err)
 }
 
 /// Entry point for `ntkd status`.
@@ -346,5 +417,41 @@ mod drain_tasks_tests {
              never yields, took {:?}",
             start.elapsed()
         );
+    }
+}
+
+#[cfg(test)]
+mod panic_supervision_tests {
+    use super::{drain_tasks, log_join_result};
+    use std::time::Duration;
+    use tokio::task::JoinSet;
+
+    /// A panicking actor must be reported as a panic (so the supervisor shuts the daemon down
+    /// instead of leaving a live-looking process), while a clean exit and an abort are not.
+    #[tokio::test]
+    async fn a_panicked_task_is_reported_as_a_panic_but_clean_exits_and_aborts_are_not() {
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async { panic!("actor blew up") });
+        let panicked = tasks.join_next().await.expect("one task");
+        assert!(log_join_result(panicked), "a panic must be flagged");
+
+        tasks.spawn(async {});
+        let clean = tasks.join_next().await.expect("one task");
+        assert!(!log_join_result(clean), "a clean exit is not a panic");
+
+        let handle = tasks.spawn(std::future::pending::<()>());
+        handle.abort();
+        let aborted = tasks.join_next().await.expect("one task");
+        assert!(!log_join_result(aborted), "an abort is not a panic");
+    }
+
+    /// Draining must keep going past a panicked task rather than bailing out on it.
+    #[tokio::test]
+    async fn draining_continues_past_a_panicked_task() {
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async { panic!("actor blew up") });
+        tasks.spawn(async { tokio::time::sleep(Duration::from_millis(10)).await });
+        assert_eq!(drain_tasks(&mut tasks, Duration::from_secs(5)).await, 0);
+        assert!(tasks.is_empty());
     }
 }

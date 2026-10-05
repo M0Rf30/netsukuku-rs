@@ -105,6 +105,20 @@ pub async fn start(
         };
         broadcasters.insert(nic.clone(), Arc::new(broadcaster));
     }
+    // Bound before any kernel state exists: a bind failure (port in use, privileged port
+    // without CAP_NET_BIND_SERVICE) must not leave an installed identity address/rule behind.
+    let server = match TcpServer::bind(format!("0.0.0.0:{}", config.port()).parse()?, 1 << 20).await
+    {
+        Ok(server) => server,
+        Err(source) => {
+            return Err(anyhow::anyhow!(describe_bind_failure(
+                "TCP",
+                None,
+                config.port(),
+                &source
+            )));
+        }
+    };
 
     let neighborhood_stub_factory = Arc::new(NeighborhoodStubFactoryAdapter {
         broadcasters: broadcasters.clone(),
@@ -163,18 +177,6 @@ pub async fn start(
     )
     .await?;
 
-    let server = match TcpServer::bind(format!("0.0.0.0:{}", config.port()).parse()?, 1 << 20).await
-    {
-        Ok(server) => server,
-        Err(source) => {
-            return Err(anyhow::anyhow!(describe_bind_failure(
-                "TCP",
-                None,
-                config.port(),
-                &source
-            )));
-        }
-    };
     let dispatcher = started.dispatcher.clone();
     let server_cancel = cancel.child_token();
     tasks.spawn(async move {
