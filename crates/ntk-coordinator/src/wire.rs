@@ -108,8 +108,21 @@ fn booking_to_wire(b: &Booking, now: Instant) -> wire::Booking {
     }
 }
 
+/// Longest relative TTL a replicated record may carry (a booking lives ~60 s and the `n_nodes`
+/// cache a few minutes); anything longer is clamped so a peer cannot pin state indefinitely.
+const MAX_REPLICA_TTL_MS: u64 = 60 * 60 * 1000;
+
+/// Most bookings accepted from one replicated g-node record.
+const MAX_REPLICA_BOOKINGS: usize = 4096;
+
+/// Ceiling for a replicated `max_virtual_pos`, leaving headroom so the next `+= 1` cannot
+/// overflow.
+const MAX_REPLICA_VIRTUAL_POS: u32 = u32::MAX / 2;
+
 fn booking_from_wire(w: &wire::Booking, now: Instant) -> Booking {
-    let remaining_ms = u64::try_from(w.timeout_remaining_ms).unwrap_or(0);
+    let remaining_ms = u64::try_from(w.timeout_remaining_ms)
+        .unwrap_or(0)
+        .min(MAX_REPLICA_TTL_MS);
     Booking {
         reserve_request_id: w.reserve_request_id,
         new_pos: w.new_pos,
@@ -139,16 +152,19 @@ pub(crate) fn gnode_memory_to_wire(m: &GnodeMemory) -> wire::GnodeMemory {
 pub(crate) fn gnode_memory_from_wire(w: &wire::GnodeMemory) -> GnodeMemory {
     let now = Instant::now();
     let n_nodes = w.n_nodes.map(|n| {
-        let remaining_ms = u64::try_from(w.n_nodes_timeout_remaining_ms.unwrap_or(0)).unwrap_or(0);
+        let remaining_ms = u64::try_from(w.n_nodes_timeout_remaining_ms.unwrap_or(0))
+            .unwrap_or(0)
+            .min(MAX_REPLICA_TTL_MS);
         (n, now + Duration::from_millis(remaining_ms))
     });
     GnodeMemory {
         reserve_list: w
             .reserve_list
             .iter()
+            .take(MAX_REPLICA_BOOKINGS)
             .map(|b| booking_from_wire(b, now))
             .collect(),
-        max_virtual_pos: w.max_virtual_pos,
+        max_virtual_pos: w.max_virtual_pos.min(MAX_REPLICA_VIRTUAL_POS),
         max_eldership: w.max_eldership,
         n_nodes,
         hooking_memory: w.hooking_memory.clone(),
@@ -613,5 +629,31 @@ mod validate_top_tests {
             validate_top(0, 4),
             Err(Error::InvalidTop { top: 0, levels: 4 })
         ));
+    }
+
+    #[test]
+    fn replicated_record_from_a_hostile_peer_is_bounded() {
+        let hostile = wire::GnodeMemory {
+            reserve_list: (0..(MAX_REPLICA_BOOKINGS + 10))
+                .map(|i| wire::Booking {
+                    reserve_request_id: i64::try_from(i).unwrap(),
+                    new_pos: 0,
+                    new_eldership: 0,
+                    timeout_remaining_ms: i64::MAX,
+                })
+                .collect(),
+            max_virtual_pos: u32::MAX,
+            max_eldership: 0,
+            n_nodes: Some(1),
+            n_nodes_timeout_remaining_ms: Some(i64::MAX),
+            hooking_memory: None,
+        };
+        let before = Instant::now();
+        let memory = gnode_memory_from_wire(&hostile);
+        assert_eq!(memory.reserve_list.len(), MAX_REPLICA_BOOKINGS);
+        assert!(memory.max_virtual_pos.checked_add(1).is_some());
+        let ceiling = before + Duration::from_millis(MAX_REPLICA_TTL_MS) + Duration::from_secs(5);
+        assert!(memory.reserve_list.iter().all(|b| b.expires_at <= ceiling));
+        assert!(memory.n_nodes.is_some_and(|(_, at)| at <= ceiling));
     }
 }
