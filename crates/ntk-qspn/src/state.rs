@@ -1396,31 +1396,37 @@ impl QspnState {
     /// on why no `QspnState` method performs I/O), driven off
     /// [`MakeConnectivityOutcome::old_position`].
     ///
-    /// # Panics
-    /// If `connectivity_from_level > connectivity_to_level`,
-    /// `connectivity_to_level > levels()`, `connectivity_from_level == 0`
-    /// (`qspn.vala:2232-2234`'s asserts), or this identity's own position at
-    /// `connectivity_from_level - 1` is not currently real (`qspn.vala:2236`).
-    ///
     /// # Errors
-    /// Propagates [`ntk_common::Error`] from the [`Self::update_clusters`]
-    /// climb.
+    /// [`QspnError::InvalidConnectivity`] if `connectivity_from_level >
+    /// connectivity_to_level`, `connectivity_to_level > levels()`,
+    /// `connectivity_from_level == 0` (`qspn.vala:2232-2234`), or this
+    /// identity's own position at `connectivity_from_level - 1` is not
+    /// currently real (`qspn.vala:2236`). Otherwise propagates
+    /// [`ntk_common::Error`] from the [`Self::update_clusters`] climb.
     pub fn make_connectivity(
         &mut self,
         connectivity_from_level: usize,
         connectivity_to_level: usize,
         update_naddr: impl Fn(&Naddr) -> Naddr,
     ) -> Result<MakeConnectivityOutcome, QspnError> {
-        assert!(connectivity_from_level <= connectivity_to_level);
-        assert!(connectivity_to_level <= self.levels());
-        assert!(connectivity_from_level > 0);
+        if connectivity_from_level > connectivity_to_level {
+            return Err(QspnError::InvalidConnectivity(
+                "from level exceeds to level",
+            ));
+        }
+        if connectivity_to_level > self.levels() {
+            return Err(QspnError::InvalidConnectivity("to level exceeds levels"));
+        }
+        if connectivity_from_level == 0 {
+            return Err(QspnError::InvalidConnectivity("from level must be > 0"));
+        }
         let old_lvl = connectivity_from_level - 1;
         let old_pos = self.my_naddr.pos(old_lvl).expect("old_lvl < levels");
-        assert_eq!(
-            self.my_naddr.is_virtual_at(old_lvl),
-            Some(false),
-            "make_connectivity requires a currently-real position (qspn.vala:2236)"
-        );
+        if self.my_naddr.is_virtual_at(old_lvl) != Some(false) {
+            return Err(QspnError::InvalidConnectivity(
+                "position at from level - 1 is not currently real",
+            ));
+        }
 
         let internal_arcs: Vec<ArcId> = self
             .arcs
@@ -1527,16 +1533,26 @@ impl QspnState {
     /// bridges — the daemon's own precondition before it may retire this
     /// identity. Read-only; no state mutation, no I/O.
     ///
-    /// # Panics
-    /// If called on a main identity (`connectivity_from_level == 0`), or if
-    /// `connectivity_to_level < connectivity_from_level` or `>
-    /// levels()` — both are this identity's own construction invariants
-    /// (`qspn.vala:2375-2377`'s asserts), never a caller input.
-    #[must_use]
-    pub fn check_connectivity(&self) -> bool {
-        assert!(!self.is_main_identity());
-        assert!(self.connectivity_to_level >= self.connectivity_from_level);
-        assert!(self.connectivity_to_level <= self.levels());
+    /// # Errors
+    /// [`QspnError::InvalidConnectivity`] if called on a main identity
+    /// (`connectivity_from_level == 0`), or if `connectivity_to_level <
+    /// connectivity_from_level` or `> levels()` (`qspn.vala:2375-2377`).
+    pub fn check_connectivity(&self) -> Result<bool, QspnError> {
+        if self.is_main_identity() {
+            return Err(QspnError::InvalidConnectivity(
+                "main identity has no connectivity range",
+            ));
+        }
+        if self.connectivity_to_level < self.connectivity_from_level
+            || self.connectivity_to_level > self.levels()
+        {
+            return Err(QspnError::InvalidConnectivity("connectivity range invalid"));
+        }
+        Ok(self.connectivity_is_retirable())
+    }
+
+    /// Body of [`Self::check_connectivity`], once its range is validated.
+    fn connectivity_is_retirable(&self) -> bool {
         let mut i = self.connectivity_from_level - 1;
         let j = self.connectivity_to_level;
         loop {
@@ -1985,10 +2001,33 @@ mod migration_tests {
         state.record_peer_naddr(arc, peer);
 
         // No destination depends on this bridge, so retiring it is safe.
-        assert!(state.check_connectivity());
+        assert_eq!(state.check_connectivity(), Ok(true));
 
         let exit = state.exit_network(0).expect("valid exit_network call");
         assert_eq!(exit.removed_arcs, vec![arc]);
         assert_eq!(state.arcs().count(), 0);
+    }
+
+    #[test]
+    fn invalid_connectivity_requests_return_errors_instead_of_panicking() {
+        let naddr = Naddr::new(topology2(), [0, 1]).expect("valid address");
+        let mut state = QspnState::new(naddr, fp2(1, 0), QspnConfig::default());
+        let noop = |n: &Naddr| n.clone();
+        assert!(matches!(
+            state.make_connectivity(2, 1, noop),
+            Err(QspnError::InvalidConnectivity(_))
+        ));
+        assert!(matches!(
+            state.make_connectivity(1, 9, noop),
+            Err(QspnError::InvalidConnectivity(_))
+        ));
+        assert!(matches!(
+            state.make_connectivity(0, 1, noop),
+            Err(QspnError::InvalidConnectivity(_))
+        ));
+        assert!(matches!(
+            state.check_connectivity(),
+            Err(QspnError::InvalidConnectivity(_))
+        ));
     }
 }

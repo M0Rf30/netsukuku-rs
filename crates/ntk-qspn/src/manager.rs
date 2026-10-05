@@ -175,7 +175,7 @@ enum Command {
         reply: oneshot::Sender<Result<(), QspnError>>,
     },
     CheckConnectivity {
-        reply: oneshot::Sender<bool>,
+        reply: oneshot::Sender<Result<bool, QspnError>>,
     },
     /// Fires once `config.arc_gather_debounce` has elapsed since the most
     /// recent arc-flap-triggered gather — see
@@ -530,8 +530,8 @@ impl QspnHandle {
     ///
     /// # Errors
     /// [`QspnError::ActorGone`], or whatever [`crate::QspnState::make_connectivity`]
-    /// itself returns (e.g. on a malformed `from`/`to`, as a panic — see that
-    /// method's docs).
+    /// itself returns (e.g. [`QspnError::InvalidConnectivity`] on a malformed
+    /// `from`/`to`).
     pub async fn make_connectivity(
         &self,
         from: usize,
@@ -567,9 +567,10 @@ impl QspnHandle {
     /// plus dropping the handle/cancelling its token).
     ///
     /// # Errors
-    /// [`QspnError::ActorGone`].
+    /// [`QspnError::ActorGone`], or [`QspnError::InvalidConnectivity`] on a
+    /// main identity.
     pub async fn check_connectivity(&self) -> Result<bool, QspnError> {
-        call(&self.cmd_tx, |reply| Command::CheckConnectivity { reply }).await
+        call(&self.cmd_tx, |reply| Command::CheckConnectivity { reply }).await?
     }
 }
 

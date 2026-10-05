@@ -26,6 +26,11 @@ pub enum QspnError {
     #[error("malformed ETP: {0}")]
     MalformedEtp(&'static str),
 
+    /// A connectivity-identity API was called with arguments or on a state
+    /// that violate its preconditions (e.g. `from > to`, a main identity).
+    #[error("invalid connectivity request: {0}")]
+    InvalidConnectivity(&'static str),
+
     /// `QspnBootstrapInProgressError` (`research/impl/vala/ntkdrpc/interfaces.vala`,
     /// wire `ErrorDomain::QspnBootstrapInProgress`): the caller asked this
     /// identity for something it cannot yet answer because it has not
