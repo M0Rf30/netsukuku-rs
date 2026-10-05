@@ -12,10 +12,17 @@ pub enum NetlinkError {
     #[error("failed to open netlink connection: {0}")]
     Connect(#[source] std::io::Error),
 
-    /// The kernel rejected a request (`rtnetlink`'s own error, e.g. `EEXIST`,
-    /// `ESRCH`, `EPERM` for a missing `CAP_NET_ADMIN`).
+    /// The kernel rejected a request with an errno this crate has no dedicated variant for
+    /// (`rtnetlink`'s own error). `EEXIST`, `ENOENT`/`ESRCH` and `EPERM`/`EACCES` are mapped to
+    /// [`NetlinkError::AlreadyExists`], [`NetlinkError::NotFound`] and
+    /// [`NetlinkError::PermissionDenied`] by the `From<rtnetlink::Error>` conversion.
     #[error(transparent)]
-    Netlink(#[from] rtnetlink::Error),
+    Netlink(rtnetlink::Error),
+
+    /// The kernel refused the request for lack of privilege (`EPERM`/`EACCES`, typically a
+    /// missing `CAP_NET_ADMIN`).
+    #[error("permission denied by the kernel: {0}")]
+    PermissionDenied(String),
 
     /// `interface` does not exist in the kernel's link table.
     #[error("interface {0:?} not found")]
@@ -45,4 +52,74 @@ pub enum NetlinkError {
     /// something that is already there).
     #[error("kernel object already exists: {0}")]
     AlreadyExists(String),
+}
+
+const EPERM: i32 = 1;
+const ENOENT: i32 = 2;
+const ESRCH: i32 = 3;
+const EACCES: i32 = 13;
+const EEXIST: i32 = 17;
+
+impl From<rtnetlink::Error> for NetlinkError {
+    /// Maps the kernel's errno onto the typed variants so callers can tell "already there"
+    /// from a genuine failure on a real kernel exactly as they can on `FakeNetlink`.
+    fn from(error: rtnetlink::Error) -> Self {
+        let errno = match &error {
+            rtnetlink::Error::NetlinkError(message) => {
+                Some(message.raw_code().abs()).filter(|code| *code != 0)
+            }
+            _ => None,
+        };
+        match errno {
+            Some(EEXIST) => Self::AlreadyExists(error.to_string()),
+            Some(ENOENT | ESRCH) => Self::NotFound(error.to_string()),
+            Some(EPERM | EACCES) => Self::PermissionDenied(error.to_string()),
+            _ => Self::Netlink(error),
+        }
+    }
+}
+
+impl NetlinkError {
+    /// Whether the kernel (or fake) reported the object as already existing (`EEXIST`).
+    pub fn is_already_exists(&self) -> bool {
+        matches!(self, Self::AlreadyExists(_))
+    }
+
+    /// Whether the kernel (or fake) reported the object as absent (`ENOENT`/`ESRCH`).
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::NotFound(_))
+    }
+
+    /// Whether the kernel refused for lack of privilege (`EPERM`/`EACCES`).
+    pub fn is_permission_denied(&self) -> bool {
+        matches!(self, Self::PermissionDenied(_))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rtnetlink::packet_core::{ErrorBuffer, ErrorMessage, Parseable};
+
+    use super::*;
+
+    fn kernel_error(errno: i32) -> rtnetlink::Error {
+        let bytes = (-errno).to_ne_bytes();
+        let buffer = ErrorBuffer::new_checked(&bytes).expect("a bare error code is a valid buffer");
+        rtnetlink::Error::NetlinkError(ErrorMessage::parse(&buffer).expect("error message parses"))
+    }
+
+    #[test]
+    fn kernel_errnos_map_to_typed_variants() {
+        assert!(NetlinkError::from(kernel_error(EEXIST)).is_already_exists());
+        assert!(NetlinkError::from(kernel_error(ESRCH)).is_not_found());
+        assert!(NetlinkError::from(kernel_error(ENOENT)).is_not_found());
+        assert!(NetlinkError::from(kernel_error(EPERM)).is_permission_denied());
+        assert!(NetlinkError::from(kernel_error(EACCES)).is_permission_denied());
+    }
+
+    #[test]
+    fn unrecognised_errnos_stay_generic() {
+        let error = NetlinkError::from(kernel_error(22));
+        assert!(matches!(error, NetlinkError::Netlink(_)));
+    }
 }
