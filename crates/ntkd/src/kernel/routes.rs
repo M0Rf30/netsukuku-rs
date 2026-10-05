@@ -254,12 +254,20 @@ impl<K: Netlink> RouteInstaller<K> {
                 .get(&destination)
                 .expect("destination came from self.applied's own keys")
                 .clone();
-            self.kernel
+            match self
+                .kernel
                 .remove_route(RouteKey {
                     destination: previous.destination,
                     table: previous.table,
                 })
-                .await?;
+                .await
+            {
+                Ok(()) => {}
+                // The kernel already dropped it (link down, prefsrc address removed): the
+                // desired state is reached, so forget the entry instead of wedging on it.
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
             self.applied.remove(&destination);
             delta.removed += 1;
         }
@@ -275,12 +283,18 @@ impl<K: Netlink> RouteInstaller<K> {
     /// [`RouteError::Netlink`] if a kernel mutation fails.
     pub async fn teardown(&mut self) -> Result<(), RouteError> {
         for (_, spec) in std::mem::take(&mut self.applied) {
-            self.kernel
+            match self
+                .kernel
                 .remove_route(RouteKey {
                     destination: spec.destination,
                     table: spec.table,
                 })
-                .await?;
+                .await
+            {
+                Ok(()) => {}
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
         }
         if let Some(address) = self.identity_address.take() {
             self.kernel
@@ -920,5 +934,93 @@ mod tests {
             reused, table,
             "a released table must be the next one handed out"
         );
+    }
+}
+
+#[cfg(test)]
+mod resilience_tests {
+    use super::*;
+    use ntk_netlink::{FakeNetlink, LinkInfo, RouteTable};
+    use ntk_qspn::RouteEntry;
+
+    pub(super) fn links() -> Vec<LinkInfo> {
+        vec![LinkInfo {
+            index: 1,
+            name: "lo".into(),
+            is_up: true,
+        }]
+    }
+
+    pub(super) fn path(arc: u32) -> RoutePath {
+        RoutePath {
+            arc: ArcId::from(arc),
+            hops: Vec::new(),
+            cost: Cost::Finite(10),
+            nodes_inside: 0,
+        }
+    }
+
+    pub(super) fn snapshot(destinations: &[(HCoord, u32)]) -> RouteSnapshot {
+        RouteSnapshot {
+            levels: vec![
+                destinations
+                    .iter()
+                    .map(|(destination, arc)| RouteEntry {
+                        destination: *destination,
+                        paths: vec![path(*arc)],
+                    })
+                    .collect(),
+                Vec::new(),
+            ],
+        }
+    }
+
+    pub(super) fn installer() -> RouteInstaller<FakeNetlink> {
+        let topology = ntk_common::Topology::new([4, 2]).unwrap();
+        let naddr = Naddr::new(topology, [1, 0]).unwrap();
+        let mut installer =
+            RouteInstaller::new(FakeNetlink::with_links(links()), naddr, 200, 9_990);
+        let via: Ipv4Addr = "169.254.1.1".parse().unwrap();
+        for arc in 1..=3 {
+            installer.set_arc_endpoint(ArcId::from(arc), via, Interface::name("lo"));
+        }
+        installer
+    }
+
+    #[tokio::test]
+    async fn route_already_flushed_by_the_kernel_does_not_wedge_apply_or_teardown() {
+        let mut installer = installer();
+        installer.install_identity().await.unwrap();
+        let (a, b) = (HCoord::new(0, 2), HCoord::new(0, 3));
+        installer.apply(&snapshot(&[(a, 1), (b, 2)])).await.unwrap();
+        // The kernel drops both routes behind the daemon's back (link down).
+        for spec in installer.kernel_ref().list_routes(Some(200)).await.unwrap() {
+            installer
+                .kernel_ref()
+                .remove_route(RouteKey {
+                    destination: spec.destination,
+                    table: 200,
+                })
+                .await
+                .unwrap();
+        }
+        let delta = installer.apply(&snapshot(&[])).await.unwrap();
+        assert_eq!(delta.removed, 2);
+        assert!(
+            installer.applied.is_empty(),
+            "vanished routes must be forgotten"
+        );
+
+        installer.apply(&snapshot(&[(a, 1)])).await.unwrap();
+        installer
+            .kernel_ref()
+            .remove_route(RouteKey {
+                destination: installer.applied[&a].destination,
+                table: 200,
+            })
+            .await
+            .unwrap();
+        installer.teardown().await.unwrap();
+        assert!(!installer.is_installed());
     }
 }
