@@ -82,6 +82,14 @@ fn is_deeper_or_equal(wa: &WaitingAnswer, tuple: &TupleGNode, strictly: bool) ->
     }
 }
 
+/// How long a just-published `set_participant` fact is remembered to suppress re-flooding a
+/// duplicate (`RecentPublishedListRemoveTasklet`, `research/impl/vala/peerservices/
+/// map_handler.vala:414-429`).
+const RECENT_PUBLISHED_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Size at which expired suppression entries are swept, so the table stays bounded.
+const RECENT_PUBLISHED_PRUNE_AT: usize = 4096;
+
 /// Commands the [`Manager`] actor processes. Every read of mutable PeerServices state — the
 /// service registry, participation maps, or in-flight routing state — goes through one of
 /// these; nothing outside [`actor`](self) ever locks or shares that state directly.
@@ -160,10 +168,6 @@ enum Cmd {
         at: HCoord,
         reply: oneshot::Sender<Option<HCoord>>,
     },
-    ExpireRecentlyPublished {
-        p_id: ServiceId,
-        at: HCoord,
-    },
     /// The locally-registered optional services this node currently participates in
     /// (`State.my_services`) — read by the periodic participation re-announce
     /// (`crate::gossip::reannounce_participation`).
@@ -231,7 +235,7 @@ struct State {
     /// logged its one-time `warn` (`State::add_participant`'s own doc).
     capacity_warned: BTreeSet<ServiceId>,
     retrieved_below_level: usize,
-    recent_published: BTreeSet<(ServiceId, HCoord)>,
+    recent_published: BTreeMap<(ServiceId, HCoord), tokio::time::Instant>,
     waiting: BTreeMap<i32, WaitingAnswer>,
     next_msg_id: i32,
     /// Per-actor random key for [`Cmd::NextMsgId`]'s unguessable ids.
@@ -424,16 +428,24 @@ impl State {
                 }
             }
             Cmd::ApplyParticipant { p_id, at, reply } => {
-                if self.recent_published.contains(&(p_id, at)) {
+                // Suppress a re-flood of the same fact for `RECENT_PUBLISHED_TTL`; expiry is
+                // checked lazily here instead of by one sleeping task per fact.
+                let now = tokio::time::Instant::now();
+                if self
+                    .recent_published
+                    .get(&(p_id, at))
+                    .is_some_and(|&until| now < until)
+                {
                     let _ = reply.send(None);
                     return;
                 }
-                self.recent_published.insert((p_id, at));
+                if self.recent_published.len() >= RECENT_PUBLISHED_PRUNE_AT {
+                    self.recent_published.retain(|_, &mut until| now < until);
+                }
+                self.recent_published
+                    .insert((p_id, at), now + RECENT_PUBLISHED_TTL);
                 self.add_participant(p_id, at);
                 let _ = reply.send(Some(at));
-            }
-            Cmd::ExpireRecentlyPublished { p_id, at } => {
-                self.recent_published.remove(&(p_id, at));
             }
             Cmd::MyOptionalServices { reply } => {
                 let _ = reply.send(self.my_services.iter().copied().collect());
@@ -611,7 +623,7 @@ impl Manager {
             participant_set: BTreeMap::new(),
             capacity_warned: BTreeSet::new(),
             retrieved_below_level,
-            recent_published: BTreeSet::new(),
+            recent_published: BTreeMap::new(),
             waiting: BTreeMap::new(),
             next_msg_id: 0,
             msg_id_hasher: std::collections::hash_map::RandomState::new(),
@@ -1034,18 +1046,13 @@ impl Handle {
 
     /// Applies a flooded `set_participant` fact, returning `Some(at)` if it was new and should
     /// be re-flooded to my own neighbors (`MapHandler.set_participant`,
-    /// `research/impl/vala/peerservices/map_handler.vala:383-418`) — the caller is responsible
-    /// for scheduling the matching 60-second `recent_published` expiry via
-    /// [`Handle::expire_recently_published`].
+    /// `research/impl/vala/peerservices/map_handler.vala:383-418`); the 60-second
+    /// `recent_published` suppression window expires lazily inside the actor.
     /// Actor shutdown and "nothing to re-flood" both collapse to `None`.
     pub(crate) async fn apply_participant(&self, p_id: ServiceId, at: HCoord) -> Option<HCoord> {
         self.call(|reply| Cmd::ApplyParticipant { p_id, at, reply })
             .await
             .flatten()
-    }
-
-    pub(crate) async fn expire_recently_published(&self, p_id: ServiceId, at: HCoord) {
-        self.cast(Cmd::ExpireRecentlyPublished { p_id, at }).await;
     }
 
     /// Falls back to an empty (but valid) set if the actor already shut down — a caller reading
@@ -1331,6 +1338,34 @@ mod capacity_tests {
         let snapshot = handle.snapshot().borrow().clone();
         let tracked: Vec<ServiceId> = snapshot.participants.keys().copied().collect();
         assert_eq!(tracked, vec![ServiceId::new(1), ServiceId::new(2)]);
+
+        cancel.cancel();
+        manager_task.await.unwrap();
+    }
+
+    /// A republished fact is suppressed for the TTL, then accepted again — without any
+    /// per-fact sleeper task.
+    #[tokio::test(start_paused = true)]
+    async fn recently_published_suppression_expires_lazily() {
+        let topology = Topology::new([50]).unwrap();
+        let my_pos = Naddr::new(topology.clone(), vec![0]).unwrap();
+        let env: Arc<dyn RoutingEnv> = Arc::new(NoopEnv);
+        let (manager, handle) = Manager::new(
+            topology.clone(),
+            my_pos,
+            env,
+            Config::default(),
+            topology.levels(),
+        );
+        let cancel = CancellationToken::new();
+        let manager_task = tokio::spawn(manager.run(cancel.child_token()));
+
+        let p_id = ServiceId::new(1);
+        let at = HCoord::new(0, 1);
+        assert_eq!(handle.apply_participant(p_id, at).await, Some(at));
+        assert_eq!(handle.apply_participant(p_id, at).await, None);
+        tokio::time::advance(RECENT_PUBLISHED_TTL + std::time::Duration::from_secs(1)).await;
+        assert_eq!(handle.apply_participant(p_id, at).await, Some(at));
 
         cancel.cancel();
         manager_task.await.unwrap();

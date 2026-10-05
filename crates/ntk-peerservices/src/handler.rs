@@ -11,6 +11,10 @@
 //! round trip a `notify`-style caller isn't even waiting for.
 
 use std::fmt;
+use std::future::Future;
+use std::sync::Mutex;
+
+use tokio::task::JoinSet;
 
 use futures::future::BoxFuture;
 use ntk_common::Topology;
@@ -75,7 +79,14 @@ fn require_tuple_gnode(
 /// matches `ntk_rpc::RpcHandler`'s own contract.
 pub struct PeersRpcHandler {
     handle: Handle,
+    /// Every task an inbound notify spawns, capped at [`MAX_INFLIGHT_TASKS`] and aborted when
+    /// the handler is dropped, so a flooding peer can neither grow task memory without bound nor
+    /// leave work running past shutdown.
+    tasks: Mutex<JoinSet<()>>,
 }
+
+/// Most inbound-notify tasks (forwarded messages, gossip) in flight at once.
+const MAX_INFLIGHT_TASKS: usize = 1024;
 
 impl fmt::Debug for PeersRpcHandler {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -87,7 +98,21 @@ impl PeersRpcHandler {
     /// Dispatches onto `handle`.
     #[must_use]
     pub fn new(handle: Handle) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            tasks: Mutex::new(JoinSet::new()),
+        }
+    }
+
+    /// Spawns `fut` into the tracked set; `false` (and `fut` dropped) when the cap is reached.
+    fn spawn_tracked(&self, fut: impl Future<Output = ()> + Send + 'static) -> bool {
+        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        while tasks.try_join_next().is_some() {}
+        if tasks.len() >= MAX_INFLIGHT_TASKS {
+            return false;
+        }
+        tasks.spawn(fut);
+        true
     }
 }
 
@@ -111,7 +136,12 @@ impl RpcHandler for PeersRpcHandler {
                 Call::PeersForwardPeerMessage(tv) => {
                     let mf = unpack_forwarder(&topology, &tv).map_err(decode_err)?;
                     let handle = self.handle.clone();
-                    tokio::spawn(async move { handle.forward_msg(mf).await });
+                    if !self.spawn_tracked(async move { handle.forward_msg(mf).await }) {
+                        return Err(remote_err(
+                            ErrorDomain::Unspecified,
+                            "too many in-flight forwarded messages",
+                        ));
+                    }
                     Ok(empty_ok())
                 }
                 Call::PeersGetRequest(args) => {
@@ -196,13 +226,18 @@ impl RpcHandler for PeersRpcHandler {
                     let tuple = require_tuple_gnode(&topology, args.tuple)?;
                     let p_id = ServiceId::try_from(args.p_id).map_err(decode_err)?;
                     let handle = self.handle.clone();
-                    tokio::spawn(async move { handle.handle_set_participant(p_id, tuple).await });
+                    // Gossip is best-effort: shed it when saturated.
+                    let _ = self.spawn_tracked(async move {
+                        handle.handle_set_participant(p_id, tuple).await
+                    });
                     Ok(empty_ok())
                 }
                 Call::PeersGiveParticipantMaps(tv) => {
                     let maps = unpack_participant_set(&topology, &tv).map_err(decode_err)?;
                     let handle = self.handle.clone();
-                    tokio::spawn(async move { handle.handle_give_participant_maps(maps).await });
+                    let _ = self.spawn_tracked(async move {
+                        handle.handle_give_participant_maps(maps).await
+                    });
                     Ok(empty_ok())
                 }
                 Call::PeersAskParticipantMaps(Empty {}) => {
@@ -301,6 +336,18 @@ mod tests {
 
     fn unicast() -> TypedValue {
         TypedValue::new(String::new(), Vec::new())
+    }
+
+    #[tokio::test]
+    async fn inbound_notify_tasks_are_capped_and_tracked() {
+        let (handler, _cancel) = handler_for(&[2, 2], vec![0, 0]);
+        for _ in 0..MAX_INFLIGHT_TASKS {
+            assert!(handler.spawn_tracked(std::future::pending()));
+        }
+        assert!(
+            !handler.spawn_tracked(std::future::pending()),
+            "the task past the cap must be shed"
+        );
     }
 
     // -----------------------------------------------------------------------------------------

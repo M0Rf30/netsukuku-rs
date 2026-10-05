@@ -6,7 +6,6 @@
 //! (`research/impl/vala/peerservices/map_handler.vala`).
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use ntk_common::HCoord;
 
@@ -14,11 +13,6 @@ use crate::actor::Handle;
 use crate::participation::ParticipantSet;
 use crate::service::{PeerService, ServiceId};
 use crate::tuple::{GNodeRelation, TupleGNode, convert_tuple_gnode, make_tuple_gnode};
-
-/// How long a just-published `set_participant` fact is remembered to suppress re-flooding a
-/// duplicate (`RecentPublishedListRemoveTasklet`, `research/impl/vala/peerservices/
-/// map_handler.vala:414-429`).
-const RECENT_PUBLISHED_TTL: Duration = Duration::from_secs(60);
 
 async fn flood_set_participant(handle: &Handle, p_id: ServiceId, gn: &TupleGNode) {
     for neighbor in handle.env.neighbors() {
@@ -114,12 +108,6 @@ impl Handle {
             self.topology().levels(),
         );
         flood_set_participant(self, p_id, &gn).await;
-
-        let handle = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(RECENT_PUBLISHED_TTL).await;
-            handle.expire_recently_published(p_id, at).await;
-        });
     }
 
     /// Applies and re-forwards an inbound `give_participant_maps` snapshot if it is fresher than
