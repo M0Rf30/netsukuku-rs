@@ -922,6 +922,17 @@ impl Handle {
         self.cast(Cmd::UnregisterWaiting { msg_id }).await;
     }
 
+    /// A drop guard that unregisters `msg_id`'s [`WaitingAnswer`] when it goes out of scope, so
+    /// a `contact_peer` future cancelled mid-wait (e.g. by `replicate`'s overall timeout) cannot
+    /// leak the entry. Explicit [`Self::unregister_waiting`] calls stay valid: removal is
+    /// idempotent.
+    pub(crate) fn waiting_guard(&self, msg_id: i32) -> WaitingGuard {
+        WaitingGuard {
+            handle: self.clone(),
+            msg_id,
+        }
+    }
+
     /// An actor already shut down can't know about any `msg_id`, so that case folds into the
     /// same [`GetRequestOutcome::UnknownMessage`] a live actor would answer with.
     pub(crate) async fn get_request(
@@ -1038,6 +1049,33 @@ impl Handle {
         self.call(|reply| Cmd::ApplyParticipantSet { incoming, reply })
             .await
             .flatten()
+    }
+}
+
+/// See [`Handle::waiting_guard`].
+pub(crate) struct WaitingGuard {
+    handle: Handle,
+    msg_id: i32,
+}
+
+impl Drop for WaitingGuard {
+    fn drop(&mut self) {
+        let cmd = Cmd::UnregisterWaiting {
+            msg_id: self.msg_id,
+        };
+        match self.handle.cmd_tx.try_send(cmd) {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+            Err(mpsc::error::TrySendError::Full(cmd)) => {
+                // Queue momentarily full: finish the removal off-thread rather than blocking a
+                // destructor. Without a runtime the actor is gone anyway.
+                if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                    let tx = self.handle.cmd_tx.clone();
+                    rt.spawn(async move {
+                        let _ = tx.send(cmd).await;
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -1168,5 +1206,43 @@ mod capacity_tests {
             first < second && second < third,
             "sequences must strictly increase"
         );
+    }
+
+    /// A `contact_peer` future dropped mid-wait (e.g. `replicate`'s timeout) must not leave its
+    /// `WaitingAnswer` registered forever.
+    #[tokio::test]
+    async fn dropping_the_waiting_guard_unregisters_the_waiting_answer() {
+        let topology = Topology::new([4, 4]).unwrap();
+        let my_pos = Naddr::new(topology.clone(), vec![0, 0]).unwrap();
+        let env: Arc<dyn RoutingEnv> = Arc::new(NoopEnv);
+        let (manager, handle) = Manager::new(
+            topology.clone(),
+            my_pos,
+            env,
+            Config::default(),
+            topology.levels(),
+        );
+        let cancel = CancellationToken::new();
+        let manager_task = tokio::spawn(manager.run(cancel.child_token()));
+
+        let min_target = crate::tuple::TupleGNode::new(topology.clone(), 1, vec![1]).unwrap();
+        let respondant = crate::tuple::TupleNode::new(topology.clone(), vec![0, 0]).unwrap();
+        let _rx = handle.register_waiting(7, min_target, None).await.unwrap();
+        let guard = handle.waiting_guard(7);
+        assert_eq!(
+            handle.get_request(7, respondant.clone()).await,
+            Err(GetRequestOutcome::InvalidRequest),
+            "the entry is registered while the guard lives"
+        );
+
+        drop(guard);
+        assert_eq!(
+            handle.get_request(7, respondant).await,
+            Err(GetRequestOutcome::UnknownMessage),
+            "dropping the guard must remove the entry"
+        );
+
+        cancel.cancel();
+        manager_task.await.unwrap();
     }
 }

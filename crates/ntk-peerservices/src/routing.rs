@@ -269,6 +269,7 @@ impl Handle {
                 else {
                     return Err(actor_shut_down());
                 };
+                let _waiting_guard = self.waiting_guard(msg_id);
 
                 let sent = self.try_forward(&mf, x).await;
                 if !sent {
