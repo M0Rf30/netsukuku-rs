@@ -161,6 +161,7 @@ enum Cmd {
         reply: oneshot::Sender<Option<HCoord>>,
     },
     ExpireRecentlyPublished {
+        p_id: ServiceId,
         at: HCoord,
     },
     /// The locally-registered optional services this node currently participates in
@@ -230,7 +231,7 @@ struct State {
     /// logged its one-time `warn` (`State::add_participant`'s own doc).
     capacity_warned: BTreeSet<ServiceId>,
     retrieved_below_level: usize,
-    recent_published: BTreeSet<HCoord>,
+    recent_published: BTreeSet<(ServiceId, HCoord)>,
     waiting: BTreeMap<i32, WaitingAnswer>,
     next_msg_id: i32,
     snapshot_tx: watch::Sender<Snapshot>,
@@ -413,16 +414,16 @@ impl State {
                 }
             }
             Cmd::ApplyParticipant { p_id, at, reply } => {
-                if self.recent_published.contains(&at) {
+                if self.recent_published.contains(&(p_id, at)) {
                     let _ = reply.send(None);
                     return;
                 }
-                self.recent_published.insert(at);
+                self.recent_published.insert((p_id, at));
                 self.add_participant(p_id, at);
                 let _ = reply.send(Some(at));
             }
-            Cmd::ExpireRecentlyPublished { at } => {
-                self.recent_published.remove(&at);
+            Cmd::ExpireRecentlyPublished { p_id, at } => {
+                self.recent_published.remove(&(p_id, at));
             }
             Cmd::MyOptionalServices { reply } => {
                 let _ = reply.send(self.my_services.iter().copied().collect());
@@ -985,8 +986,8 @@ impl Handle {
             .flatten()
     }
 
-    pub(crate) async fn expire_recently_published(&self, at: HCoord) {
-        self.cast(Cmd::ExpireRecentlyPublished { at }).await;
+    pub(crate) async fn expire_recently_published(&self, p_id: ServiceId, at: HCoord) {
+        self.cast(Cmd::ExpireRecentlyPublished { p_id, at }).await;
     }
 
     /// Falls back to an empty (but valid) set if the actor already shut down — a caller reading

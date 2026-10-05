@@ -118,7 +118,7 @@ impl Handle {
         let handle = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(RECENT_PUBLISHED_TTL).await;
-            handle.expire_recently_published(at).await;
+            handle.expire_recently_published(p_id, at).await;
         });
     }
 
@@ -373,6 +373,45 @@ mod reannounce_participation_tests {
 
         cancel.cancel();
         manager_a_task.await.unwrap();
+        manager_b_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn two_services_announced_for_the_same_gnode_are_both_recorded() {
+        let topology = Topology::new([2, 2]).unwrap();
+        let pos_a = Naddr::new(topology.clone(), vec![0, 0]).unwrap();
+        let pos_b = Naddr::new(topology.clone(), vec![1, 0]).unwrap();
+        let cancel = CancellationToken::new();
+        let env_b: Arc<dyn RoutingEnv> = Arc::new(SlotEnv {
+            neighbor: Mutex::new(None),
+        });
+        let (manager_b, handle_b) = Manager::new(
+            topology.clone(),
+            pos_b,
+            env_b,
+            Config::default(),
+            topology.levels(),
+        );
+        let manager_b_task = tokio::spawn(manager_b.run(cancel.child_token()));
+
+        let gn = crate::tuple::make_tuple_gnode(
+            &topology,
+            pos_a.positions(),
+            HCoord::new(0, pos_a.positions()[0]),
+            topology.levels(),
+        );
+        let first = ServiceId::new(900);
+        let second = ServiceId::new(901);
+        handle_b.handle_set_participant(first, gn.clone()).await;
+        handle_b.handle_set_participant(second, gn).await;
+
+        assert_eq!(
+            handle_b.gnode_participates(second, topology.levels()).await,
+            Some(true),
+            "the second service's fact for the same g-node must not be deduplicated away"
+        );
+
+        cancel.cancel();
         manager_b_task.await.unwrap();
     }
 }
