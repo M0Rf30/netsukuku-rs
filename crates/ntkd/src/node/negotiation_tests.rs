@@ -106,7 +106,7 @@ impl Medium {
         self.dispatchers
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&ip.octets()[2])
+            .get(&ip.octets()[2].wrapping_sub(1))
             .cloned()
     }
 }
@@ -183,7 +183,9 @@ fn addr_allocator(idx: u32) -> Box<dyn FnMut() -> String + Send> {
     let mut n = 0u8;
     Box::new(move || {
         n += 1;
-        std::net::Ipv4Addr::new(10, 88, idx as u8, n).to_string()
+        // Inside 169.254.0.0/16 (outside the reserved /24): neighborhood rejects any other
+        // peer-announced NIC address.
+        std::net::Ipv4Addr::new(169, 254, (idx + 1) as u8, n).to_string()
     })
 }
 
@@ -535,6 +537,40 @@ async fn discovering_a_peer_joins_and_adopts_the_negotiated_position() {
     assert_eq!(
         rule_removes, 1,
         "exactly one teardown of the trivial generation's rule"
+    );
+}
+
+/// The hooking actor is carried across migrations, so it must outlive the first generation's
+/// cancellation: after a node has migrated, hooking must still accept commands instead of
+/// answering `ActorGone` (which silently ended all later arc handling and merge negotiation).
+#[tokio::test]
+async fn hooking_actor_keeps_serving_commands_after_a_migration() {
+    let medium = Arc::new(Medium::default());
+    let node0 = spawn_node(0, "[8]", None, &medium).await;
+    let node1 = spawn_node(1, "[8]", None, &medium).await;
+    let pos0 = node0.qspn().my_naddr().positions().to_vec();
+    let pos1 = node1.qspn().my_naddr().positions().to_vec();
+    let moved = wait_until(
+        || {
+            node0.qspn().my_naddr().positions() != pos0
+                || node1.qspn().my_naddr().positions() != pos1
+        },
+        Duration::from_secs(30),
+    )
+    .await;
+    assert!(moved, "neither node ever adopted a negotiated position");
+    let loser = if node0.qspn().my_naddr().positions() == pos0 {
+        &node1
+    } else {
+        &node0
+    };
+    // Let the migration finish installing its generation before probing.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let probe = ntk_hooking::ArcId(u64::MAX - 1);
+    let added = loser.hooking().add_arc(probe).await;
+    assert!(
+        !matches!(added, Err(ntk_hooking::HookingError::ActorGone)),
+        "hooking actor died with the first generation: {added:?}"
     );
 }
 

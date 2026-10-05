@@ -203,6 +203,10 @@ pub async fn run(
                     tracing::info!("shutdown signal received, cancelling every actor");
                     break;
                 }
+                () = running.fatal.cancelled() => {
+                    failure = Some(anyhow::anyhow!("the node can no longer route; shutting down"));
+                    break;
+                }
                 joined = tasks.join_next() => match joined {
                     // Every actor is expected to run until `root_cancel` fires, so any
                     // completion now is abnormal; a panic leaves a live-looking daemon that no

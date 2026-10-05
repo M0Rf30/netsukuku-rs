@@ -240,6 +240,22 @@ impl NetworkInfo {
     pub fn is_bootstrapped(&self) -> bool {
         self.bootstrapped.load(Ordering::Relaxed)
     }
+
+    /// Resets what is tied to the retiring generation's position: the bootstrap latch (the
+    /// entering qspn is not bootstrapped yet, so peers must keep seeing `NotBootstrapped`) and
+    /// the `(level, pos)` foreign/same-network sets, whose keys are positions that no longer
+    /// describe this identity once it has moved.
+    pub fn reset_for_new_generation(&self) {
+        self.bootstrapped.store(false, Ordering::Relaxed);
+        self.foreign
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.same_network
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
 }
 
 /// A cached async eldership result: `None` while not yet queried, mirroring
@@ -307,30 +323,83 @@ impl EldershipCache {
 /// Refreshes every level's own eldership plus every currently-known destination's, then repeats
 /// on every subsequent [`ntk_qspn::QspnEvent`] until `cancel` fires.
 async fn run_eldership_cache(
-    qspn: QspnHandle,
+    mut generation: tokio::sync::watch::Receiver<QspnHandle>,
     cache: Arc<EldershipCache>,
     cancel: tokio_util::sync::CancellationToken,
 ) {
-    let levels = qspn.my_naddr().topology().levels();
-    let mut events = qspn.subscribe_events();
     loop {
-        for level in 0..levels {
-            cache.set_my(level, qspn.my_eldership(level).await.unwrap_or(None));
-        }
-        for (level, entries) in qspn.snapshot().levels.iter().enumerate() {
-            for entry in entries {
-                let pos = entry.destination.pos;
-                cache.set_foreign(level, pos, qspn.eldership(level, pos).await.unwrap_or(None));
+        let qspn = generation.borrow_and_update().clone();
+        let levels = qspn.my_naddr().topology().levels();
+        let mut events = qspn.subscribe_events();
+        loop {
+            for level in 0..levels {
+                cache.set_my(level, qspn.my_eldership(level).await.unwrap_or(None));
             }
-        }
-        tokio::select! {
-            () = cancel.cancelled() => return,
-            event = events.recv() => {
-                if event.is_err() && matches!(event, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
-                    return;
+            for (level, entries) in qspn.snapshot().levels.iter().enumerate() {
+                for entry in entries {
+                    let pos = entry.destination.pos;
+                    cache.set_foreign(level, pos, qspn.eldership(level, pos).await.unwrap_or(None));
+                }
+            }
+            let closed = tokio::select! {
+                () = cancel.cancelled() => return,
+                changed = generation.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    break;
+                }
+                event = events.recv() => {
+                    matches!(event, Err(tokio::sync::broadcast::error::RecvError::Closed))
+                }
+            };
+            if closed {
+                // This generation's qspn is gone; wait for a successor (or shutdown).
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    changed = generation.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        break;
+                    }
                 }
             }
         }
+    }
+}
+
+/// A value that can be swapped for a successor generation's while long-lived holders (the
+/// hooking actor outlives every migration) keep reading the current one.
+#[derive(Debug)]
+pub struct Live<T>(Arc<tokio::sync::watch::Sender<T>>);
+
+impl<T> Clone for Live<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T: Clone> Live<T> {
+    #[must_use]
+    pub fn new(value: T) -> Self {
+        Self(Arc::new(tokio::sync::watch::channel(value).0))
+    }
+
+    /// The current value.
+    #[must_use]
+    pub fn get(&self) -> T {
+        self.0.borrow().clone()
+    }
+
+    /// Replaces the value for every holder.
+    pub fn set(&self, value: T) {
+        self.0.send_replace(value);
+    }
+
+    #[must_use]
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<T> {
+        self.0.subscribe()
     }
 }
 
@@ -439,7 +508,8 @@ fn first_hop_link(
 /// Implements [`ntk_hooking::QspnView`] over the real [`QspnHandle`].
 #[derive(Debug)]
 pub struct QspnViewAdapter {
-    pub qspn: QspnHandle,
+    pub qspn: Live<QspnHandle>,
+    topology: Topology,
     pub net: Arc<NetworkInfo>,
     /// Per-level migration search radius (`hooking_epsilon`,
     /// `research/impl/vala/ntkd/configuration.vala:49-63`): smallest count of levels whose
@@ -458,15 +528,27 @@ impl QspnViewAdapter {
         tasks: &mut tokio::task::JoinSet<()>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Self {
-        let epsilon = hooking_epsilon(qspn.my_naddr().topology());
+        let topology = qspn.my_naddr().topology().clone();
+        let epsilon = hooking_epsilon(&topology);
         let eldership = Arc::new(EldershipCache::default());
-        tasks.spawn(run_eldership_cache(qspn.clone(), eldership.clone(), cancel));
+        let qspn = Live::new(qspn);
+        tasks.spawn(run_eldership_cache(
+            qspn.subscribe(),
+            eldership.clone(),
+            cancel,
+        ));
         Self {
             qspn,
+            topology,
             net,
             epsilon,
             eldership,
         }
+    }
+
+    /// Points this view at a successor generation's qspn (the topology never changes).
+    pub fn retarget(&self, qspn: QspnHandle) {
+        self.qspn.set(qspn);
     }
 }
 
@@ -485,7 +567,7 @@ fn hooking_epsilon(topology: &Topology) -> usize {
 
 impl ntk_hooking::QspnView for QspnViewAdapter {
     fn topology(&self) -> &Topology {
-        self.qspn.my_naddr().topology()
+        &self.topology
     }
 
     fn network_id(&self) -> i64 {
@@ -494,14 +576,14 @@ impl ntk_hooking::QspnView for QspnViewAdapter {
 
     fn n_nodes(&self) -> u64 {
         estimate_n_nodes(
-            &self.qspn.snapshot(),
+            &self.qspn.get().snapshot(),
             Some(&self.net),
             self.topology().levels().saturating_sub(1),
         )
     }
 
     fn my_pos(&self, level: usize) -> u32 {
-        self.qspn.my_naddr().pos(level).unwrap_or(0)
+        self.qspn.get().my_naddr().pos(level).unwrap_or(0)
     }
 
     fn my_eldership(&self, level: usize) -> i32 {
@@ -527,8 +609,9 @@ impl ntk_hooking::QspnView for QspnViewAdapter {
         level_adjacent_gnodes: usize,
         level_my_gnode: usize,
     ) -> Vec<ntk_hooking::AdjacentGNode> {
-        let snapshot = self.qspn.snapshot();
-        let my_naddr = self.qspn.my_naddr();
+        let qspn = self.qspn.get();
+        let snapshot = qspn.snapshot();
+        let my_naddr = qspn.my_naddr();
         let Some(entries) = snapshot.levels.get(level_adjacent_gnodes) else {
             return Vec::new();
         };
@@ -575,14 +658,14 @@ impl ntk_hooking::QspnView for QspnViewAdapter {
 /// module doc for why these are two different transports, not one.
 #[derive(Debug)]
 pub struct CoordinatorClientAdapter {
-    pub dht: ntk_coordinator::CoordinatorClient,
-    pub local: ntk_coordinator::Handle,
+    pub dht: Live<ntk_coordinator::CoordinatorClient>,
+    pub local: Live<ntk_coordinator::Handle>,
     /// This identity's own qspn handle and network-scoped facts — used only to compute
     /// `Self::foreign_exclusions` before every `self.dht` DHT round trip. See
     /// [`ntk_coordinator::CoordinatorClient::reserve`]'s own doc for why this is required, not
     /// an optional hardening: without it, `target_for`'s elect-key can resolve to a physically
     /// reachable but logically foreign node.
-    pub qspn: QspnHandle,
+    pub qspn: Live<QspnHandle>,
     pub net: Arc<NetworkInfo>,
     /// Local shortcut for [`Self::decide_merge`]'s own recently-decided verdicts, keyed by
     /// `neighbor_network_id` — avoids a Coordinator round trip for every ask while a verdict
@@ -609,20 +692,33 @@ impl CoordinatorClientAdapter {
         merge_decision_ttl: Duration,
     ) -> Self {
         Self {
-            dht,
-            local,
-            qspn,
+            dht: Live::new(dht),
+            local: Live::new(local),
+            qspn: Live::new(qspn),
             net,
             merge_decisions: Mutex::new(HashMap::new()),
             merge_decision_ttl,
         }
     }
 
+    /// Points this adapter at a successor generation's coordinator/qspn, so the hooking actor
+    /// (which outlives every migration) never talks to a retired generation's dead actors.
+    pub fn retarget(
+        &self,
+        dht: ntk_coordinator::CoordinatorClient,
+        local: ntk_coordinator::Handle,
+        qspn: QspnHandle,
+    ) {
+        self.dht.set(dht);
+        self.local.set(local);
+        self.qspn.set(qspn);
+    }
+
     /// See [`Self::qspn`]'s/[`Self::net`]'s own doc, and
     /// [`ntk_coordinator::CoordinatorClient::reserve`]'s for why every DHT round trip below
     /// passes this.
     fn foreign_exclusions(&self) -> Vec<ntk_peerservices::TupleGNode> {
-        foreign_exclusions(&self.qspn, &self.net)
+        foreign_exclusions(&self.qspn.get(), &self.net)
     }
 }
 
@@ -649,6 +745,7 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
     fn n_nodes(&self) -> BoxFuture<'_, u64> {
         Box::pin(async move {
             self.dht
+                .get()
                 .get_n_nodes(&self.foreign_exclusions())
                 .await
                 .unwrap_or(1)
@@ -670,10 +767,11 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
         req: EvaluateEnterRequest,
     ) -> BoxFuture<'_, Result<usize, CoordinatorError>> {
         Box::pin(async move {
-            let top = self.local.topology().levels();
+            let top = self.local.get().topology().levels();
             let data = codec::encode_evaluate_enter_request(&req);
             let reply = self
                 .dht
+                .get()
                 .evaluate_enter(top, data)
                 .await
                 .map_err(proxy_err)?;
@@ -738,10 +836,14 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
     fn begin_enter(&self, lvl: usize) -> BoxFuture<'_, Result<(), CoordinatorError>> {
         Box::pin(async move {
             if lvl == 0 {
-                self.local.begin_enter(1, codec::encode_unit(), &[]).await;
+                self.local
+                    .get()
+                    .begin_enter(1, codec::encode_unit(), &[])
+                    .await;
                 return Ok(());
             }
             self.dht
+                .get()
                 .begin_enter(lvl + 1, codec::encode_unit())
                 .await
                 .map(drop)
@@ -757,11 +859,13 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
         Box::pin(async move {
             if lvl == 0 {
                 self.local
+                    .get()
                     .completed_enter(1, codec::encode_unit(), &[])
                     .await;
                 return Ok(());
             }
             self.dht
+                .get()
                 .completed_enter(lvl + 1, codec::encode_unit())
                 .await
                 .map(drop)
@@ -773,10 +877,14 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
     fn abort_enter(&self, lvl: usize) -> BoxFuture<'_, Result<(), CoordinatorError>> {
         Box::pin(async move {
             if lvl == 0 {
-                self.local.abort_enter(1, codec::encode_unit(), &[]).await;
+                self.local
+                    .get()
+                    .abort_enter(1, codec::encode_unit(), &[])
+                    .await;
                 return Ok(());
             }
             self.dht
+                .get()
                 .abort_enter(lvl + 1, codec::encode_unit())
                 .await
                 .map(drop)
@@ -805,6 +913,7 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
             let exclude = self.foreign_exclusions();
             let outcome = self
                 .dht
+                .get()
                 .reserve(host_lvl, i64::from(reserve_request_id), &exclude)
                 .await;
             tracing::info!(
@@ -830,6 +939,7 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
         Box::pin(async move {
             let _ = self
                 .dht
+                .get()
                 .delete_reserve(
                     host_lvl,
                     i64::from(reserve_request_id),
@@ -842,6 +952,7 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
     fn prepare_migration(&self, lvl: usize, migration_id: i32) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             self.local
+                .get()
                 .prepare_migration(lvl, codec::encode_migration_id(migration_id))
                 .await;
         })
@@ -850,6 +961,7 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
     fn finish_migration(&self, lvl: usize, data: FinishMigrationData) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             self.local
+                .get()
                 .finish_migration(lvl, codec::encode_finish_migration_data(&data))
                 .await;
         })
@@ -863,6 +975,7 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
                 "migration-instrumentation: prepare_enter propagating"
             );
             self.local
+                .get()
                 .prepare_enter(lvl, codec::encode_enter_id(enter_id))
                 .await;
         })
@@ -935,11 +1048,11 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
             // keeps the shared record from growing forever with verdicts nobody has asked
             // about in a long time, and guarantees a later ask for any of those keys recomputes
             // rather than resurrecting a decision made from long-gone inputs.
-            let top = self.local.topology().levels();
+            let top = self.local.get().topology().levels();
             let now_ms = codec::now_millis();
             let ttl_ms = u64::try_from(self.merge_decision_ttl.as_millis()).unwrap_or(u64::MAX);
             let exclude = self.foreign_exclusions();
-            let mut mem = match self.dht.hooking_memory(top, &exclude).await {
+            let mut mem = match self.dht.get().hooking_memory(top, &exclude).await {
                 Ok(Some(tv)) => codec::decode_hooking_memory(&tv).unwrap_or_default(),
                 _ => codec::HookingMemory::default(),
             };
@@ -961,6 +1074,7 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
                         .insert(req.neighbor_network_id, (decision, now_ms));
                     let _ = self
                         .dht
+                        .get()
                         .set_hooking_memory(top, Some(codec::encode_hooking_memory(&mem)), &exclude)
                         .await;
                     (decision, Some(my_n_nodes))
@@ -993,6 +1107,7 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
                 "migration-instrumentation: finish_enter propagating"
             );
             self.local
+                .get()
                 .finish_enter(lvl, codec::encode_finish_enter_data(&data))
                 .await;
         })
@@ -2619,5 +2734,34 @@ mod coordinator_map_fp_id_tests {
         a.set_network_id(91_000_002);
         assert_ne!(before, a.network_id());
         assert_eq!(a.network_id(), 91_000_002);
+    }
+}
+
+#[cfg(test)]
+mod generation_reset_tests {
+    use super::{Live, NetworkInfo};
+
+    /// The bootstrap latch and position-keyed foreign facts belong to the retiring generation:
+    /// an entering successor must read as not yet bootstrapped, with no stale foreign marks.
+    #[test]
+    fn resetting_for_a_new_generation_clears_the_latch_and_position_facts() {
+        let net = NetworkInfo::new(1, 7);
+        net.set_bootstrapped();
+        net.note_foreign(0, 3);
+        net.note_same_network(0, 4);
+        net.reset_for_new_generation();
+        assert!(!net.is_bootstrapped());
+        assert!(!net.is_foreign(0, 3));
+        assert!(net.foreign_positions().is_empty());
+        assert_eq!(net.network_id(), 7, "the network id is owned by migrate");
+    }
+
+    /// Holders of a `Live` clone must see a value swapped in through any other clone.
+    #[test]
+    fn a_live_value_swapped_through_one_clone_is_seen_by_every_holder() {
+        let a = Live::new(1u32);
+        let b = a.clone();
+        a.set(2);
+        assert_eq!(b.get(), 2);
     }
 }

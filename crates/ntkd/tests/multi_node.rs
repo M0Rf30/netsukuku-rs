@@ -72,7 +72,7 @@ fn naddr(idx: u32) -> Naddr {
 /// The linklocal-style address node `idx` assigns its `n`-th monitored NIC (1-based, matching
 /// call order into [`ntk_neighborhood::Handle::start_monitor`]) — see [`addr_allocator`].
 fn nic_address(idx: u32, n: u8) -> Ipv4Addr {
-    Ipv4Addr::new(10, 99, idx as u8, n)
+    Ipv4Addr::new(169, 254, idx as u8 + 1, n)
 }
 
 fn nic_mac(idx: u32, domain_index: usize) -> String {
@@ -128,7 +128,7 @@ impl Medium {
 
     fn dispatcher_for_addr(&self, addr: &str) -> Option<Arc<Dispatcher>> {
         let ip: Ipv4Addr = addr.parse().ok()?;
-        let idx = ip.octets()[2];
+        let idx = ip.octets()[2].wrapping_sub(1);
         self.dispatchers.lock().unwrap().get(&idx).cloned()
     }
 }

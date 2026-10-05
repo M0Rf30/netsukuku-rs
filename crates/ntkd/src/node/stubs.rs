@@ -282,6 +282,30 @@ impl RpcClient for LazyLinkClient {
     }
 }
 
+/// An [`RpcClient`] for a link with no connection: every call fails with
+/// [`RpcError::ConnectionClosed`].
+struct ClosedLinkClient;
+
+impl RpcClient for ClosedLinkClient {
+    fn call<'a>(
+        &'a self,
+        _caller: CallerContext,
+        _unicast_id: TypedValue,
+        _call: MethodCall,
+    ) -> BoxFuture<'a, Result<ntk_proto::v1::ResponsePayload, RpcError>> {
+        Box::pin(async move { Err(RpcError::ConnectionClosed) })
+    }
+
+    fn notify<'a>(
+        &'a self,
+        _caller: CallerContext,
+        _unicast_id: TypedValue,
+        _call: MethodCall,
+    ) -> BoxFuture<'a, Result<(), RpcError>> {
+        Box::pin(async move { Err(RpcError::ConnectionClosed) })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Identities
 // ---------------------------------------------------------------------------
@@ -295,9 +319,16 @@ pub struct IdentityStubFactoryAdapter {
 
 impl ntk_identities::IdentityStubFactory for IdentityStubFactoryAdapter {
     fn stub(&self, arc: ntk_identities::ArcId) -> Arc<dyn RpcClient> {
-        self.links
-            .get(LinkId(arc.0))
-            .unwrap_or_else(|| panic!("no outbound connection for identity arc {arc:?}"))
+        // Called inline from the identities actor's command loop, so a missing link (dial
+        // failed, or the arc was removed meanwhile) must degrade to failing calls, never panic
+        // the actor.
+        self.links.get(LinkId(arc.0)).unwrap_or_else(|| {
+            tracing::debug!(
+                ?arc,
+                "identities: no outbound connection for arc, calls will fail"
+            );
+            Arc::new(ClosedLinkClient)
+        })
     }
 
     fn arc_for_caller(&self, caller: &CallerContext) -> Option<ntk_identities::ArcId> {
@@ -754,7 +785,7 @@ impl HookingStub for RpcHookingStub {
 /// in `crate::node::adapters`.
 #[derive(Debug)]
 pub struct HookingStubFactoryAdapter {
-    pub qspn: ntk_qspn::QspnHandle,
+    pub qspn: crate::node::adapters::Live<ntk_qspn::QspnHandle>,
     pub links: Arc<PeerLinks>,
     pub registry: Arc<LinkRegistry>,
 }
@@ -769,7 +800,7 @@ impl HookingStubFactory for HookingStubFactoryAdapter {
     }
 
     fn gateway_stub(&self, hc: ntk_common::HCoord) -> Option<Arc<dyn HookingStub>> {
-        let snapshot = self.qspn.snapshot();
+        let snapshot = self.qspn.get().snapshot();
         let entry = snapshot
             .levels
             .get(hc.level)?
@@ -835,5 +866,27 @@ impl HookingStub for UnreachableHookingStub {
     }
     fn route_mig_response(&self, _resp: ResponsePacket) -> BoxFuture<'_, Result<(), RpcError>> {
         Box::pin(async move { Err(RpcError::ConnectionClosed) })
+    }
+}
+
+#[cfg(test)]
+mod identity_stub_tests {
+    use std::sync::Arc;
+
+    use ntk_identities::IdentityStubFactory;
+
+    use super::IdentityStubFactoryAdapter;
+    use crate::node::peers::PeerLinks;
+    use crate::node::registry::LinkRegistry;
+
+    /// `stub()` runs inline in the identities actor; a missing link used to panic and kill the
+    /// actor. It must now hand back a client instead.
+    #[test]
+    fn stub_for_an_arc_without_a_connection_does_not_panic() {
+        let factory = IdentityStubFactoryAdapter {
+            links: Arc::new(PeerLinks::new()),
+            registry: Arc::new(LinkRegistry::new()),
+        };
+        let _client = factory.stub(ntk_identities::ArcId(42));
     }
 }

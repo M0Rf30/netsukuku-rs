@@ -221,7 +221,7 @@ use crate::node::dispatch::{Dispatcher, IdentityStack};
 use crate::node::kernel_handle::{KernelHandle, SendNetlink};
 use crate::node::peers::PeerLinks;
 use crate::node::registry::LinkRegistry;
-use crate::node::services::{self, HookingProvenance};
+use crate::node::services::{self, HookingProvenance, HookingRetarget, ProcessScope};
 use crate::node::stubs::{
     HookingStubFactoryAdapter, IdentityStubFactoryAdapter, QspnStubFactoryAdapter,
 };
@@ -575,6 +575,9 @@ pub struct RunningNode<K> {
     /// [`ntk_netlink::cleanup`] at shutdown.
     pub kernel: Arc<K>,
     pub net: Arc<NetworkInfo>,
+    /// Cancelled when the node can no longer route (the steady-state loop died or an actor
+    /// panicked): the supervisor shuts the daemon down rather than leave it live-looking.
+    pub fatal: CancellationToken,
 }
 
 /// [`run`]'s full result: the running actors plus the inbound [`Dispatcher`] the caller binds
@@ -596,9 +599,12 @@ struct Generation<K> {
     hooking: ntk_hooking::HookingHandle,
     peers: ntk_peerservices::Handle,
     coordinator: ntk_coordinator::Handle,
+    coordinator_client: ntk_coordinator::CoordinatorClient,
     andna: ntk_andna::Handle,
     dispatch: IdentityStack,
     route_installer: RouteInstaller<KernelHandle<K>>,
+    /// `Some` only when this generation spawned the (process-lifetime) hooking actor.
+    retarget: Option<HookingRetarget>,
 }
 
 /// Which QSPN actor variant [`bootstrap_generation`] should spawn — a fresh `create_net` root
@@ -685,6 +691,8 @@ async fn bootstrap_generation<K>(
     // generation *before* cancelling it, because `Handle::hand_off` on a dead actor
     // silently yields an empty hand-off.
     coordinator_handoff: Option<ntk_coordinator::HandOff>,
+    // Process-lifetime scope for the first generation's hooking actor (`ProcessScope`).
+    process: Option<ProcessScope<'_>>,
 ) -> anyhow::Result<Generation<K>>
 where
     K: SendNetlink + 'static,
@@ -757,6 +765,7 @@ where
         signing_key,
         require_auth,
         coordinator_handoff,
+        process,
     )
     .await;
 
@@ -776,7 +785,7 @@ where
     let peers_rpc = ntk_peerservices::PeersRpcHandler::new(svc.peers.clone());
     let coordinator_rpc = ntk_coordinator::CoordinatorRpcHandler::new(svc.coordinator.clone());
     let hooking_stub_factory = Arc::new(HookingStubFactoryAdapter {
-        qspn: qspn.clone(),
+        qspn: crate::node::adapters::Live::new(qspn.clone()),
         links: links.clone(),
         registry,
     });
@@ -803,6 +812,8 @@ where
         hooking: svc.hooking,
         peers: svc.peers,
         coordinator: svc.coordinator,
+        coordinator_client: svc.coordinator_client,
+        retarget: svc.retarget,
         andna: svc.andna,
         dispatch: IdentityStack {
             qspn: qspn_rpc,
@@ -838,6 +849,11 @@ where
         preformed,
         my_id,
     } = inputs;
+    // Subscribed before the first `.await` below (preflight, key load, netlink installs, the
+    // generation bootstrap): `broadcast` has no replay, and neighborhood is already live, so an
+    // arc established during that window would otherwise be lost for good. The snapshot is also
+    // replayed once the steady-state loop starts.
+    let neighborhood_events = neighborhood.subscribe();
     anyhow::ensure!(
         initial_position.is_none() || preformed.is_none(),
         "NodeInputs::initial_position and NodeInputs::preformed are mutually exclusive: \
@@ -902,6 +918,7 @@ where
     // without fighting over table 251.
     let table_allocator: TableAllocator<MigrationId> = TableAllocator::new();
     let generation_cancel = cancel.child_token();
+    let mut generation_tasks = JoinSet::new();
     let generation = bootstrap_generation(
         topology.clone(),
         my_naddr.clone(),
@@ -914,12 +931,16 @@ where
         kernel,
         table_allocator.main_table(),
         table_allocator.main_rule_priority(),
-        tasks,
+        &mut generation_tasks,
         generation_cancel.clone(),
         signing_key.clone(),
         require_auth,
         // First generation of this process: no prior Coordinator state exists to inherit.
         None,
+        Some(ProcessScope {
+            cancel: &cancel,
+            tasks: &mut *tasks,
+        }),
     )
     .await?;
     let table = table_allocator.main_table();
@@ -942,6 +963,8 @@ where
     // -- Steady-state event loop --
     let net_for_running = net.clone();
     let (generation_handles_tx, generation_handles_rx) = watch::channel(generation_handles);
+    let hooking_events = generation.hooking.subscribe_events();
+    let fatal = CancellationToken::new();
     tasks.spawn(run_steady_state(
         SteadyStateCtx {
             config_port: config.port(),
@@ -964,12 +987,16 @@ where
             migration_in_progress: false,
             migrations: 0,
             generation_cancel,
-            generation_tasks: JoinSet::new(),
+            generation_tasks,
             signing_key,
             require_auth,
             table_allocator,
+            hooking_retarget: generation.retarget,
+            fatal: fatal.clone(),
         },
         generation.qspn_events,
+        neighborhood_events,
+        hooking_events,
         cancel,
     ));
 
@@ -984,6 +1011,7 @@ where
             route_installer,
             kernel: routing_kernel,
             net: net_for_running,
+            fatal,
         },
         dispatcher,
     })
@@ -1057,6 +1085,10 @@ struct SteadyStateCtx<K> {
     /// see that function's own doc for why release must happen only after
     /// [`crate::kernel::routes::RouteInstaller::teardown`], never before.
     table_allocator: TableAllocator<MigrationId>,
+    /// Re-points the process-lifetime hooking actor's adapters at each new generation.
+    hooking_retarget: Option<HookingRetarget>,
+    /// See [`RunningNode::fatal`].
+    fatal: CancellationToken,
 }
 
 /// Reacts to arc up/down/cost-change, qspn route-snapshot changes, and hooking's migration
@@ -1065,12 +1097,15 @@ struct SteadyStateCtx<K> {
 async fn run_steady_state<K>(
     mut ctx: SteadyStateCtx<K>,
     mut qspn_events: broadcast::Receiver<QspnEvent>,
+    mut neighborhood_events: broadcast::Receiver<ntk_neighborhood::Event>,
+    mut hooking_events: broadcast::Receiver<HookingEvent>,
     cancel: CancellationToken,
 ) where
     K: SendNetlink + 'static,
 {
-    let mut neighborhood_events = ctx.neighborhood.subscribe();
-    let mut hooking_events = ctx.hooking.subscribe_events();
+    // The receivers were subscribed by `run`, before any await; arcs that came up since are
+    // replayed from the published snapshot (duplicates are no-ops, see `on_neighborhood_event`).
+    resync_neighborhood(&ctx).await;
 
     loop {
         tokio::select! {
@@ -1079,14 +1114,25 @@ async fn run_steady_state<K>(
             event = neighborhood_events.recv() => {
                 match event {
                     Ok(ev) => on_neighborhood_event(&ctx, ev).await,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::error!("neighborhood event channel closed");
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        // ArcAdded fires once per link, so a dropped event would be permanent;
+                        // rebuild the state from the authoritative snapshot instead.
+                        tracing::warn!(missed, "neighborhood events lagged, resyncing from the snapshot");
+                        resync_neighborhood(&ctx).await;
+                    }
                 }
             }
             event = qspn_events.recv() => {
                 match event {
                     Ok(ev) => on_qspn_event(&ctx, ev).await,
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::error!("qspn event channel closed");
+                        break;
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => on_route_snapshot_changed(&ctx).await,
                 }
             }
@@ -1098,17 +1144,126 @@ async fn run_steady_state<K>(
                             qspn_events = new_qspn_events;
                         }
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::error!("hooking event channel closed");
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        tracing::warn!(missed, "hooking events lagged; some notifications were dropped");
+                    }
+                }
+            }
+            Some(joined) = ctx.generation_tasks.join_next() => {
+                if let Err(err) = joined
+                    && err.is_panic()
+                {
+                    tracing::error!(%err, "a generation actor panicked");
+                    break;
                 }
             }
         }
     }
-    // Mirrors `node::supervisor::run`'s own shutdown drain for whichever generation is current:
-    // the very first generation's actors are reaped through the caller's own `tasks` `JoinSet`
-    // (passed into `bootstrap_generation` from `run`), but a later negotiated generation's
-    // actors (`rehook`) live only in `generation_tasks` — nothing else ever drains them.
-    while ctx.generation_tasks.join_next().await.is_some() {}
+    if !cancel.is_cancelled() {
+        tracing::error!("steady-state loop ended without a shutdown request");
+        ctx.fatal.cancel();
+    }
+    // Mirrors `node::supervisor::run`'s own shutdown drain for the current generation: its
+    // actors live only in `generation_tasks` (the process-lifetime hooking actor is reaped by
+    // the caller's `tasks`), so nothing else ever drains them.
+    ctx.generation_cancel.cancel();
+    while let Some(joined) = ctx.generation_tasks.join_next().await {
+        if let Err(err) = joined
+            && err.is_panic()
+        {
+            tracing::error!(%err, "a generation actor panicked");
+        }
+    }
+}
+
+/// Rebuilds the registry/qspn state from `neighborhood.snapshot()`: drops links that vanished
+/// while events were lost and re-applies every live arc (already-handled ones are no-ops).
+async fn resync_neighborhood<K>(ctx: &SteadyStateCtx<K>)
+where
+    K: SendNetlink + 'static,
+{
+    let arcs = ctx.neighborhood.snapshot().borrow().clone();
+    let live: std::collections::HashSet<String> =
+        arcs.iter().map(|arc| arc.neighbour_mac.clone()).collect();
+    for entry in ctx.registry.all() {
+        if !live.contains(&entry.mac) {
+            remove_link(ctx, &entry.mac).await;
+        }
+    }
+    for arc in arcs {
+        on_neighborhood_event(ctx, ntk_neighborhood::Event::ArcAdded(arc)).await;
+    }
+}
+
+/// Forgets the link keyed by `mac` everywhere it was registered.
+async fn remove_link<K>(ctx: &SteadyStateCtx<K>, mac: &str)
+where
+    K: SendNetlink + 'static,
+{
+    if let Some(entry) = ctx.registry.remove(mac) {
+        if let Some(qspn_arc) = entry.qspn_arc {
+            let _ = ctx.qspn.remove_arc(qspn_arc).await;
+            ctx.route_installer
+                .lock()
+                .await
+                .clear_arc_endpoint(qspn_arc);
+        }
+        if let Err(err) = ctx.identities.remove_arc(entry.id.identities()).await {
+            tracing::debug!(%err, mac, "identities: remove_arc failed");
+        }
+        if let Err(err) = ctx.hooking.remove_arc(entry.id.hooking()).await {
+            tracing::debug!(%err, mac, "hooking: remove_arc failed");
+        }
+        ctx.links.remove(entry.id);
+    }
+}
+
+/// Installs a freshly bootstrapped `generation` as the live one: points the process-lifetime
+/// hooking actor at it, re-attaches known arcs, publishes its handles and swaps the inbound
+/// dispatcher. Returns its qspn event receiver (subscribed inside [`bootstrap_generation`]).
+async fn adopt_generation<K>(
+    ctx: &mut SteadyStateCtx<K>,
+    generation: Generation<K>,
+    cancel: CancellationToken,
+    tasks: JoinSet<()>,
+    migrations: u32,
+) -> broadcast::Receiver<QspnEvent>
+where
+    K: SendNetlink + 'static,
+{
+    ctx.generation_cancel = cancel;
+    ctx.generation_tasks = tasks;
+    let new_handles = GenerationHandles::from_generation(&generation, migrations);
+    // Hooking is carried across generations (and survives them: it runs under the process
+    // token), but its adapters were built from the first generation's actors.
+    if let Some(retarget) = &ctx.hooking_retarget {
+        retarget.retarget(
+            &generation.qspn,
+            &generation.coordinator,
+            &generation.coordinator_client,
+        );
+    }
+    ctx.qspn = generation.qspn;
+    // Captured synchronously inside `bootstrap_generation`, immediately after this generation's
+    // `ntk_qspn::spawn_entering` — see that function's doc's "Bug this fixes" section.
+    let new_qspn_events = generation.qspn_events;
+    ctx.hooking = generation.hooking;
+    ctx.peers = generation.peers;
+    let mut new_installer = generation.route_installer;
+    reattach_known_arcs(ctx, &mut new_installer).await;
+    *ctx.route_installer.lock().await = new_installer;
+    // Swap the dispatcher — and everything else external observers read — before waiting on
+    // bootstrap: see `migrate`'s own "Bug this fixes" doc section for why waiting first
+    // deafens this identity to the exact signal it is waiting for.
+    ctx.generation_handles_tx.send_replace(new_handles);
+    ctx.dispatcher
+        .replace_identity_stack(generation.dispatch)
+        .await;
+    new_qspn_events
 }
 
 /// Re-registers every currently-known neighborhood arc against a freshly (re)spawned qspn actor
@@ -1409,6 +1564,7 @@ where
     // `QspnViewAdapter::network_id()` reads this, and every subsequent arc handler's
     // same-network/another-network comparison (ntk-hooking's arc_handler) depends on it being
     // current, not the network-of-one id this identity bootstrapped with.
+    let previous_network_id = ctx.net.network_id();
     ctx.net.set_network_id(target_network_id);
     tracing::info!(
         ?new_naddr,
@@ -1426,6 +1582,7 @@ where
     let migration_id = random_migration_id();
     if let Err(err) = ctx.identities.prepare_migration(migration_id, old_id).await {
         tracing::warn!(%err, "identities: prepare_migration failed, staying at the current position");
+        ctx.net.set_network_id(previous_network_id);
         ctx.migration_in_progress = false;
         return None;
     }
@@ -1445,6 +1602,7 @@ where
         Ok(id) => id,
         Err(err) => {
             tracing::warn!(%err, "identities: migrate failed, staying at the current position");
+            ctx.net.set_network_id(previous_network_id);
             ctx.migration_in_progress = false;
             return None;
         }
@@ -1502,6 +1660,9 @@ where
     // address --
     let new_generation_cancel = cancel.child_token();
     let mut new_tasks = JoinSet::new();
+    // The entering qspn bootstraps from scratch: the previous generation's latch and its
+    // position-keyed foreign/same-network facts describe a position that no longer exists.
+    ctx.net.reset_for_new_generation();
     let generation = match bootstrap_generation(
         ctx.topology.clone(),
         new_naddr.clone(),
@@ -1521,59 +1682,98 @@ where
         new_generation_cancel.clone(),
         ctx.signing_key.clone(),
         ctx.require_auth,
-        Some(coordinator_handoff),
+        Some(coordinator_handoff.clone()),
+        None,
     )
     .await
     {
         Ok(generation) => generation,
         Err(err) => {
             tracing::error!(%err, "migrate: bootstrapping the entering generation failed, aborting");
-            // The previous generation's actors/kernel state are already torn down above (this
-            // was already true before the identity fork existed); reverting the fork here at
-            // least leaves the identity registry itself consistent (`old_id` regains Main
-            // status, `new_id` is gone) rather than stuck mid-fork with no running protocol
-            // stack for either identity — a real, defined-but-degraded state, not a wedge:
-            // the next resolved `DoFinishEnter` (hooking's own retry backoff) tries again from
-            // `old_id`, exactly as it would have before this identity ever forked.
+            // The previous generation's actors/kernel state are already torn down above, so
+            // restore everything that can be restored: the identity registry (`old_id` regains
+            // Main status, `new_id` is gone) and the network id the migration had adopted.
             if let Err(abort_err) = ctx.identities.abort_migration(old_id, new_id).await {
                 tracing::warn!(%abort_err, "identities: abort_migration after a failed entering-generation bootstrap failed");
             }
+            ctx.net.set_network_id(previous_network_id);
+            ctx.net.reset_for_new_generation();
+            // Bring the node back at its old position rather than leave it with no protocol
+            // stack at all (hooking's retry would otherwise run against dead actors).
+            let recovery_cancel = cancel.child_token();
+            let mut recovery_tasks = JoinSet::new();
+            let recovered = bootstrap_generation(
+                ctx.topology.clone(),
+                ctx.qspn.my_naddr().clone(),
+                QspnOrigin::CreateNet,
+                HookingProvenance::Carried(ctx.hooking.clone()),
+                ctx.net.clone(),
+                ctx.registry.clone(),
+                ctx.links.clone(),
+                ctx.my_id,
+                KernelHandle(ctx.kernel.clone()),
+                ctx.table_allocator.main_table(),
+                ctx.table_allocator.main_rule_priority(),
+                &mut recovery_tasks,
+                recovery_cancel.clone(),
+                ctx.signing_key.clone(),
+                ctx.require_auth,
+                Some(coordinator_handoff),
+                None,
+            )
+            .await;
             ctx.migration_in_progress = false;
-            return None;
+            let current_migrations = ctx.migrations;
+            return match recovered {
+                Ok(generation) => {
+                    tracing::warn!(
+                        "migrate: recovered the previous position after a failed migration"
+                    );
+                    let events = adopt_generation(
+                        ctx,
+                        generation,
+                        recovery_cancel,
+                        recovery_tasks,
+                        current_migrations,
+                    )
+                    .await;
+                    on_route_snapshot_changed(ctx).await;
+                    Some(events)
+                }
+                Err(recovery_err) => {
+                    tracing::error!(%recovery_err, "migrate: recovering the previous position failed too, shutting down");
+                    ctx.fatal.cancel();
+                    None
+                }
+            };
         }
     };
-    ctx.generation_cancel = new_generation_cancel;
-    ctx.generation_tasks = new_tasks;
-
-    let new_handles = GenerationHandles::from_generation(&generation, ctx.migrations + 1);
-    ctx.qspn = generation.qspn;
-    // Captured synchronously inside `bootstrap_generation`, immediately after this generation's
-    // `ntk_qspn::spawn_entering` — see that function's doc's "Bug this fixes" section. Subscribing
-    // here instead (after `install_identity`'s real netlink round trip above, among other
-    // `.await` points) is exactly the race that section documents: this generation's own
-    // `BootstrapComplete` could already have fired and been dropped by the time this line runs.
-    let new_qspn_events = generation.qspn_events;
-    ctx.hooking = generation.hooking;
-    ctx.peers = generation.peers;
-    let mut new_installer = generation.route_installer;
-    reattach_known_arcs(ctx, &mut new_installer).await;
-    *ctx.route_installer.lock().await = new_installer;
-    // Swap the dispatcher — and everything else external observers read — before waiting on
-    // bootstrap: see this function's own "Bug this fixes" doc section for why waiting first
-    // deafens this identity to the exact signal it is waiting for.
-    ctx.generation_handles_tx.send_replace(new_handles);
-    ctx.dispatcher
-        .replace_identity_stack(generation.dispatch)
-        .await;
+    let new_handles_migrations = ctx.migrations + 1;
+    let new_qspn_events = adopt_generation(
+        ctx,
+        generation,
+        new_generation_cancel,
+        new_tasks,
+        new_handles_migrations,
+    )
+    .await;
 
     // Wait for the successor's own bootstrap to confirm real connectivity (a qualifying peer
     // ETP, or `QspnConfig::bootstrap_fallback_max_wait`'s fallback) before treating it as hooked.
     // An actor error breaks out the same as a confirmed completion: this identity is as hooked
     // as it is ever going to get either way.
     loop {
+        if cancel.is_cancelled() {
+            break;
+        }
         match ctx.qspn.is_bootstrap_complete().await {
             Ok(true) | Err(_) => break,
-            Ok(false) => tokio::time::sleep(MIGRATION_POLL_INTERVAL).await,
+            Ok(false) => {
+                tokio::select! {
+                    () = cancel.cancelled() => break,
+                    () = tokio::time::sleep(MIGRATION_POLL_INTERVAL) => {}
+                }
+            }
         }
     }
 
@@ -1618,6 +1818,12 @@ where
             let link =
                 ctx.registry
                     .link_for_neighbour(arc.neighbour_id, &arc.neighbour_mac, &arc.my_dev);
+            // Already wired (a replayed snapshot, a duplicate event, or an arc `migrate`'s
+            // `reattach_known_arcs` attached while this event sat queued): adding it again
+            // would give the link a second qspn arc and orphan the first.
+            if ctx.registry.qspn_arc_of(link).is_some() {
+                return;
+            }
             if ctx.links.get(link).is_none()
                 && let Some(client) = ctx
                     .dialer
@@ -1644,7 +1850,7 @@ where
                     Interface::name(&arc.my_dev),
                 );
             }
-            let _ = ctx
+            if let Err(err) = ctx
                 .identities
                 .add_arc(
                     link.identities(),
@@ -1654,8 +1860,13 @@ where
                         peer_linklocal: arc.neighbour_nic_addr.clone(),
                     },
                 )
-                .await;
-            let _ = ctx.hooking.add_arc(link.hooking()).await;
+                .await
+            {
+                tracing::warn!(?link, %err, "identities: add_arc failed");
+            }
+            if let Err(err) = ctx.hooking.add_arc(link.hooking()).await {
+                tracing::warn!(?link, %err, "hooking: add_arc failed");
+            }
             // Re-drives `ntk_peerservices::Handle::register`'s own boot-time flood
             // (`ntkd::node::services::spawn`), which always found zero neighbors: this is the
             // first moment this arc's peer is actually reachable
@@ -1684,18 +1895,7 @@ where
             on_route_snapshot_changed(ctx).await;
         }
         ntk_neighborhood::Event::ArcRemoved(arc) => {
-            if let Some(entry) = ctx.registry.remove(&arc.neighbour_mac) {
-                if let Some(qspn_arc) = entry.qspn_arc {
-                    let _ = ctx.qspn.remove_arc(qspn_arc).await;
-                    ctx.route_installer
-                        .lock()
-                        .await
-                        .clear_arc_endpoint(qspn_arc);
-                }
-                let _ = ctx.identities.remove_arc(entry.id.identities()).await;
-                let _ = ctx.hooking.remove_arc(entry.id.hooking()).await;
-                ctx.links.remove(entry.id);
-            }
+            remove_link(ctx, &arc.neighbour_mac).await;
             on_route_snapshot_changed(ctx).await;
         }
     }

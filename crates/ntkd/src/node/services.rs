@@ -16,6 +16,7 @@ use ntk_qspn::QspnHandle;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use crate::node::adapters::Live;
 use crate::node::adapters::{
     CoordinatorClientAdapter, CoordinatorMapAdapter, CoordinatorStubFactoryAdapter, EnterArbiter,
     EnterHandlersAdapter, NetworkInfo, PropagationHandlerAdapter, QspnViewAdapter,
@@ -24,6 +25,42 @@ use crate::node::adapters::{
 use crate::node::peers::PeerLinks;
 use crate::node::registry::LinkRegistry;
 use crate::node::stubs::HookingStubFactoryAdapter;
+
+/// The process-lifetime token and task set a first generation's hooking actor is spawned
+/// under, so it survives every migration's cancelling of the generation scope.
+#[derive(Debug)]
+pub struct ProcessScope<'a> {
+    pub cancel: &'a CancellationToken,
+    pub tasks: &'a mut JoinSet<()>,
+}
+
+/// The three hooking-owned adapters that must follow the live generation: hooking is carried
+/// across migrations, but its qspn view, coordinator client and stub factory were built from
+/// the first generation's (later cancelled) actors.
+#[derive(Debug)]
+pub struct HookingRetarget {
+    view: Arc<QspnViewAdapter>,
+    coordinator: Arc<CoordinatorClientAdapter>,
+    stubs: Arc<HookingStubFactoryAdapter>,
+}
+
+impl HookingRetarget {
+    /// Points every hooking-owned adapter at the successor generation's actors.
+    pub fn retarget(
+        &self,
+        qspn: &QspnHandle,
+        coordinator: &ntk_coordinator::Handle,
+        coordinator_client: &ntk_coordinator::CoordinatorClient,
+    ) {
+        self.view.retarget(qspn.clone());
+        self.coordinator.retarget(
+            coordinator_client.clone(),
+            coordinator.clone(),
+            qspn.clone(),
+        );
+        self.stubs.qspn.set(qspn.clone());
+    }
+}
 
 /// Where this generation's [`HookingHandle`] comes from — see `crate::node::lifecycle`'s
 /// "Negotiated re-address" module doc section.
@@ -50,6 +87,8 @@ pub struct Services {
     pub andna: ntk_andna::Handle,
     pub hooking: HookingHandle,
     pub qspn_view: Arc<QspnViewAdapter>,
+    /// `Some` only for a `Fresh` hooking actor: the handle to re-point it after a migration.
+    pub retarget: Option<HookingRetarget>,
 }
 
 /// This daemon's own `PeerServices::Config`, upstream defaults plus one opt-in: a periodic
@@ -146,6 +185,8 @@ pub async fn spawn(
     // on a rehook, so per-level eldership and reservation state carries across the migration
     // instead of every level restarting from `GnodeMemory::fresh`.
     coordinator_handoff: Option<ntk_coordinator::HandOff>,
+    // Process-lifetime scope for a `Fresh` hooking actor — see [`ProcessScope`].
+    process: Option<ProcessScope<'_>>,
 ) -> Services {
     // A negotiated re-address (`HookingProvenance::Carried`) starts this generation's
     // participation knowledge empty rather than trivially-complete — `ntk_peerservices::Manager::
@@ -237,12 +278,20 @@ pub async fn spawn(
     // -- Hooking: a fresh actor for this identity's very first generation, or the same
     // identity's already-resolved handle carried over from a negotiated re-address (see
     // `HookingProvenance`'s doc) --
+    // The hooking actor (and the view it reads) must outlive every migration: a carried handle
+    // is reused by all later generations, so a `Fresh` actor is spawned under the *process*
+    // scope when the caller supplies one, never under this (retirable) generation's token.
+    let (hooking_cancel, hooking_tasks): (CancellationToken, &mut JoinSet<()>) = match process {
+        Some(scope) => (scope.cancel.child_token(), scope.tasks),
+        None => (cancel.child_token(), tasks),
+    };
     let qspn_view = Arc::new(QspnViewAdapter::spawn(
         qspn.clone(),
         net.clone(),
-        tasks,
-        cancel.child_token(),
+        hooking_tasks,
+        hooking_cancel.clone(),
     ));
+    let mut retarget = None;
     let hooking = match hooking {
         HookingProvenance::Fresh(origin) => {
             let coordinator_client_adapter = Arc::new(CoordinatorClientAdapter::new(
@@ -257,22 +306,31 @@ pub async fn spawn(
                 coordinator_config().n_nodes_cache_ttl,
             ));
             let hooking_stub_factory = Arc::new(HookingStubFactoryAdapter {
-                qspn: qspn.clone(),
+                qspn: Live::new(qspn.clone()),
                 links: links.clone(),
                 registry: registry.clone(),
             });
             let (h, hooking_join) = ntk_hooking::spawn(
                 origin,
                 qspn_view.clone() as Arc<dyn ntk_hooking::QspnView>,
-                coordinator_client_adapter,
-                hooking_stub_factory,
+                coordinator_client_adapter.clone(),
+                hooking_stub_factory.clone(),
                 hooking_config(),
-                cancel.child_token(),
+                hooking_cancel,
             );
-            tasks.spawn(async move {
-                let _ = hooking_join.await;
+            hooking_tasks.spawn(async move {
+                if let Err(err) = hooking_join.await
+                    && err.is_panic()
+                {
+                    tracing::error!(%err, "hooking actor panicked");
+                }
             });
             let _ = hooking_tx.send(Some(h.clone()));
+            retarget = Some(HookingRetarget {
+                view: qspn_view.clone(),
+                coordinator: coordinator_client_adapter,
+                stubs: hooking_stub_factory,
+            });
             h
         }
         HookingProvenance::Carried(existing) => existing,
@@ -324,5 +382,6 @@ pub async fn spawn(
         andna,
         hooking,
         qspn_view,
+        retarget,
     }
 }
