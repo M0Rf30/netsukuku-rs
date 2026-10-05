@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=netsukuku-rs
-PKG_VERSION:=0.1.8
+PKG_VERSION:=0.1.9
 PKG_RELEASE:=1
 
 # All 12 workspace crates are published on crates.io at the same version as PKG_VERSION, but `ntkd` is a workspace member

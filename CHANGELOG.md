@@ -4,6 +4,49 @@ All notable changes to this project are documented here. Versions follow [Semant
 Versioning](https://semver.org/spec/v2.0.0.html); the twelve `ntk-*` crates and `ntkd` are
 released in lockstep, so they always share a version even when only some of them changed.
 
+## [0.1.9]
+
+Hardening release from a full-codebase review. Several peer-triggerable panics (fatal under the
+`dist` profile's `panic = "abort"`) are now `Err`s, an auth-enabled node is no longer rejected by
+its peers after a restart, kernel state survives crashes and partial failures, and the hooking
+actor survives a migration.
+
+### Fixed
+
+- **Peer-triggerable daemon aborts:** malformed hooking tuples/host levels, a coordinator reserve
+  error in `execute_search`, peer-services forwarders with `lvl >= n.top()`, and the ANDNA
+  `Handle` after actor shutdown no longer panic.
+- **Auth after restart:** origin-auth sequence counters (neighborhood, peerservices) are seeded
+  from wall-clock microseconds instead of 0; ANDNA rejects signed timestamps more than an hour off
+  node time, closing replay after expiry.
+- **Kernel state:** errno mapped to typed `NetlinkError` variants; startup sweep before
+  `install_identity`; TCP bind before any kernel mutation; cleanup on every supervisor exit;
+  `apply`/`teardown` continue past per-route failures and treat `NotFound` as done; shutdown
+  cleanup only removes our own `/32` on `lo`, no longer operator `10.0.0.0/8` addresses; topology
+  width checked at config load; capability probe reports missing `CAP_NET_ADMIN` correctly.
+- **Neighborhood:** peer `nic_addr` must be link-local, not ours, and unique per MAC before a
+  route is installed; no duplicate `ArcAdded` after the no-RTT fallback; stale monitor results
+  from cancelled probes are dropped.
+- **Migration:** the hooking actor survives `migrate()`; `network_id` is restored on failure; the
+  bootstrapped latch resets per generation; no double qspn arc; event lag resyncs.
+- **QSPN:** internal arc removals flood their withdrawals; sender fingerprint levels validated;
+  mandatory path admission bounded; connectivity APIs return errors instead of panicking.
+- **Cross-node uniqueness:** coordinator propagation ids derive from node identity; peer-request
+  message ids are unguessable; participation dedup is keyed by service and g-node (Counter
+  participation was always dropped).
+- **RPC transport:** bounded connections, in-flight requests, reply queue and idle time; connect
+  and notify timeouts; an oversize response no longer kills the writer; absent `unicast_id`
+  accepted per the v0.1.5 compat rule.
+- **Packaging/CI:** OpenWrt and container versions track the workspace (guarded in CI); MSRV job;
+  least-privilege workflow permissions, timeouts and `--locked`; more real-kernel tests gated;
+  container runs as root so `--cap-add` takes effect; systemd unit further hardened.
+
+### Changed
+
+- Peers announcing a `nic_addr` outside `169.254.0.0/16` are refused.
+- OpenWrt sample config uses `gsizes = 4,2,2,2`, matching the systemd default.
+- Dependencies refreshed (`cargo update`); unused dependencies removed.
+
 ## [0.1.8]
 
 Multi-level topologies work. Two daemons on the `gsizes = [4, 2, 2, 2]` config the packages ship
@@ -484,6 +527,7 @@ them over native netlink, never by shelling out to `ip`.
 Only five of the twelve crates reached crates.io under this version, for the rate-limit reason
 described under 0.1.1. Use 0.1.2 instead.
 
+[0.1.9]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/M0Rf30/netsukuku-rs/compare/v0.1.5...v0.1.6

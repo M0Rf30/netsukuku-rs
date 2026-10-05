@@ -78,7 +78,7 @@ RUN mkdir -p /out/tmp && chmod 1777 /out/tmp
 ########################################################################
 FROM scratch
 
-ARG NTKD_VERSION=0.1.8
+ARG NTKD_VERSION=0.1.9
 ARG NTKD_REVISION=unknown
 
 LABEL org.opencontainers.image.title="ntkd" \
