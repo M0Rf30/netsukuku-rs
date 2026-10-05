@@ -234,6 +234,8 @@ struct State {
     recent_published: BTreeSet<(ServiceId, HCoord)>,
     waiting: BTreeMap<i32, WaitingAnswer>,
     next_msg_id: i32,
+    /// Per-actor random key for [`Cmd::NextMsgId`]'s unguessable ids.
+    msg_id_hasher: std::collections::hash_map::RandomState,
     snapshot_tx: watch::Sender<Snapshot>,
     events_tx: broadcast::Sender<Event>,
     /// Servant-side origin-auth replay guard (`Cmd::ObserveOriginSequence`), keyed by the
@@ -313,8 +315,16 @@ impl State {
                 let _ = reply.send(self.gnode_participates(p_id, level));
             }
             Cmd::NextMsgId { reply } => {
-                let id = self.next_msg_id;
-                self.next_msg_id = self.next_msg_id.wrapping_add(1);
+                // Unguessable (keyed SipHash over a counter) rather than sequential: a peer that
+                // could predict a pending `msg_id` could forge `set_response` for it.
+                use std::hash::BuildHasher;
+                let id = loop {
+                    self.next_msg_id = self.next_msg_id.wrapping_add(1);
+                    let candidate = self.msg_id_hasher.hash_one(self.next_msg_id) as i32;
+                    if !self.waiting.contains_key(&candidate) {
+                        break candidate;
+                    }
+                };
                 let _ = reply.send(id);
             }
             Cmd::RegisterWaiting {
@@ -585,6 +595,7 @@ impl Manager {
             recent_published: BTreeSet::new(),
             waiting: BTreeMap::new(),
             next_msg_id: 0,
+            msg_id_hasher: std::collections::hash_map::RandomState::new(),
             snapshot_tx,
             events_tx: events_tx.clone(),
             origin_replay: ntk_proto::auth::SequenceGuard::new(),
@@ -1240,6 +1251,38 @@ mod capacity_tests {
             handle.get_request(7, respondant).await,
             Err(GetRequestOutcome::UnknownMessage),
             "dropping the guard must remove the entry"
+        );
+
+        cancel.cancel();
+        manager_task.await.unwrap();
+    }
+
+    /// Message ids gate which peer may answer a pending request, so they must neither be
+    /// sequential nor repeat.
+    #[tokio::test]
+    async fn message_ids_are_unique_and_not_sequential() {
+        let topology = Topology::new([4]).unwrap();
+        let my_pos = Naddr::new(topology.clone(), vec![0]).unwrap();
+        let env: Arc<dyn RoutingEnv> = Arc::new(NoopEnv);
+        let (manager, handle) = Manager::new(
+            topology.clone(),
+            my_pos,
+            env,
+            Config::default(),
+            topology.levels(),
+        );
+        let cancel = CancellationToken::new();
+        let manager_task = tokio::spawn(manager.run(cancel.child_token()));
+
+        let mut ids = Vec::new();
+        for _ in 0..64 {
+            ids.push(handle.next_msg_id().await.unwrap());
+        }
+        let unique: BTreeSet<i32> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len());
+        assert!(
+            ids.windows(2).any(|w| w[1].wrapping_sub(w[0]) != 1),
+            "ids must not be a plain counter"
         );
 
         cancel.cancel();
