@@ -41,6 +41,11 @@ pub enum NetlinkError {
     )]
     ReservedTable(u32),
 
+    /// The kernel rejected the request's arguments (`EINVAL`), e.g. a route prefix with host
+    /// bits set. Only [`crate::FakeNetlink`] constructs this today, mirroring the kernel.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
     /// No kernel object matched the given key (used by [`crate::FakeNetlink`]
     /// to mirror the kernel's `ENOENT`/`ESRCH` on deleting something that
     /// isn't there).

@@ -8,15 +8,15 @@
 //! simulation coverage") never need real `CAP_NET_ADMIN` to exercise their
 //! netlink-facing logic.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use crate::error::NetlinkError;
 use crate::table::guard_table;
 use crate::traits::{AddressTable, RouteTable, RuleTable, TopologyQuery, resolve_interface};
 use crate::types::{
-    AddressEntry, Interface, Ipv4Net, LinkInfo, NeighbourInfo, Operation, RouteKey, RouteSpec,
-    RouteTarget, RuleSpec,
+    AddressEntry, Interface, Ipv4Net, LinkInfo, NeighbourInfo, Nexthop, Operation, RouteKey,
+    RouteSpec, RouteTarget, RuleSpec,
 };
 
 #[derive(Debug)]
@@ -25,7 +25,8 @@ struct FakeState {
     links: Vec<LinkInfo>,
     neighbours: Vec<NeighbourInfo>,
     addresses: Vec<AddressEntry>,
-    routes: HashMap<(u32, Ipv4Net), RouteSpec>,
+    /// Keyed by `(table, network address, prefix length)` so listing order is deterministic.
+    routes: BTreeMap<(u32, u32, u8), RouteSpec>,
     rules: Vec<RuleSpec>,
     /// One-shot route-mutation failures armed by [`FakeNetlink::arm_route_failure`], keyed by
     /// the destination the next `add_route`/`change_route`/`remove_route` touching it should
@@ -59,7 +60,7 @@ impl FakeNetlink {
                 links: Vec::new(),
                 neighbours: Vec::new(),
                 addresses: Vec::new(),
-                routes: HashMap::new(),
+                routes: BTreeMap::new(),
                 rules: Vec::new(),
                 route_failures: HashMap::new(),
             }),
@@ -105,17 +106,25 @@ impl FakeNetlink {
         self.lock().route_failures.insert(destination, error);
     }
 
-    /// Resolves every interface a route names, exactly as [`crate::RealNetlink`] does before
-    /// building its message, and rejects a multipath route listing the same `(via, ifindex)`
-    /// nexthop twice (which the kernel refuses).
-    async fn validate_route_target(&self, route: &RouteSpec) -> Result<(), NetlinkError> {
-        match &route.target {
-            RouteTarget::Unreachable => {}
-            RouteTarget::Gateway { dev, .. } | RouteTarget::OnLink { dev } => {
-                resolve_interface(self, dev).await?;
-            }
+    /// Validates a route the way the kernel/[`crate::RealNetlink`] would and returns it with
+    /// every interface normalised to [`Interface::Index`] (what `list_routes` reports on a real
+    /// kernel): every named interface must resolve, a multipath route must not list the same
+    /// `(via, ifindex)` nexthop twice, and the destination must be a canonical prefix.
+    async fn validate_route(&self, route: &RouteSpec) -> Result<RouteSpec, NetlinkError> {
+        check_canonical(route.destination)?;
+        let target = match &route.target {
+            RouteTarget::Unreachable => RouteTarget::Unreachable,
+            RouteTarget::Gateway { via, dev, src } => RouteTarget::Gateway {
+                via: *via,
+                dev: Interface::Index(resolve_interface(self, dev).await?.index),
+                src: *src,
+            },
+            RouteTarget::OnLink { dev } => RouteTarget::OnLink {
+                dev: Interface::Index(resolve_interface(self, dev).await?.index),
+            },
             RouteTarget::Multipath(nexthops) => {
                 let mut seen = Vec::with_capacity(nexthops.len());
+                let mut normalised = Vec::with_capacity(nexthops.len());
                 for nexthop in nexthops {
                     let link = resolve_interface(self, &nexthop.dev).await?;
                     if seen.contains(&(nexthop.via, link.index)) {
@@ -125,14 +134,51 @@ impl FakeNetlink {
                         )));
                     }
                     seen.push((nexthop.via, link.index));
+                    normalised.push(Nexthop {
+                        via: nexthop.via,
+                        dev: Interface::Index(link.index),
+                        weight: nexthop.weight,
+                    });
                 }
+                RouteTarget::Multipath(normalised)
             }
-        }
-        Ok(())
+        };
+        Ok(RouteSpec {
+            destination: route.destination,
+            table: route.table,
+            target,
+        })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, FakeState> {
         self.state.lock().expect("FakeNetlink mutex poisoned")
+    }
+}
+
+fn route_key(table: u32, destination: Ipv4Net) -> (u32, u32, u8) {
+    (
+        table,
+        u32::from(destination.address()),
+        destination.prefix_len(),
+    )
+}
+
+/// The kernel rejects a route prefix with host bits set (`10.0.0.5/24`) with `EINVAL`.
+fn check_canonical(destination: Ipv4Net) -> Result<(), NetlinkError> {
+    let address = u32::from(destination.address());
+    if address & mask(destination) == address {
+        Ok(())
+    } else {
+        Err(NetlinkError::InvalidArgument(format!(
+            "route prefix {destination} has host bits set"
+        )))
+    }
+}
+
+fn mask(net: Ipv4Net) -> u32 {
+    match net.prefix_len() {
+        0 => 0,
+        len => u32::MAX << (32 - u32::from(len)),
     }
 }
 
@@ -213,46 +259,47 @@ impl AddressTable for FakeNetlink {
 impl RouteTable for FakeNetlink {
     async fn add_route(&self, route: &RouteSpec) -> Result<(), NetlinkError> {
         guard_table(route.table)?;
-        self.validate_route_target(route).await?;
+        let stored = self.validate_route(route).await?;
         let mut state = self.lock();
         if let Some(error) = state.route_failures.remove(&route.destination) {
             return Err(error);
         }
-        let key = (route.table, route.destination);
+        let key = route_key(route.table, route.destination);
         if state.routes.contains_key(&key) {
             return Err(NetlinkError::AlreadyExists(format!(
                 "route {} table {}",
                 route.destination, route.table
             )));
         }
-        state.routes.insert(key, route.clone());
+        state.routes.insert(key, stored);
         state.operations.push(Operation::AddRoute(route.clone()));
         Ok(())
     }
 
     async fn change_route(&self, route: &RouteSpec) -> Result<(), NetlinkError> {
         guard_table(route.table)?;
-        self.validate_route_target(route).await?;
+        let stored = self.validate_route(route).await?;
         let mut state = self.lock();
         if let Some(error) = state.route_failures.remove(&route.destination) {
             return Err(error);
         }
         state
             .routes
-            .insert((route.table, route.destination), route.clone());
+            .insert(route_key(route.table, route.destination), stored);
         state.operations.push(Operation::ChangeRoute(route.clone()));
         Ok(())
     }
 
     async fn remove_route(&self, route: RouteKey) -> Result<(), NetlinkError> {
         guard_table(route.table)?;
+        check_canonical(route.destination)?;
         let mut state = self.lock();
         if let Some(error) = state.route_failures.remove(&route.destination) {
             return Err(error);
         }
         state
             .routes
-            .remove(&(route.table, route.destination))
+            .remove(&route_key(route.table, route.destination))
             .ok_or_else(|| {
                 NetlinkError::NotFound(format!("route {} table {}", route.destination, route.table))
             })?;
@@ -466,7 +513,16 @@ mod tests {
         };
         fake.add_route(&spec).await.unwrap();
         assert_eq!(fake.operations(), vec![Operation::AddRoute(spec.clone())]);
-        assert_eq!(fake.list_routes(Some(200)).await.unwrap(), vec![spec]);
+        // Like a real kernel dump, the listing reports the interface by index.
+        assert_eq!(
+            fake.list_routes(Some(200)).await.unwrap(),
+            vec![RouteSpec {
+                target: RouteTarget::OnLink {
+                    dev: Interface::Index(2)
+                },
+                ..spec
+            }]
+        );
 
         fake.remove_route(RouteKey {
             destination,
@@ -594,5 +650,50 @@ mod tests {
         };
         assert!(fake.add_route(&spec).await.is_err());
         assert!(fake.operations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_canonical_route_prefix_is_rejected_like_the_kernel_does() {
+        let fake = FakeNetlink::new();
+        let destination = Ipv4Net::new(Ipv4Addr::new(10, 0, 0, 5), 24).unwrap();
+        let spec = RouteSpec {
+            destination,
+            table: 200,
+            target: RouteTarget::Unreachable,
+        };
+        assert!(matches!(
+            fake.add_route(&spec).await,
+            Err(NetlinkError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            fake.change_route(&spec).await,
+            Err(NetlinkError::InvalidArgument(_))
+        ));
+        assert!(fake.operations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_routes_is_sorted_and_reports_interfaces_by_index() {
+        let fake = fake_with_eth0();
+        let late = Ipv4Net::new(Ipv4Addr::new(10, 9, 0, 0), 16).unwrap();
+        let early = Ipv4Net::new(Ipv4Addr::new(10, 1, 0, 0), 16).unwrap();
+        for destination in [late, early] {
+            fake.add_route(&RouteSpec {
+                destination,
+                table: 200,
+                target: RouteTarget::OnLink { dev: eth0() },
+            })
+            .await
+            .unwrap();
+        }
+        let listed = fake.list_routes(Some(200)).await.unwrap();
+        assert_eq!(
+            listed.iter().map(|r| r.destination).collect::<Vec<_>>(),
+            vec![early, late]
+        );
+        assert!(listed.iter().all(|r| r.target
+            == RouteTarget::OnLink {
+                dev: Interface::Index(2)
+            }));
     }
 }
