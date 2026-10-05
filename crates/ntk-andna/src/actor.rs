@@ -388,8 +388,11 @@ impl Handle {
         req.verify().map_err(|_| AndnaError::InvalidSignature)?;
         let topology = self.substrate.topology().clone();
 
+        // Routed by *this node's* position, never `req.owner_naddr`: the Counter keys its cap by
+        // the verified `client_tuple` (this node), so a self-declared owner address would let one
+        // registrant spread reservations across counter nodes and multiply its allowance.
         let counter_target =
-            ntk_peerservices::hash_to_tuple(&topology, counter_route_key(&req.owner_naddr));
+            ntk_peerservices::hash_to_tuple(&topology, counter_route_key(self.substrate.my_pos()));
         let counter_reply = self
             .substrate
             .contact_peer(
@@ -659,5 +662,84 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resolved, vec![record]);
+    }
+
+    /// Records the target of every `contact_peer` call, then fails it.
+    struct RecordingSubstrate {
+        idle: IdleSubstrate,
+        targets: std::sync::Mutex<Vec<Vec<u32>>>,
+    }
+
+    impl AndnaSubstrate for RecordingSubstrate {
+        fn topology(&self) -> &Topology {
+            self.idle.topology()
+        }
+        fn my_pos(&self) -> &Naddr {
+            self.idle.my_pos()
+        }
+        fn register(&self, _service: Arc<dyn PeerService>) -> BoxFuture<'_, ()> {
+            Box::pin(async {})
+        }
+        fn contact_peer(
+            &self,
+            _p_id: ServiceId,
+            target: TupleNode,
+            _request: TypedValue,
+            _timeout: Duration,
+        ) -> BoxFuture<'_, Result<TypedValue, ContactPeerError>> {
+            self.targets
+                .lock()
+                .unwrap()
+                .push(target.positions().to_vec());
+            Box::pin(async { Err(ContactPeerError::NoParticipants) })
+        }
+        fn replicate(
+            &self,
+            _p_id: ServiceId,
+            _target: TupleNode,
+            _request: TypedValue,
+            _timeout: Duration,
+            _q: u32,
+        ) -> BoxFuture<'_, Vec<TypedValue>> {
+            Box::pin(async { Vec::new() })
+        }
+    }
+
+    #[tokio::test]
+    async fn counter_is_routed_by_the_callers_own_address_not_the_declared_owner_address() {
+        let topology = Topology::new([8, 8]).unwrap();
+        let my_pos = Naddr::new(topology.clone(), vec![1, 2]).unwrap();
+        let substrate = Arc::new(RecordingSubstrate {
+            idle: IdleSubstrate {
+                topology: topology.clone(),
+                my_pos,
+            },
+            targets: std::sync::Mutex::new(Vec::new()),
+        });
+        let (_manager, handle) = Manager::new(substrate.clone(), Config::default());
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+
+        for (i, owner_pos) in [[0u32, 0u32], [7, 7], [3, 5]].into_iter().enumerate() {
+            let owner = Naddr::new(topology.clone(), owner_pos.to_vec()).unwrap();
+            let req = RegisterRequest::sign(
+                &key,
+                Hostname::new(&format!("h{i}")).unwrap(),
+                owner,
+                1,
+                unix_now(),
+                16,
+                1,
+                Vec::new(),
+            )
+            .unwrap();
+            assert!(handle.register(req).await.is_err());
+        }
+
+        let targets = substrate.targets.lock().unwrap();
+        assert_eq!(targets.len(), 3);
+        assert!(
+            targets.windows(2).all(|w| w[0] == w[1]),
+            "varying owner_naddr must not move the counter target: {targets:?}"
+        );
     }
 }
