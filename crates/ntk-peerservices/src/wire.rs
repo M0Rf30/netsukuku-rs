@@ -116,6 +116,14 @@ fn forwarder_from_wire(
         level: lvl,
         levels: topology.levels(),
     })?;
+    // `forward_msg` builds `make_tuple_gnode(.., HCoord::new(lvl, pos), n.top())`, which asserts
+    // `n.top() > lvl`; refuse a forwarder violating that so a crafted message cannot panic it.
+    if lvl >= n.top() {
+        return Err(Error::LevelOutOfRange {
+            level: lvl,
+            levels: n.top(),
+        });
+    }
     if w.pos >= gsize {
         return Err(Error::PositionOutOfRange {
             level: lvl,
@@ -579,6 +587,21 @@ mod tests {
         let mf = forwarder_from_wire(&t, &w).unwrap();
         assert_eq!(mf.lvl, 1);
         assert_eq!(mf.pos, 2);
+    }
+
+    #[test]
+    fn rejects_forwarder_whose_lvl_is_not_below_its_origin_tuple_top() {
+        let t = topology(&[2, 3]);
+        let mut w = forwarder_wire(1, 0);
+        w.n = Some(wire::PeerTupleNode { pos: vec![0] }); // top 1, lvl 1: would trip make_tuple_gnode.
+        let err = forwarder_from_wire(&t, &w).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::LevelOutOfRange {
+                level: 1,
+                levels: 1
+            }
+        ));
     }
 
     #[test]
