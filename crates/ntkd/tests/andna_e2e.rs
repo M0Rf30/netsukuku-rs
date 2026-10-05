@@ -196,7 +196,13 @@ async fn node_a_body(
     // real protocol cadence, just triggering it at the first moment it can succeed.
     let andna = started.running.generation.borrow().andna.clone();
     andna.register_services().await;
-    let req = RegisterRequest::sign(&owner_key, hostname, naddr(0), 1, 1_000, 16, 1, Vec::new())
+    // The hash-node rejects a signed timestamp more than an hour from its own clock (replay
+    // protection), so sign with the real wall clock rather than a fixed epoch offset.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_secs();
+    let req = RegisterRequest::sign(&owner_key, hostname, naddr(0), 1, now, 16, 1, Vec::new())
         .expect("well-formed signed request");
     let register_outcome = andna.register(req).await.map_err(|e| e.to_string());
     let _ = ready_tx.send(register_outcome.as_ref().map(|_| ()).map_err(Clone::clone));
