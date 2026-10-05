@@ -3,8 +3,8 @@
 
 //! Unit-level coverage for the negotiated re-address path (`crate::node::lifecycle`'s
 //! "Negotiated re-address" module doc): alone stays create-net-equivalent, a discovered peer
-//! resolves a real join and the daemon adopts it (rehook), an unresolvable arc (incompatible
-//! topology) recovers to a well-defined steady state instead of wedging, and a rehook's
+//! resolves a real join and the daemon adopts it (migrate), an unresolvable arc (incompatible
+//! topology) recovers to a well-defined steady state instead of wedging, and a migration's
 //! generation swap tears down the previous generation's kernel state exactly once.
 //!
 //! Same in-memory harness shape as `tests/multi_node.rs` (`FakeNetlink` per node, a hand-rolled
@@ -364,7 +364,7 @@ async fn lone_identity_stays_at_its_own_position_and_stays_hooked() {
     // Not asserted: `snap.chosen.naddr`'s exact value — `ntk_hooking::spawn`'s `CreateNet`
     // branch always records the hardcoded all-zero `entry_data.pos` there regardless of the
     // real `Naddr` this identity was actually given (`ntk_hooking`'s own internal informational
-    // bookkeeping, never consulted by this daemon's production code — `rehook`'s real trigger is
+    // bookkeeping, never consulted by this daemon's production code — `migrate`'s real trigger is
     // `HookingEvent::DoFinishEnter`, not `chosen`; see the module doc).
 }
 
@@ -450,7 +450,7 @@ async fn single_node_coordinator_reserves_its_own_position_but_never_self_answer
 
 /// Two negotiated identities, each deriving its own distinct starting position, discover each
 /// other over one arc; `ntk-hooking`'s own merge protocol resolves exactly one side as the guest
-/// that must enter the other's (trivial, one-node) network, and this daemon's `rehook` (wired to
+/// that must enter the other's (trivial, one-node) network, and this daemon's `migrate` (wired to
 /// `HookingEvent::DoFinishEnter`, module doc) adopts that resolved position end to end: qspn
 /// moves, kernel routes are reinstalled for the new address, and the loser's previous
 /// generation's kernel state (address + rule) is torn down exactly once — never a leak, never a
@@ -468,7 +468,7 @@ async fn single_node_coordinator_reserves_its_own_position_but_never_self_answer
 /// (`req.min_lvl + 1` instead of always `levels`, upstream's own "coordinator of the whole
 /// network" — `api.vala:63`); both are fixed with doc comments on the adapter methods
 /// themselves. A second, independent bug in `RunningNode` (now [`GenerationHandles`]) meant
-/// even a successful rehook was unobservable from outside the steady-state loop: `qspn`/
+/// even a successful migration was unobservable from outside the steady-state loop: `qspn`/
 /// `peers`/`coordinator`/`andna` were captured once from the first generation and never
 /// updated, unlike `route_installer`'s own `Arc<Mutex<_>>`.
 #[tokio::test]
@@ -675,7 +675,7 @@ async fn two_virgin_daemons_merge_into_one_network_on_a_multi_level_topology() {
 /// An arc whose peer never resolves to the same or a mergeable network (incompatible
 /// topology — the arc-handler's permanently-inert `IncompatibleTopology` phase) recovers to a
 /// well-defined steady state instead of wedging: both identities keep running at their own
-/// trivial position, neither ever claims a resolved entry, and — since `rehook` never fires —
+/// trivial position, neither ever claims a resolved entry, and — since `migrate` never fires —
 /// no kernel state is ever torn down.
 #[tokio::test]
 async fn incompatible_topology_never_hooks_and_never_wedges() {

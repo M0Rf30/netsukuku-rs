@@ -50,12 +50,12 @@
 //! current g-node") — Coordinator propagates that back to this same process
 //! (`crate::node::adapters::PropagationHandlerAdapter`), surfacing as
 //! [`HookingEvent::DoFinishEnter`] on hooking's *event* stream (unconditional — unlike
-//! `mark_entered`'s snapshot update, nothing gates this on `hooked`). `rehook` reacts to it:
+//! `mark_entered`'s snapshot update, nothing gates this on `hooked`). `migrate` reacts to it:
 //! `entry_data.pos` covers levels `[guest_gnode_level, topology.levels())` only — the levels
 //! the negotiation actually resolved (`ntk_hooking::ChosenAddress`'s own doc). At
 //! `guest_gnode_level == 0` (the single-previously-unhooked-node case this daemon's own
 //! bootstrap always produces) that happens to be the whole address, since a level-0 g-node has
-//! exactly one member and nothing below it to retain. `rehook` combines it with this
+//! exactly one member and nothing below it to retain. `migrate` combines it with this
 //! identity's own currently-held positions at levels below `guest_gnode_level` (see "Coordinated
 //! multi-member migration" below) before discarding the old position and rebuilding every OTHER
 //! generation-scoped actor (qspn, peerservices/coordinator/andna, the installed kernel routes)
@@ -66,13 +66,13 @@
 //! is not rebuilt either — [`ntk_identities::Handle::set_naddr`] updates it in place, its own
 //! documented seam for exactly this ("the daemon set it once hooking resolves a position").
 //!
-//! `rehook` runs any number of times over the process's life — a member's own g-node forms
+//! `migrate` runs any number of times over the process's life — a member's own g-node forms
 //! once, then may merge into successively bigger networks, each merge driving another
-//! `DoFinishEnter`/`rehook` cycle for every member ("Coordinated multi-member migration" below).
+//! `DoFinishEnter`/`migrate` cycle for every member ("Coordinated multi-member migration" below).
 //! There is accordingly no one-shot latch: `SteadyStateCtx::migration_in_progress` only ever
 //! blocks a second `DoFinishEnter` from starting while an earlier one's synchronous
 //! teardown/rebuild is still in flight — never a legitimate repeat migration once that work has
-//! completed — and `rehook` separately drops a `DoFinishEnter` naming the position this
+//! completed — and `migrate` separately drops a `DoFinishEnter` naming the position this
 //! identity already holds (a stale re-delivery of an already-applied propagation), so the
 //! invariant is: **at most one migration in flight per identity, serialized; a completed
 //! migration is idempotent against its own stale replay.** This still applies only to a
@@ -108,14 +108,14 @@
 //! `crate::node::codec::encode_finish_enter_data`) — the only piece that was missing was *using*
 //! it as such at the receiving end, which `on_hooking_event`'s `DoFinishEnter` arm now does:
 //! every member, negotiator and silent sibling alike, combines the identical propagated upper
-//! levels with its own distinct, unaffected lower levels and calls `rehook` — so a g-node's
+//! levels with its own distinct, unaffected lower levels and calls `migrate` — so a g-node's
 //! members always end up sharing the new upper position while keeping their own separate
 //! identity below it, regardless of which one of them actually ran the negotiation.
 //!
 //! **Gated to `guest_gnode_level >= 1` implicitly, not by a level check.** A level-0 g-node has
 //! exactly one member, so `entry_data.pos` already spans the whole address there and the "combine
 //! with retained lower levels" step degenerates to concatenating an empty prefix — byte-for-byte
-//! the same address `rehook` would have built before this section existed. `guest_gnode_level
+//! the same address `migrate` would have built before this section existed. `guest_gnode_level
 //! == 0` behavior is therefore unchanged, not specially preserved.
 //!
 //! **A member already mid-negotiation when the propagation lands is let finish, not aborted.**
@@ -130,11 +130,11 @@
 //! cancellation-aware at points it never has been, and this state machine already tolerates a
 //! second, later negotiation resolving a g-node that has already arrived (`migration_in_progress`
 //! plus [`GenerationHandles::migrations`] above, not a one-shot latch) — a second, different
-//! `DoFinishEnter` for the same g-node just drives one more, self-correcting `rehook`, exactly
+//! `DoFinishEnter` for the same g-node just drives one more, self-correcting `migrate`, exactly
 //! like an unrelated later merge would.
 //!
 //! # Scope boundary: no true concurrent fork, no third-network re-fork
-//! `rehook` always does the same simple thing regardless of how many times it runs: fork the
+//! `migrate` always does the same simple thing regardless of how many times it runs: fork the
 //! identity, tear down the previous generation, rebuild at the combined position. It never
 //! models upstream's *connectivity identity* (`make_connectivity`/`check_connectivity`,
 //! `identities.vala:441-577`) — a bridge kept alive so a still-migrating g-node's external arcs
@@ -147,10 +147,12 @@
 //! rather than every generation claiming the main one. What remains is this function's own
 //! ordering.
 //!
-//! `ntk_hooking::HookingEvent::DoPrepareMigration`/`DoFinishMigration` are wired to
-//! [`ntk_identities::Handle::prepare_migration`]/`migrate` — real, working identity-registry
-//! bookkeeping — but this daemon still does not keep the outgoing generation serving while the
-//! successor hooks.
+//! Of `ntk_hooking`'s migration events, only `HookingEvent::DoPrepareMigration` reaches
+//! [`ntk_identities::Handle::prepare_migration`]; `HookingEvent::DoFinishMigration` is only
+//! logged. The identity fork itself is driven by `migrate` (private) on
+//! [`HookingEvent::DoFinishEnter`]: it runs its own `prepare_migration`/`migrate` pair under a
+//! locally generated migration id — real, working identity-registry bookkeeping — but this
+//! daemon still does not keep the outgoing generation serving while the successor hooks.
 //!
 //! # What closing the blackout actually requires
 //! Less than "spawn a second complete stack". `migrate` (private) cancels the outgoing generation and
@@ -497,7 +499,7 @@ impl<K: std::fmt::Debug> std::fmt::Debug for NodeInputs<K> {
     }
 }
 
-/// The four identity-generation-scoped handles that change together on every `rehook`: torn
+/// The four identity-generation-scoped handles that change together on every `migrate`: torn
 /// down and rebuilt as a unit, exactly like `Generation`'s own bundle (`identities`/`hooking`
 /// are excluded for the same reason `Generation` excludes/carries them — see the module doc's
 /// "Negotiated re-address" section and [`crate::node::services::HookingProvenance`]'s doc).
@@ -506,28 +508,28 @@ impl<K: std::fmt::Debug> std::fmt::Debug for NodeInputs<K> {
 /// `RunningNode` used to hold `qspn`/`peers`/`coordinator`/`andna` as plain fields, captured
 /// once from the *first* (always-trivial) generation and never updated — unlike
 /// `route_installer` below, which already solves this identical staleness problem for kernel
-/// state via `Arc<Mutex<_>>`. Once a negotiated identity actually rehooks, those four plain
+/// state via `Arc<Mutex<_>>`. Once a negotiated identity actually migrates, those four plain
 /// fields kept pointing at the old generation's now-cancelled actors forever: the status server
 /// (`crate::node::status::report`) would report frozen route/participation/reservation/hostname
-/// counts, and any test holding a `RunningNode` reference could never observe the post-rehook
-/// state. A `watch::Receiver` here, updated by `rehook` via `send_replace` (module doc), keeps
+/// counts, and any test holding a `RunningNode` reference could never observe the post-migration
+/// state. A `watch::Receiver` here, updated by `migrate` via `send_replace` (module doc), keeps
 /// every reader current.
 ///
 /// # `rehooked`: why a dedicated flag, not "did the position change"
-/// The obvious external proxy for "did this identity rehook" — comparing
-/// `qspn.my_naddr().positions()` before and after — is unsound: `rehook` can legitimately
+/// The obvious external proxy for "did this identity migrate" — comparing
+/// `qspn.my_naddr().positions()` before and after — is unsound: `migrate` can legitimately
 /// negotiate a position that numerically coincides with this identity's own pre-migration
 /// position (the Coordinator reserves whatever slot is free in the *other* network, which has
 /// no relationship to the slot this identity happened to hold before). Confirmed by a captured
 /// stress-test failure of `tests/multi_node.rs`'s
 /// `real_netns_two_daemons_negotiate_a_shared_network`: the guest's own trace log showed the
-/// full `AnotherNetwork` -> `finish_enter` -> `rehook` sequence complete successfully, yet its
+/// full `AnotherNetwork` -> `finish_enter` -> `migrate` sequence complete successfully, yet its
 /// reserved position (`[0]`) happened to equal its own discarded starting position (`[0]`,
 /// deterministic from that test's hardcoded `NodeId`), so a position-comparison heuristic
 /// reported "not rehooked" for an identity that, per the daemon's own internal state,
 /// definitely had. `rehooked` instead mirrors whether [`Self::migrations`] is nonzero — the
-/// authoritative count `rehook` itself maintains — so external observers never have to
-/// (unsoundly) reconstruct it. `rehook` is not one-shot (module doc's "Coordinated multi-member
+/// authoritative count `migrate` itself maintains — so external observers never have to
+/// (unsoundly) reconstruct it. `migrate` is not one-shot (module doc's "Coordinated multi-member
 /// migration" section), so `rehooked` means "has migrated at least once", not "did the one
 /// allowed migration happen" — existing readers of this field (`tests/multi_node.rs`,
 /// `tests/wireless.rs`, `tests/netns`) only ever test it for `true`, which this meaning
@@ -589,7 +591,7 @@ pub struct StartedNode<K> {
 }
 
 /// Everything [`bootstrap_generation`] spawns for one identity generation: torn down and
-/// rebuilt as a unit by [`rehook`] on a negotiated re-address. `identities` is deliberately not
+/// rebuilt as a unit by [`migrate`] on a negotiated re-address. `identities` is deliberately not
 /// part of this bundle — see the module doc's "Negotiated re-address" section.
 struct Generation<K> {
     qspn: ntk_qspn::QspnHandle,
@@ -624,7 +626,7 @@ enum QspnOrigin {
 
 /// Spawns qspn, peerservices/coordinator/andna/hooking (via [`services::spawn`]), and this
 /// identity's kernel routes, all positioned at `my_naddr` — the common bootstrap both [`run`]
-/// (the initial, always-trivial generation) and [`rehook`] (a later negotiated re-address) need.
+/// (the initial, always-trivial generation) and [`migrate`] (a later negotiated re-address) need.
 /// Every actor spawned here is a child of `cancel` and reaped into `tasks`.
 ///
 /// `table`/`rule_priority` are this generation's already-allocated routing-table id and rule
@@ -656,7 +658,7 @@ enum QspnOrigin {
 /// this function, immediately after `ntk_qspn::spawn` returns and before this task's next
 /// `.await` point: `spawn` itself never polls the actor it hands back (a fresh `tokio::spawn`
 /// only enqueues it), so no event can possibly fire before this line runs — see
-/// [`Generation::qspn_events`]'s own doc. [`rehook`] carries the identical risk (it also calls
+/// [`Generation::qspn_events`]'s own doc. [`migrate`] carries the identical risk (it also calls
 /// `bootstrap_generation`, then used to subscribe only after several more `.await` points,
 /// including a real netlink round trip in `installer.install_identity()`) and is fixed the same
 /// way, by reading `Generation::qspn_events` instead of re-subscribing.
@@ -681,8 +683,8 @@ async fn bootstrap_generation<K>(
     cancel: CancellationToken,
     // This node's RPC-identity signing key and `require_auth` flag — threaded straight through
     // to `services::spawn` (`ntk_peerservices::Handle::with_signing_key`/`Config::require_auth`).
-    // Reloaded fresh at every generation (including a `rehook`) rather than persisted across
-    // them: `andna_key::load_or_generate` is idempotent against the same path, and a rehook is
+    // Reloaded fresh at every generation (including a migration) rather than persisted across
+    // them: `andna_key::load_or_generate` is idempotent against the same path, and a migration is
     // rare enough that the extra file read is immaterial.
     signing_key: Option<ed25519_dalek::SigningKey>,
     require_auth: bool,
@@ -883,7 +885,7 @@ where
     // `CreateNet`: every node is its own network-of-one from the start, exactly like upstream's
     // own `create_net`; `negotiated` (an explicit `initial_position` is authoritative and never
     // renegotiated; `preformed`, like the production default, stays negotiable) instead gates
-    // [`rehook`], triggered later by `HookingEvent::DoFinishEnter`.
+    // [`migrate`], triggered later by `HookingEvent::DoFinishEnter`.
     let negotiated = initial_position.is_none();
     let origin = ntk_hooking::HookingOrigin::CreateNet;
     let position = match (initial_position, &preformed) {
@@ -895,7 +897,7 @@ where
     let network_id = preformed.map_or_else(random_i64, |preformed| preformed.network_id);
     let net = Arc::new(NetworkInfo::new(levels, network_id));
 
-    // -- Identities (survives every future `rehook` — see the module doc) --
+    // -- Identities (survives every future `migrate` — see the module doc) --
     let identity_stub_factory = Arc::new(IdentityStubFactoryAdapter {
         links: links.clone(),
         registry: registry.clone(),
@@ -1062,7 +1064,7 @@ struct SteadyStateCtx<K> {
     /// [`RunningNode::generation`]'s readers — see [`GenerationHandles`]'s doc.
     generation_handles_tx: watch::Sender<GenerationHandles>,
     negotiated: bool,
-    /// Guards [`rehook`] against a second `DoFinishEnter` starting while an earlier one's
+    /// Guards [`migrate`] against a second `DoFinishEnter` starting while an earlier one's
     /// synchronous teardown/rebuild is still running — never against a legitimate *repeat*
     /// migration. See the module doc's "Coordinated multi-member migration" section.
     migration_in_progress: bool,
@@ -1490,21 +1492,22 @@ fn is_stale_finish_enter_replay(
 /// # Why not a true concurrent fork
 /// Upstream's own model keeps a superseded identity alive as a *connectivity* bridge
 /// (`ntk_qspn::QspnHandle::make_connectivity`/`check_connectivity`) while its successor
-/// independently re-hooks, both simultaneously reachable. Two things in this daemon's current
-/// shape make that impossible, not merely unimplemented:
-/// (1) [`Dispatcher::replace_identity_stack`] swaps the *whole* [`IdentityStack`] — this daemon
-/// has exactly one live inbound dispatch target per process, never two — so there is no way to
-/// keep `old_id`'s protocol stack independently answering RPCs while `new_id`'s bootstraps; and
-/// (2) `make_connectivity`/`check_connectivity` themselves assert `connectivity_from_level > 0`
-/// (a real bridge holds internal structure *below* the level that's moving) — since this
-/// daemon's fork never keeps two identities simultaneously live regardless of `guest_gnode_level`
-/// (point (1) above already rules that out unconditionally), calling either would violate their
-/// own concurrent-fork precondition before `guest_gnode_level` is even relevant.
-/// The closest correct thing given those two facts: use `ntk_identities`' fork purely for
-/// identity-*registry* bookkeeping (which `IdentityId` is "main", a virtual-then-real `naddr`
-/// for `is_hooked()`), retiring `old_id` synchronously the instant this function's own
-/// synchronous protocol handoff (unchanged from before this fork existed) completes — never a
-/// window where two identities are simultaneously reachable, because only one ever is.
+/// independently re-hooks, both simultaneously reachable. This function does not, and the
+/// dispatcher is no longer the reason: [`Dispatcher`] resolves `Request.unicast_id` to a
+/// specific identity and [`Dispatcher::register_identity`] can host a second [`IdentityStack`]
+/// next to the main one. What stops it is this function's own shape: it cancels the outgoing
+/// generation and tears its kernel state down *before* bootstrapping the successor, and it then
+/// swaps the main identity's whole stack with [`Dispatcher::replace_identity_stack`] — the
+/// outgoing stack is never registered as a secondary identity. `make_connectivity`/
+/// `check_connectivity` also assert `connectivity_from_level > 0` (a real bridge holds internal
+/// structure *below* the level that's moving), a precondition this function does not establish.
+/// The module doc's "What closing the blackout actually requires" lists the sequence that would
+/// change this.
+/// The closest correct thing today: use `ntk_identities`' fork purely for identity-*registry*
+/// bookkeeping (which `IdentityId` is "main", a virtual-then-real `naddr` for `is_hooked()`),
+/// retiring `old_id` synchronously the instant this function's own synchronous protocol handoff
+/// completes — never a window where two identities are simultaneously reachable, because the
+/// outgoing one is gone before the successor exists.
 async fn migrate<K>(
     ctx: &mut SteadyStateCtx<K>,
     cancel: &CancellationToken,
@@ -1619,7 +1622,7 @@ where
     // falls back to an empty hand-off once the actor is gone, so reading it after the cancel
     // below would silently reset every level to `GnodeMemory::fresh` — which is exactly the
     // defect this captures: per-level eldership and reservation state used to restart from
-    // scratch on every rehook, because `Manager::new`'s `handoff` was hardcoded `None`.
+    // scratch on every migration, because `Manager::new`'s `handoff` was hardcoded `None`.
     // Cloned out in its own statement so the `watch::Ref` guard is dropped before the `await` —
     // holding it across one makes this future `!Send`, which `JoinSet` rejects.
     let outgoing_coordinator = ctx.generation_handles_tx.borrow().coordinator.clone();

@@ -65,10 +65,10 @@ impl HookingRetarget {
 /// Where this generation's [`HookingHandle`] comes from — see `crate::node::lifecycle`'s
 /// "Negotiated re-address" module doc section.
 ///
-/// A negotiated re-address (`rehook`) fires only once hooking's own per-arc merge protocol has
+/// A negotiated re-address (`migrate`) fires only once hooking's own per-arc merge protocol has
 /// *already* resolved this identity's entry (`HookingEvent::DoFinishEnter`) — there is nothing
 /// left for a second `HookingHandle` to do: rebuilding it would only restart a merge negotiation
-/// that already succeeded. So a rehook always carries the *same*, already-resolved handle over
+/// that already succeeded. So a migration always carries the *same*, already-resolved handle over
 /// into the new generation ([`Self::Carried`]); a *fresh* actor ([`Self::Fresh`]) is only ever
 /// needed once, for this identity's very first (always `CreateNet`) generation.
 #[derive(Debug)]
@@ -182,7 +182,7 @@ pub async fn spawn(
     // A retiring generation's exported Coordinator state (`ntk_coordinator::Handle::hand_off`),
     // threaded into `ntk_coordinator::Manager::new`'s `handoff` parameter — the hand-off protocol
     // at `coord.vala:142-146`. `None` on a first boot, where there is nothing to inherit; `Some`
-    // on a rehook, so per-level eldership and reservation state carries across the migration
+    // on a migration, so per-level eldership and reservation state carries across the migration
     // instead of every level restarting from `GnodeMemory::fresh`.
     coordinator_handoff: Option<ntk_coordinator::HandOff>,
     // Process-lifetime scope for a `Fresh` hooking actor — see [`ProcessScope`].

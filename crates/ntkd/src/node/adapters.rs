@@ -921,45 +921,33 @@ impl HookingCoordinatorClient for CoordinatorClientAdapter {
         })
     }
 
-    /// `begin_enter`/`completed_enter`/`abort_enter` route to `CoordinatorKey(lvl)` directly in
-    /// upstream (`peer_service.vala:218,243,268,293`: `new CoordinatorKey(lvl)`, no offset).
-    /// `lvl` can legitimately be `0` (`arc_handler.vala:303`'s own "network is full at level 0"
-    /// branch), which upstream represents as `CoordinatorKey(0)`, `perfect_tuple` = **zero**
-    /// zeros = the empty tuple `ntk_peerservices::Handle::contact_peer` already documents as
-    /// "route to myself" (`tuple::approximate`'s `valid_levels == 0` branch).
-    /// [`ntk_coordinator::CoordinatorClient::target_for`] has no way to express that degenerate
-    /// target (`top` must be `1..=levels`), so `lvl == 0` is clamped up to `CoordinatorKey(1)`
-    /// ("coordinator of my own level-0 g-node") instead of literally myself: that lookup falls
-    /// back to the same node (myself, `tuple::approximate`'s unconditional "me" fallback) the
-    /// `CoordinatorKey(0)` target would have reached, so the two are observably identical *at
-    /// `lvl == 0`*.
-    ///
-    /// # Why `lvl.max(1)` and not `lvl + 1`
-    /// This method used `lvl + 1` unconditionally, justified by an argument that only ever held
-    /// for `lvl == 0` — which is the only value reachable when `levels == 1`. On a multi-level
-    /// topology `evaluate_enter` echoes back a `chosen_lvl >= 1`, and `lvl + 1` then routed every
-    /// entry **one level too deep**; at `lvl == levels` it exceeded `levels` outright and failed
-    /// with [`ntk_coordinator::ProxyError::InvalidTop`] — the same off-by-one, with the same
-    /// signature, as the [`Self::reserve`] bug documented below. Observed live as
-    /// `begin_enter proxy error … no participants in the network for this service`, with two
-    /// daemons settling permanently into different g-nodes while still exchanging QSPN routes.
+    /// Upstream routes `begin_enter`/`completed_enter`/`abort_enter` to `CoordinatorKey(lvl)`
+    /// directly (`peer_service.vala:218,243,268,293`: `new CoordinatorKey(lvl)`, no offset). This
+    /// port's DHT path sends `lvl + 1` instead; see "Why `lvl + 1`" below before touching it.
     ///
     /// # `lvl == 0` never goes to the DHT
-    /// `CoordinatorKey(0)` is not a legal key — `is_valid_key` accepts only `1..=levels`
-    /// (`fk_database.vala:47-55`, mirrored in `ntk_coordinator`'s own `reserve_enter`) — so a
-    /// servant reached with `top == 0` answers `top 0 is out of range for a topology with N
-    /// levels`. Upstream never constructs that key: `proxy_coord.vala:342-355` short-circuits
-    /// `if (lvl == 0) { mgr.begin_enter(lvl, ...); return; }`, invoking the *local* manager and
-    /// skipping the coordinator entirely (same bypass at `:389-396` for `completed_enter` and
-    /// `:422-429` for `abort_enter`).
+    /// `lvl` can legitimately be `0` (`arc_handler.vala:303`'s own "network is full at level 0"
+    /// branch), which upstream represents as `CoordinatorKey(0)`. That is not a legal key —
+    /// `is_valid_key` accepts only `1..=levels` (`fk_database.vala:47-55`, mirrored in
+    /// `ntk_coordinator`'s own `reserve_enter`) — so a servant reached with `top == 0` answers
+    /// `top 0 is out of range for a topology with N levels`. Upstream never constructs that key:
+    /// `proxy_coord.vala:342-355` short-circuits `if (lvl == 0) { mgr.begin_enter(lvl, ...);
+    /// return; }`, invoking the *local* manager and skipping the coordinator entirely (same
+    /// bypass at `:389-396` for `completed_enter` and `:422-429` for `abort_enter`). This method
+    /// reproduces that bypass through [`ntk_coordinator::Handle::begin_enter`] and returns
+    /// without a round trip. Two other ways of serving `lvl == 0` were tried and are wrong:
+    /// clamping to `CoordinatorKey(1)` silently turns an illegal key into a legal-but-wrong one,
+    /// and routing `top == 0` as "route to myself" cannot be expressed by
+    /// [`ntk_coordinator::CoordinatorClient::target_for`].
     ///
-    /// This port's local [`ntk_coordinator::BeginEnterHandler`] is
-    /// [`EnterHandlersAdapter`]'s no-op, so upstream's bypass is exactly equivalent to
-    /// succeeding here without any round trip — no handler wiring is needed to reproduce it.
-    /// A prior `lvl.max(1)` clamp instead sent `CoordinatorKey(1)`, silently converting an
-    /// illegal key into a legal-but-wrong one; on a multi-level topology `evaluate_enter`
-    /// legitimately answers `chosen_lvl = 0` and the guest then aborted with
-    /// `begin_enter proxy error … no participants in the network for this service`.
+    /// # Why `lvl + 1`
+    /// For `lvl >= 1` the key sent is `lvl + 1`, because this port's coordinator handlers
+    /// ([`EnterArbiter`]'s `begin_enter`/`completed_enter`/`abort_enter`) recover the level as
+    /// `top.saturating_sub(1)`: `top` is the `CoordinatorKey` level, `lvl` the zero-based entry
+    /// level `evaluate_enter` returned as `chosen_lvl`. Sending `lvl` unchanged (or `lvl.max(1)`)
+    /// would route every entry one level too shallow — it passed the suite for a while only
+    /// because the tests then exercised `lvl == 0` alone — and `lvl + 1 <= levels` holds because
+    /// `chosen_lvl < levels`.
     fn begin_enter(&self, lvl: usize) -> BoxFuture<'_, Result<(), CoordinatorError>> {
         Box::pin(async move {
             if lvl == 0 {
@@ -1674,7 +1662,7 @@ pub struct EnterHandlersAdapter {
     /// This g-node's own live topology/positions — needed to compute `Self::chosen_lvl`
     /// rather than always echoing back the caller's own `min_lvl` (always `0` in this daemon,
     /// `QspnViewAdapter::subnetlevel`'s own doc). A fresh instance is built for every identity
-    /// generation (`crate::node::services::spawn`, never carried across a `rehook`), so this
+    /// generation (`crate::node::services::spawn`, never carried across a `migrate`), so this
     /// is always the *current* generation's own qspn — never the staleness
     /// [`ntk_hooking::HookingHandle`]'s own carried-across-generations view has.
     pub qspn: ntk_qspn::QspnHandle,

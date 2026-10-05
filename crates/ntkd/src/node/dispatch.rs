@@ -15,22 +15,22 @@
 //! joins the routing table. `neighborhood`/`identity` stay exactly as before: node-level,
 //! unconditional, never consulting `unicast_id` at all.
 //!
-//! # Before mig-01 lands: `secondary` is keyed on the wrong id
+//! # Why `secondary` is keyed on `IdentityId`, not `NodeId`
 //!
 //! [`ntk_neighborhood::NodeId`] identifies the *node*, not an identity: it is
 //! `NeighborhoodConfig::my_id`, fixed for the process's whole life. A connectivity fork and the
-//! successor it bridges for would therefore share it and collide in `secondary`. Upstream keys
-//! the equivalent lookup on an identities-level id — `IdentityAwareUnicastID(NodeID)` carries the
-//! identity's own id, and `get_identity_skeleton` matches it against each entry of
-//! `local_identities` (`research/impl/vala/ntkd/rpc/skeleton_factory.vala:284-291`).
+//! successor it bridges for would therefore share it and collide. Upstream keys the equivalent
+//! lookup on an identities-level id — `IdentityAwareUnicastID(NodeID)` carries the identity's own
+//! id, and `get_identity_skeleton` matches it against each entry of `local_identities`
+//! (`research/impl/vala/ntkd/rpc/skeleton_factory.vala:284-291`).
 //!
-//! This is not a live defect: `secondary` is always empty today, and the main identity resolves
-//! via `main_id` before `secondary` is consulted, so every path in use is correct and tested. It
-//! simply does not extend. Whoever builds the fork must first re-key on
-//! [`ntk_identities::IdentityId`] — which `ntk_identities::Handle::migrate` already returns for
-//! the successor, and which identity arcs already carry for peers (`my_peer_old_id`/
-//! `my_peer_new_id`), so a peer can name it. The wire needs no change: `identity_aware`'s payload
-//! is an opaque `TypedValue`.
+//! `secondary` is therefore keyed on [`ntk_identities::IdentityId`], which
+//! `ntk_identities::Handle::migrate` returns for the successor and which identity arcs carry for
+//! peers (`my_peer_old_id`/`my_peer_new_id`), so a peer can name it. The wire needed no change:
+//! `identity_aware`'s payload is an opaque `TypedValue`. The current main id is read live from
+//! the registry (`identities_handle`), because it changes on every migration. `secondary` is
+//! still empty in practice — this daemon does not yet keep a connectivity fork serving — so the
+//! main identity is the only target `Dispatcher::resolve_stack` ever resolves to today.
 
 use std::collections::HashMap;
 use std::sync::Arc;
