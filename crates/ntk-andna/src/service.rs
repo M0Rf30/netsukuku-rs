@@ -49,6 +49,12 @@ fn malformed(message: impl Into<String>) -> ExecError {
     })
 }
 
+/// The actor behind this service has shut down (cancel or rehook); reported like any other
+/// refusal rather than panicking a detached inbound task.
+fn stopped() -> ExecError {
+    malformed("andna: service is shutting down")
+}
+
 /// The `Andna` service: the hostname hash-node/backup role (register/resolve).
 pub struct AndnaService {
     handle: Handle,
@@ -90,7 +96,11 @@ impl PeerService for AndnaService {
                     let req = wire::unpack_register_request(&request)
                         .map_err(|e| malformed(e.to_string()))?;
                     let now = unix_now();
-                    let outcome = self.handle.handle_register(req, now).await;
+                    let outcome = self
+                        .handle
+                        .handle_register(req, now)
+                        .await
+                        .ok_or_else(stopped)?;
                     let reply = match &outcome {
                         Ok(o) => Ok(*o),
                         Err(e) => Err(e),
@@ -101,7 +111,11 @@ impl PeerService for AndnaService {
                     let (hostname, service) = wire::unpack_resolve_request(&request)
                         .map_err(|e| malformed(e.to_string()))?;
                     let now = unix_now();
-                    let records = self.handle.handle_resolve(hostname, service, now).await;
+                    let records = self
+                        .handle
+                        .handle_resolve(hostname, service, now)
+                        .await
+                        .ok_or_else(stopped)?;
                     Ok(wire::pack_resolve_reply(&records))
                 }
                 other => {
@@ -174,7 +188,8 @@ impl PeerService for CounterService {
                     let outcome = self
                         .handle
                         .handle_counter_reserve(client_tuple.to_vec(), hash, now)
-                        .await;
+                        .await
+                        .ok_or_else(stopped)?;
                     let reply = match &outcome {
                         Ok(n) => Ok(*n),
                         Err(e) => Err(e),

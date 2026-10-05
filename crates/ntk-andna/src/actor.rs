@@ -268,14 +268,12 @@ impl std::fmt::Debug for Handle {
 }
 
 impl Handle {
-    async fn call<T>(&self, f: impl FnOnce(oneshot::Sender<T>) -> Cmd) -> T {
+    /// `None` once the actor has shut down (cancelled or every sender dropped): inbound handlers
+    /// run in detached tasks that can outlive it, so that must never panic.
+    async fn call<T>(&self, f: impl FnOnce(oneshot::Sender<T>) -> Cmd) -> Option<T> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(f(tx))
-            .await
-            .expect("actor task is alive for the Handle's lifetime");
-        rx.await
-            .expect("actor never drops a reply sender without replying")
+        self.cmd_tx.send(f(tx)).await.ok()?;
+        rx.await.ok()
     }
 
     /// The [`Topology`] the underlying substrate runs on.
@@ -303,10 +301,8 @@ impl Handle {
     /// stay meaningful caps if something actually calls this on a live daemon; see
     /// [`run_expiry_reclaimer`], the driver this crate ships for that purpose.
     pub async fn purge_expired(&self, now: u64) {
-        self.cmd_tx
-            .send(Cmd::PurgeExpired { now })
-            .await
-            .expect("actor task is alive for the Handle's lifetime");
+        // A stopped actor has nothing left to purge.
+        let _ = self.cmd_tx.send(Cmd::PurgeExpired { now }).await;
     }
 
     /// This node's current [`Config`], as constructed at [`Manager::new`] — read-only, for
@@ -322,7 +318,7 @@ impl Handle {
         &self,
         req: RegisterRequest,
         now: u64,
-    ) -> Result<RegisterOutcome, RegisterRejected> {
+    ) -> Option<Result<RegisterOutcome, RegisterRejected>> {
         self.call(|reply| Cmd::Register {
             req: Box::new(req),
             now,
@@ -338,7 +334,7 @@ impl Handle {
         hostname: Hostname,
         service: u16,
         now: u64,
-    ) -> Vec<SnsdRecord> {
+    ) -> Option<Vec<SnsdRecord>> {
         self.call(|reply| Cmd::Resolve {
             hostname,
             service,
@@ -355,7 +351,7 @@ impl Handle {
         registrant: Vec<u32>,
         hash: HostnameHash,
         now: u64,
-    ) -> Result<usize, CounterRejected> {
+    ) -> Option<Result<usize, CounterRejected>> {
         self.call(|reply| Cmd::CounterReserve {
             registrant,
             hash,
@@ -474,5 +470,84 @@ pub async fn run_expiry_reclaimer(handle: Handle, cancel: CancellationToken) {
             () = cancel.cancelled() => return,
             _ = ticker.tick() => handle.purge_expired(unix_now()).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use futures::future::BoxFuture;
+    use ntk_common::Naddr;
+    use ntk_peerservices::{ContactPeerError, PeerService, ServiceId, TupleNode};
+    use ntk_proto::v1::TypedValue;
+
+    use super::*;
+
+    /// A substrate that is never asked to route anything: these tests only exercise the local
+    /// command channel.
+    struct IdleSubstrate {
+        topology: Topology,
+        my_pos: Naddr,
+    }
+
+    impl AndnaSubstrate for IdleSubstrate {
+        fn topology(&self) -> &Topology {
+            &self.topology
+        }
+        fn my_pos(&self) -> &Naddr {
+            &self.my_pos
+        }
+        fn register(&self, _service: Arc<dyn PeerService>) -> BoxFuture<'_, ()> {
+            Box::pin(async {})
+        }
+        fn contact_peer(
+            &self,
+            _p_id: ServiceId,
+            _target: TupleNode,
+            _request: TypedValue,
+            _timeout: Duration,
+        ) -> BoxFuture<'_, Result<TypedValue, ContactPeerError>> {
+            Box::pin(async { Err(ContactPeerError::NoParticipants) })
+        }
+        fn replicate(
+            &self,
+            _p_id: ServiceId,
+            _target: TupleNode,
+            _request: TypedValue,
+            _timeout: Duration,
+            _q: u32,
+        ) -> BoxFuture<'_, Vec<TypedValue>> {
+            Box::pin(async { Vec::new() })
+        }
+    }
+
+    #[tokio::test]
+    async fn inbound_calls_after_the_actor_stopped_return_none_instead_of_panicking() {
+        let topology = Topology::new([2, 2]).unwrap();
+        let my_pos = Naddr::new(topology.clone(), vec![0, 0]).unwrap();
+        let (manager, handle) = Manager::new(
+            Arc::new(IdleSubstrate { topology, my_pos }),
+            Config::default(),
+        );
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(manager.run(cancel.clone()));
+        cancel.cancel();
+        task.await.unwrap();
+
+        let hash = Hostname::new("example").unwrap().hash();
+        assert!(
+            handle
+                .handle_counter_reserve(vec![0, 0], hash, 0)
+                .await
+                .is_none()
+        );
+        assert!(
+            handle
+                .handle_resolve(Hostname::new("example").unwrap(), 0, 0)
+                .await
+                .is_none()
+        );
+        handle.purge_expired(0).await;
     }
 }
