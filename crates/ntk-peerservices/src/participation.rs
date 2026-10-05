@@ -104,6 +104,11 @@ impl ParticipantSet {
     pub fn is_valid(&self, topology: &Topology) -> bool {
         self.retrieved_below_level <= topology.levels()
             && self.my_pos.len() == topology.levels()
+            && self
+                .my_pos
+                .iter()
+                .enumerate()
+                .all(|(level, &pos)| topology.gsize(level).is_some_and(|gsize| pos < gsize))
             && self.participant_set.values().all(|m| m.is_valid(topology))
     }
 }
@@ -298,6 +303,17 @@ mod tests {
         let mut map = ParticipantMap::new();
         map.insert(HCoord::new(0, 5));
         assert!(!map.is_valid(&t));
+    }
+
+    #[test]
+    fn participant_set_with_out_of_range_my_pos_is_invalid() {
+        let t = topology(&[2, 2]);
+        let set = ParticipantSet {
+            retrieved_below_level: 0,
+            my_pos: vec![0, 7],
+            participant_set: BTreeMap::new(),
+        };
+        assert!(!set.is_valid(&t));
     }
 
     #[test]
