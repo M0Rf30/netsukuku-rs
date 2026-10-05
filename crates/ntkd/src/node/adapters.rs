@@ -21,8 +21,10 @@
 //! [`ntk_hooking::QspnView::my_eldership`]/`eldership` are synchronous ("every method here must
 //! be answerable from already-known local state", per that trait's own doc), but the real
 //! source of truth (`QspnHandle::my_eldership`/`eldership`, both `async fn(..) -> Result<Option<Option<u32>>,
-//! QspnError>`) is not. `EldershipCache` bridges the two: a background task refreshes it on
-//! every [`ntk_qspn::QspnEvent`], and [`QspnViewAdapter`]'s sync methods only ever read the
+//! QspnError>`) is not. `EldershipCache` bridges the two: a background task primes it for every
+//! exported destination once per qspn generation, then re-queries only what each
+//! [`ntk_qspn::QspnEvent`] batch can have changed (`RefreshPlan`), and [`QspnViewAdapter`]'s
+//! sync methods only ever read the
 //! cache. Mapping `Result<Option<Option<u32>>, _>` to the plain `i32` `QspnView` demands, without
 //! collapsing "virtual/null claim" and "unknown" into the same value: a real claim `n` maps to
 //! `n` itself, `FingerprintParts`'s virtual/null case (`Ok(Some(None))`) maps to `-1`
@@ -110,7 +112,7 @@ use ntk_hooking::{
 };
 use ntk_peerservices::{PeersStub, RoutingEnv, TupleNode};
 use ntk_proto::v1::TypedValue;
-use ntk_qspn::{ArcId as QspnArcId, QspnHandle, RouteSnapshot};
+use ntk_qspn::{ArcId as QspnArcId, QspnEvent, QspnHandle, RouteSnapshot};
 
 use crate::node::codec;
 use crate::node::peers::PeerLinks;
@@ -318,10 +320,147 @@ impl EldershipCache {
             .unwrap_or_else(|e| e.into_inner())
             .insert((level, pos), value);
     }
+
+    fn forget_foreign(&self, level: usize, pos: u32) {
+        self.foreign
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(level, pos));
+    }
+
+    fn retain_foreign(&self, keep: impl Fn(&(usize, u32)) -> bool) {
+        self.foreign
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|key, _| keep(key));
+    }
 }
 
-/// Refreshes every level's own eldership plus every currently-known destination's, then repeats
-/// on every subsequent [`ntk_qspn::QspnEvent`] until `cancel` fires.
+/// What a batch of [`QspnEvent`]s obliges [`run_eldership_cache`] to re-query.
+///
+/// A destination's eldership is a function of that destination's own paths only
+/// (`QspnState::eldership` evaluates its fingerprints), so an event naming one destination
+/// cannot change any other's. Re-asking the qspn actor about every destination after every
+/// event cost one actor round trip per known destination per event, with nothing to show for it
+/// on all but the changed one.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RefreshPlan {
+    /// Re-query every exported destination and evict the ones no longer exported. Set by events
+    /// that do not name the destinations they affect, and on anything that may have lost events.
+    full: bool,
+    /// Destinations an event named; consulted only while `full` is false.
+    destinations: HashSet<HCoord>,
+}
+
+impl RefreshPlan {
+    fn everything() -> Self {
+        Self {
+            full: true,
+            destinations: HashSet::new(),
+        }
+    }
+
+    /// Nothing to re-query: every event absorbed so far provably cannot change an eldership.
+    fn is_noop(&self) -> bool {
+        !self.full && self.destinations.is_empty()
+    }
+
+    fn absorb(&mut self, event: &QspnEvent) {
+        match event {
+            // Bootstrap completion moves `guest_gnode_level`, which un-gates whole levels at
+            // once; an own-fingerprint change moves the claims every level is judged against;
+            // a removed arc can re-rank the cheapest path of destinations it carried. None of
+            // them names the affected destinations, and all are rare, so re-read everything.
+            QspnEvent::BootstrapComplete
+            | QspnEvent::PresenceNotified
+            | QspnEvent::ChangedFingerprint(_)
+            | QspnEvent::ArcRemoved { .. } => self.full = true,
+            // `nodes_inside` takes no part in choosing the winning fingerprint.
+            QspnEvent::ChangedNodesInside(_) => {}
+            QspnEvent::DestinationAdded(destination)
+            | QspnEvent::DestinationRemoved(destination)
+            | QspnEvent::GnodeSplitted { destination, .. } => {
+                self.destinations.insert(*destination);
+            }
+            // A path's hops end at the destination itself (`ntk_qspn::EtpPath::hops`).
+            QspnEvent::PathAdded(path)
+            | QspnEvent::PathChanged(path)
+            | QspnEvent::PathRemoved(path) => match path.hops.last() {
+                Some(last) => {
+                    self.destinations.insert(last.coord);
+                }
+                None => self.full = true,
+            },
+        }
+    }
+
+    /// Folds in every event already queued, so a burst (one ETP routinely emits a path event per
+    /// affected destination) costs one refresh instead of one per event.
+    fn absorb_pending(&mut self, events: &mut tokio::sync::broadcast::Receiver<QspnEvent>) {
+        use tokio::sync::broadcast::error::TryRecvError;
+        loop {
+            match events.try_recv() {
+                Ok(event) => self.absorb(&event),
+                // Events were dropped on the floor, so which destinations they named is lost.
+                Err(TryRecvError::Lagged(_)) => self.full = true,
+                Err(TryRecvError::Empty | TryRecvError::Closed) => return,
+            }
+        }
+    }
+}
+
+/// Applies `plan` to `cache` against `qspn`'s current state.
+///
+/// Own elderships are re-read every time: one query per topology level, a small constant,
+/// unlike destinations whose number grows with the network. Only destinations the published
+/// snapshot exports are cached, as before; everything else is evicted so a destination that
+/// left the map reads as unknown instead of keeping its last claim forever.
+async fn refresh_eldership(
+    qspn: &QspnHandle,
+    levels: usize,
+    cache: &EldershipCache,
+    plan: &RefreshPlan,
+) {
+    for level in 0..levels {
+        cache.set_my(level, qspn.my_eldership(level).await.unwrap_or(None));
+    }
+    // Read the snapshot only after a round trip to the actor: the actor publishes it in the same
+    // turn that emits the events being handled (events first), and replies are serialized behind
+    // that turn, so by now it reflects them. Reading it before would race the publication.
+    let snapshot = qspn.snapshot();
+    let exported = |coord: HCoord| {
+        snapshot
+            .levels
+            .get(coord.level)
+            .is_some_and(|entries| entries.iter().any(|e| e.destination == coord))
+    };
+    if plan.full {
+        let mut keep = HashSet::new();
+        for (level, entries) in snapshot.levels.iter().enumerate() {
+            for entry in entries {
+                let pos = entry.destination.pos;
+                keep.insert((level, pos));
+                cache.set_foreign(level, pos, qspn.eldership(level, pos).await.unwrap_or(None));
+            }
+        }
+        cache.retain_foreign(|key| keep.contains(key));
+        return;
+    }
+    for &coord in &plan.destinations {
+        if exported(coord) {
+            cache.set_foreign(
+                coord.level,
+                coord.pos,
+                qspn.eldership(coord.level, coord.pos).await.unwrap_or(None),
+            );
+        } else {
+            cache.forget_foreign(coord.level, coord.pos);
+        }
+    }
+}
+
+/// Keeps `cache` current with the live qspn generation until `cancel` fires: everything once per
+/// generation, then only what each [`QspnEvent`] batch can have changed (see [`RefreshPlan`]).
 async fn run_eldership_cache(
     mut generation: tokio::sync::watch::Receiver<QspnHandle>,
     cache: Arc<EldershipCache>,
@@ -331,16 +470,12 @@ async fn run_eldership_cache(
         let qspn = generation.borrow_and_update().clone();
         let levels = qspn.my_naddr().topology().levels();
         let mut events = qspn.subscribe_events();
+        let mut plan = RefreshPlan::everything();
         loop {
-            for level in 0..levels {
-                cache.set_my(level, qspn.my_eldership(level).await.unwrap_or(None));
+            if !plan.is_noop() {
+                refresh_eldership(&qspn, levels, &cache, &plan).await;
             }
-            for (level, entries) in qspn.snapshot().levels.iter().enumerate() {
-                for entry in entries {
-                    let pos = entry.destination.pos;
-                    cache.set_foreign(level, pos, qspn.eldership(level, pos).await.unwrap_or(None));
-                }
-            }
+            plan = RefreshPlan::default();
             let closed = tokio::select! {
                 () = cancel.cancelled() => return,
                 changed = generation.changed() => {
@@ -349,9 +484,18 @@ async fn run_eldership_cache(
                     }
                     break;
                 }
-                event = events.recv() => {
-                    matches!(event, Err(tokio::sync::broadcast::error::RecvError::Closed))
-                }
+                event = events.recv() => match event {
+                    Ok(event) => {
+                        plan.absorb(&event);
+                        plan.absorb_pending(&mut events);
+                        false
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        plan.full = true;
+                        false
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => true,
+                },
             };
             if closed {
                 // This generation's qspn is gone; wait for a successor (or shutdown).
@@ -436,22 +580,14 @@ impl<T: Clone> Live<T> {
 /// coverage: both sides of a tied merge transiently over-counting themselves via the other's
 /// still-foreign members, breaking the tiebreak's antisymmetry).
 fn estimate_n_nodes(snapshot: &RouteSnapshot, net: Option<&NetworkInfo>, level: usize) -> u64 {
-    let mut contributions: Vec<(u32, u32)> = Vec::new();
-    let mut foreign_skipped: Vec<(u32, u32)> = Vec::new();
     let mut counted: u64 = 0;
     for entry in snapshot.levels.get(level).into_iter().flatten() {
-        let is_foreign = match net {
-            Some(n) => n.is_foreign(entry.destination.level, entry.destination.pos),
-            None => false,
-        };
+        if net.is_some_and(|n| n.is_foreign(entry.destination.level, entry.destination.pos)) {
+            continue;
+        }
         let Some(path) = entry.paths.first() else {
             continue;
         };
-        if is_foreign {
-            foreign_skipped.push((entry.destination.pos, path.nodes_inside));
-            continue;
-        }
-        contributions.push((entry.destination.pos, path.nodes_inside));
         // A level-0 destination is by definition exactly one real node — hardcoded rather than
         // trusted, matching `update_clusters`'s own asymmetry (every node's `nodes_inside[0]`
         // is always `1` anyway, so this changes nothing for a well-behaved peer).
@@ -468,16 +604,7 @@ fn estimate_n_nodes(snapshot: &RouteSnapshot, net: Option<&NetworkInfo>, level: 
     } else {
         estimate_n_nodes(snapshot, net, level - 1)
     };
-    let total = counted + mine;
-    tracing::debug!(
-        level,
-        ?contributions,
-        ?foreign_skipped,
-        mine,
-        total,
-        "migration-instrumentation: estimate_n_nodes"
-    );
-    total
+    counted + mine
 }
 
 /// The best local arc toward `hc`: the first (cheapest) admitted [`ntk_qspn::RoutePath`]'s own
@@ -2763,5 +2890,172 @@ mod generation_reset_tests {
         let b = a.clone();
         a.set(2);
         assert_eq!(b.get(), 2);
+    }
+}
+
+#[cfg(test)]
+mod eldership_cache_tests {
+    use std::sync::Arc;
+
+    use ntk_common::{Cost, Fingerprint, HCoord, Naddr, Topology};
+    use ntk_qspn::{ArcId, Hop, QspnEvent, RoutePath};
+    use tokio_util::sync::CancellationToken;
+
+    use super::{EldershipCache, RefreshPlan, refresh_eldership};
+
+    fn path_ending_at(destination: HCoord) -> RoutePath {
+        RoutePath {
+            arc: ArcId::from(1),
+            hops: vec![
+                Hop {
+                    arc: ArcId::from(1),
+                    coord: HCoord::new(0, 9),
+                },
+                Hop {
+                    arc: ArcId::from(2),
+                    coord: destination,
+                },
+            ],
+            cost: Cost::Finite(1),
+            nodes_inside: 1,
+        }
+    }
+
+    fn plan_for(events: &[QspnEvent]) -> RefreshPlan {
+        let mut plan = RefreshPlan::default();
+        for event in events {
+            plan.absorb(event);
+        }
+        plan
+    }
+
+    #[test]
+    fn a_path_event_names_only_the_destination_its_hops_end_at() {
+        let destination = HCoord::new(1, 3);
+        for event in [
+            QspnEvent::PathAdded(path_ending_at(destination)),
+            QspnEvent::PathChanged(path_ending_at(destination)),
+            QspnEvent::PathRemoved(path_ending_at(destination)),
+        ] {
+            let plan = plan_for(&[event]);
+            assert!(!plan.full);
+            assert_eq!(plan.destinations, [destination].into());
+        }
+    }
+
+    #[test]
+    fn destination_events_name_their_destination() {
+        let plan = plan_for(&[
+            QspnEvent::DestinationAdded(HCoord::new(0, 1)),
+            QspnEvent::DestinationRemoved(HCoord::new(0, 2)),
+            QspnEvent::DestinationAdded(HCoord::new(0, 1)),
+        ]);
+        assert!(!plan.full);
+        assert_eq!(
+            plan.destinations,
+            [HCoord::new(0, 1), HCoord::new(0, 2)].into()
+        );
+    }
+
+    #[test]
+    fn events_that_do_not_name_their_destinations_force_a_full_refresh() {
+        for event in [
+            QspnEvent::BootstrapComplete,
+            QspnEvent::PresenceNotified,
+            QspnEvent::ChangedFingerprint(1),
+            QspnEvent::ArcRemoved {
+                arc: ArcId::from(1),
+                bad_link: false,
+            },
+        ] {
+            assert!(plan_for(&[event]).full);
+        }
+        let no_hops = RoutePath {
+            hops: Vec::new(),
+            ..path_ending_at(HCoord::new(0, 0))
+        };
+        assert!(plan_for(&[QspnEvent::PathAdded(no_hops)]).full);
+    }
+
+    #[test]
+    fn a_nodes_inside_change_requires_no_requery() {
+        assert!(plan_for(&[QspnEvent::ChangedNodesInside(1)]).is_noop());
+    }
+
+    #[tokio::test]
+    async fn queued_events_fold_into_one_plan_and_a_lag_forces_a_full_refresh() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(2);
+        tx.send(QspnEvent::DestinationAdded(HCoord::new(0, 1)))
+            .unwrap();
+        tx.send(QspnEvent::DestinationAdded(HCoord::new(0, 2)))
+            .unwrap();
+        let mut plan = RefreshPlan::default();
+        plan.absorb_pending(&mut rx);
+        assert!(!plan.full);
+        assert_eq!(
+            plan.destinations,
+            [HCoord::new(0, 1), HCoord::new(0, 2)].into()
+        );
+
+        for pos in 0..4 {
+            tx.send(QspnEvent::DestinationAdded(HCoord::new(0, pos)))
+                .unwrap();
+        }
+        let mut plan = RefreshPlan::default();
+        plan.absorb_pending(&mut rx);
+        assert!(
+            plan.full,
+            "dropped events cannot be attributed to a destination"
+        );
+    }
+
+    /// A lone node exports no destination, so anything cached for one is stale: a full refresh
+    /// evicts it, while a targeted one touches only the destinations it names.
+    #[tokio::test]
+    async fn refresh_evicts_destinations_that_are_no_longer_exported() {
+        let topology = Topology::new([4u32]).unwrap();
+        let naddr = Naddr::new(topology, vec![0]).unwrap();
+        let cancel = CancellationToken::new();
+        let (qspn, _join) = ntk_qspn::spawn(
+            naddr,
+            Fingerprint::new(vec![1u8], 0, vec![0]),
+            ntk_qspn::QspnConfig::default(),
+            Arc::new(ntk_qspn::FakeQspnStubFactory::new()),
+            Arc::new(ntk_qspn::FixedThreshold::default()),
+            Arc::new(ntk_qspn::DefaultArcIdSource::default()),
+            cancel.clone(),
+        );
+        let cache = EldershipCache::default();
+        cache.set_foreign(0, 1, Some(Some(7)));
+        cache.set_foreign(0, 2, Some(Some(8)));
+
+        let targeted = RefreshPlan {
+            full: false,
+            destinations: [HCoord::new(0, 1)].into(),
+        };
+        refresh_eldership(&qspn, 1, &cache, &targeted).await;
+        assert_eq!(
+            cache.foreign(0, 1),
+            i32::MAX,
+            "the named destination is evicted"
+        );
+        assert_eq!(
+            cache.foreign(0, 2),
+            8,
+            "an unnamed destination is left alone"
+        );
+        assert_ne!(
+            cache.my(0),
+            i32::MAX,
+            "own eldership is read on every refresh"
+        );
+
+        refresh_eldership(&qspn, 1, &cache, &RefreshPlan::everything()).await;
+        assert_eq!(
+            cache.foreign(0, 2),
+            i32::MAX,
+            "a full refresh evicts every stale entry"
+        );
+        cancel.cancel();
     }
 }
