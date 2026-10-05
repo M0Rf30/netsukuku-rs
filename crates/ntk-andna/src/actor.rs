@@ -418,7 +418,22 @@ impl Handle {
         let first = replies.first().ok_or(AndnaError::Routing(
             ntk_peerservices::ContactPeerError::NoParticipants,
         ))?;
-        wire::unpack_register_reply(first)?.map_err(AndnaError::Rejected)
+        let outcome = wire::unpack_register_reply(first)?;
+        let disagreeing = replies
+            .iter()
+            .skip(1)
+            .filter(|r| {
+                wire::unpack_register_reply(r).is_ok_and(|other| other.is_ok() != outcome.is_ok())
+            })
+            .count();
+        if disagreeing > 0 {
+            tracing::warn!(
+                hostname = %req.hostname,
+                disagreeing,
+                "ntk-andna: replicas disagree with the first reply on this registration"
+            );
+        }
+        outcome.map_err(AndnaError::Rejected)
     }
 
     /// An ANDNA renewal *is* a registration whose `sequence` strictly increases past the stored
@@ -430,6 +445,10 @@ impl Handle {
     }
 
     /// Resolves `hostname` for `service` via the Andna hash-node closest to its hash target.
+    /// If that node cannot be reached or knows no record (it lost its in-memory cache, or the
+    /// name was never replicated to it), falls back to the next
+    /// [`Config::replication_factor`] replicas and answers from the first one that has records —
+    /// the failover the registration-time replication exists for.
     ///
     /// # Errors
     /// [`AndnaError::Routing`] if no node could be reached.
@@ -440,16 +459,42 @@ impl Handle {
     ) -> Result<Vec<SnsdRecord>, AndnaError> {
         let target =
             ntk_peerservices::hash_to_tuple(self.substrate.topology(), hostname.hash().route_key());
-        let reply = self
+        let request = wire::pack_resolve_request(hostname, service);
+        let primary = self
             .substrate
             .contact_peer(
                 andna_service_id(),
-                target,
-                wire::pack_resolve_request(hostname, service),
+                target.clone(),
+                request.clone(),
                 self.config.call_timeout,
             )
-            .await?;
-        Ok(wire::unpack_resolve_reply(&reply)?)
+            .await
+            .map(|reply| wire::unpack_resolve_reply(&reply))
+            .map_err(AndnaError::from);
+        if let Ok(Ok(records)) = &primary
+            && !records.is_empty()
+        {
+            return Ok(records.clone());
+        }
+
+        let replies = self
+            .substrate
+            .replicate(
+                andna_service_id(),
+                target,
+                request,
+                self.config.call_timeout,
+                self.config.replication_factor,
+            )
+            .await;
+        for reply in &replies {
+            if let Ok(records) = wire::unpack_resolve_reply(reply)
+                && !records.is_empty()
+            {
+                return Ok(records);
+            }
+        }
+        Ok(primary??)
     }
 }
 /// Drives [`Handle::purge_expired`] on [`Config::expiry_purge_interval`] for as long as `cancel`
@@ -549,5 +594,70 @@ mod tests {
                 .is_none()
         );
         handle.purge_expired(0).await;
+    }
+
+    /// Primary hash-node knows nothing; only a later replica holds the records.
+    struct FailoverSubstrate {
+        idle: IdleSubstrate,
+        records: Vec<SnsdRecord>,
+    }
+
+    impl AndnaSubstrate for FailoverSubstrate {
+        fn topology(&self) -> &Topology {
+            self.idle.topology()
+        }
+        fn my_pos(&self) -> &Naddr {
+            self.idle.my_pos()
+        }
+        fn register(&self, _service: Arc<dyn PeerService>) -> BoxFuture<'_, ()> {
+            Box::pin(async {})
+        }
+        fn contact_peer(
+            &self,
+            _p_id: ServiceId,
+            _target: TupleNode,
+            _request: TypedValue,
+            _timeout: Duration,
+        ) -> BoxFuture<'_, Result<TypedValue, ContactPeerError>> {
+            Box::pin(async { Ok(wire::pack_resolve_reply(&[])) })
+        }
+        fn replicate(
+            &self,
+            _p_id: ServiceId,
+            _target: TupleNode,
+            _request: TypedValue,
+            _timeout: Duration,
+            _q: u32,
+        ) -> BoxFuture<'_, Vec<TypedValue>> {
+            let replies = vec![
+                wire::pack_resolve_reply(&[]),
+                wire::pack_resolve_reply(&self.records),
+            ];
+            Box::pin(async move { replies })
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_falls_back_to_a_replica_when_the_primary_has_no_record() {
+        let topology = Topology::new([2, 2]).unwrap();
+        let my_pos = Naddr::new(topology.clone(), vec![0, 0]).unwrap();
+        let record = SnsdRecord::new(
+            0,
+            16,
+            1,
+            crate::snsd::SnsdTarget::Alias(Hostname::new("elsewhere").unwrap()),
+        )
+        .unwrap();
+        let substrate = FailoverSubstrate {
+            idle: IdleSubstrate { topology, my_pos },
+            records: vec![record.clone()],
+        };
+        let (_manager, handle) = Manager::new(Arc::new(substrate), Config::default());
+
+        let resolved = handle
+            .resolve(&Hostname::new("example").unwrap(), 0)
+            .await
+            .unwrap();
+        assert_eq!(resolved, vec![record]);
     }
 }
