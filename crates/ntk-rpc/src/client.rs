@@ -96,6 +96,9 @@ enum ClientCmd {
         envelope: Envelope,
         reply: oneshot::Sender<Result<(), RpcError>>,
     },
+    /// Drops the pending entry of a call whose caller gave up (timeout), so unanswered
+    /// requests do not accumulate for the life of the connection.
+    Forget(u64),
 }
 
 /// Real [`RpcClient`] transport: one TCP connection, multiplexing
@@ -141,17 +144,23 @@ impl TcpRpcClient {
         max_frame_length: usize,
         call_timeout: Duration,
     ) -> Result<Self, RpcError> {
-        let stream = match device {
-            None => TcpStream::connect(addr).await?,
-            Some(device) => {
-                let socket = match addr {
-                    SocketAddr::V4(_) => TcpSocket::new_v4(),
-                    SocketAddr::V6(_) => TcpSocket::new_v6(),
-                }?;
-                socket.bind_device(Some(device.as_bytes()))?;
-                socket.connect(addr).await?
+        let connect = async {
+            match device {
+                None => TcpStream::connect(addr).await,
+                Some(device) => {
+                    let socket = match addr {
+                        SocketAddr::V4(_) => TcpSocket::new_v4(),
+                        SocketAddr::V6(_) => TcpSocket::new_v6(),
+                    }?;
+                    socket.bind_device(Some(device.as_bytes()))?;
+                    socket.connect(addr).await
+                }
             }
         };
+        // The kernel's SYN retransmit timeout is minutes; bound the dial by the call budget.
+        let stream = tokio::time::timeout(call_timeout, connect)
+            .await
+            .map_err(|_elapsed| RpcError::Timeout)??;
         Ok(Self::from_stream(stream, max_frame_length, call_timeout))
     }
 
@@ -163,7 +172,7 @@ impl TcpRpcClient {
         let framed = Framed::new(stream, EnvelopeCodec::new(max_frame_length));
         let (sink, stream) = framed.split();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        tokio::spawn(run_actor(sink, stream, cmd_rx));
+        tokio::spawn(run_actor(sink, stream, cmd_rx, call_timeout));
         Self {
             cmd_tx,
             next_id: AtomicU64::new(1),
@@ -180,6 +189,7 @@ async fn run_actor(
     mut sink: SplitSink<Framed<TcpStream, EnvelopeCodec>, Envelope>,
     mut stream: SplitStream<Framed<TcpStream, EnvelopeCodec>>,
     mut cmd_rx: mpsc::UnboundedReceiver<ClientCmd>,
+    write_timeout: Duration,
 ) {
     let mut pending: HashMap<u64, oneshot::Sender<Result<Response, RpcError>>> = HashMap::new();
     loop {
@@ -187,20 +197,38 @@ async fn run_actor(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     None => break,
+                    Some(ClientCmd::Forget(correlation_id)) => {
+                        pending.remove(&correlation_id);
+                    }
                     Some(ClientCmd::Call { envelope, reply }) => {
                         let correlation_id = envelope.as_request().map(|r| r.correlation_id).unwrap_or_default();
-                        match sink.send(envelope).await {
-                            Ok(()) => {
+                        match tokio::time::timeout(write_timeout, sink.send(envelope)).await {
+                            Ok(Ok(())) => {
                                 pending.insert(correlation_id, reply);
                             }
-                            Err(err) => {
+                            Ok(Err(err)) => {
                                 let _ = reply.send(Err(err));
+                            }
+                            Err(_elapsed) => {
+                                // The peer stopped reading: the connection is wedged, and
+                                // every later write would queue behind this one.
+                                let _ = reply.send(Err(RpcError::Timeout));
+                                fail_pending(&mut pending);
+                                break;
                             }
                         }
                     }
                     Some(ClientCmd::Notify { envelope, reply }) => {
-                        let result = sink.send(envelope).await;
-                        let _ = reply.send(result);
+                        match tokio::time::timeout(write_timeout, sink.send(envelope)).await {
+                            Ok(result) => {
+                                let _ = reply.send(result);
+                            }
+                            Err(_elapsed) => {
+                                let _ = reply.send(Err(RpcError::Timeout));
+                                fail_pending(&mut pending);
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -244,6 +272,12 @@ async fn run_actor(
                 }
             }
         }
+    }
+}
+
+fn fail_pending(pending: &mut HashMap<u64, oneshot::Sender<Result<Response, RpcError>>>) {
+    for (_, reply) in pending.drain() {
+        let _ = reply.send(Err(RpcError::ConnectionClosed));
     }
 }
 
@@ -294,7 +328,10 @@ impl RpcClient for TcpRpcClient {
                 })
                 .map_err(|_| RpcError::ConnectionClosed)?;
             let response = match tokio::time::timeout(self.call_timeout, reply_rx).await {
-                Err(_elapsed) => return Err(RpcError::Timeout),
+                Err(_elapsed) => {
+                    let _ = self.cmd_tx.send(ClientCmd::Forget(correlation_id));
+                    return Err(RpcError::Timeout);
+                }
                 Ok(Err(_recv_error)) => return Err(RpcError::ConnectionClosed),
                 Ok(Ok(result)) => result?,
             };
@@ -333,7 +370,11 @@ impl RpcClient for TcpRpcClient {
                     reply: reply_tx,
                 })
                 .map_err(|_| RpcError::ConnectionClosed)?;
-            reply_rx.await.map_err(|_| RpcError::ConnectionClosed)?
+            match tokio::time::timeout(self.call_timeout, reply_rx).await {
+                Err(_elapsed) => Err(RpcError::Timeout),
+                Ok(Err(_recv_error)) => Err(RpcError::ConnectionClosed),
+                Ok(Ok(result)) => result,
+            }
         })
     }
 }

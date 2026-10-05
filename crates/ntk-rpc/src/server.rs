@@ -9,16 +9,18 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::future::BoxFuture;
 use futures::{SinkExt, StreamExt};
 use ntk_proto::v1::envelope::Body;
 use ntk_proto::v1::{
-    Auth, CallerContext, Envelope, ErrorDomain, MethodCall, RemoteError, Request, ResponsePayload,
-    TypedValue,
+    Auth, CallerContext, Envelope, ErrorDomain, MethodCall, ProtocolVersion, RemoteError, Request,
+    ResponsePayload, TypedValue,
 };
+use prost::Message;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tokio_util::codec::Framed;
 use tokio_util::sync::CancellationToken;
@@ -86,14 +88,43 @@ async fn dispatch(
     let caller = request
         .caller
         .ok_or_else(|| malformed("Request.caller unset"))?;
-    let unicast_id = request
-        .unicast_id
-        .ok_or_else(|| malformed("Request.unicast_id unset"))?;
+    // A peer that never sets `unicast_id` predates the field; the documented compat rule treats
+    // that as the default (MainIdentity) id, never as a malformed request.
+    let unicast_id = request.unicast_id.unwrap_or_default();
     let call = request
         .call
         .ok_or_else(|| malformed("Request.call unset"))?;
     handler.handle(caller, unicast_id, call, auth).await
 }
+
+/// Resource bounds for a [`TcpServer`]. Every peer-reachable queue or task set is capped so a
+/// single misbehaving host on the link cannot grow the daemon's memory or task count without
+/// limit.
+#[derive(Debug, Clone, Copy)]
+pub struct ServerLimits {
+    /// Maximum simultaneously open connections; further accepts wait for a slot.
+    pub max_connections: usize,
+    /// Maximum requests being handled concurrently per connection; reading pauses at the cap.
+    pub max_inflight: usize,
+    /// Capacity of the per-connection reply queue; handlers wait when the peer is not reading.
+    pub reply_queue: usize,
+    /// A connection with nothing in flight and no frame received for this long is closed.
+    pub idle_timeout: Duration,
+}
+
+impl Default for ServerLimits {
+    fn default() -> Self {
+        Self {
+            max_connections: 1024,
+            max_inflight: 64,
+            reply_queue: 64,
+            idle_timeout: Duration::from_secs(300),
+        }
+    }
+}
+
+/// Pause after a failed `accept()` so fd exhaustion does not spin the listener.
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
 /// A TCP listener dispatching every accepted connection to a shared
 /// [`RpcHandler`]. Each connection reads `Envelope`s concurrently —
@@ -105,6 +136,7 @@ async fn dispatch(
 pub struct TcpServer {
     listener: TcpListener,
     max_frame_length: usize,
+    limits: ServerLimits,
 }
 
 impl TcpServer {
@@ -115,7 +147,15 @@ impl TcpServer {
         Ok(Self {
             listener,
             max_frame_length,
+            limits: ServerLimits::default(),
         })
+    }
+
+    /// Overrides the default [`ServerLimits`].
+    #[must_use]
+    pub fn with_limits(mut self, limits: ServerLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// The bound local address (useful when `addr`'s port was 0).
@@ -128,19 +168,40 @@ impl TcpServer {
     /// token; this method returns only once they have all wound down.
     pub async fn serve(self, handler: Arc<dyn RpcHandler>, cancel: CancellationToken) {
         let mut connections = JoinSet::new();
+        let slots = Arc::new(Semaphore::new(self.limits.max_connections.max(1)));
         loop {
+            let permit = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+                permit = slots.clone().acquire_owned() => match permit {
+                    Ok(permit) => permit,
+                    Err(_closed) => break,
+                },
+            };
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => break,
-                Some(_) = connections.join_next(), if !connections.is_empty() => {}
                 accepted = self.listener.accept() => {
                     match accepted {
                         Ok((stream, _peer)) => {
+                            let _ = stream.set_nodelay(true);
                             let handler = handler.clone();
                             let conn_cancel = cancel.child_token();
-                            connections.spawn(serve_connection(stream, self.max_frame_length, handler, conn_cancel));
+                            let max_frame_length = self.max_frame_length;
+                            let limits = self.limits;
+                            connections.spawn(async move {
+                                serve_connection(stream, max_frame_length, limits, handler, conn_cancel).await;
+                                drop(permit);
+                            });
                         }
-                        Err(error) => tracing::warn!(%error, "ntk-rpc: tcp accept failed"),
+                        Err(error) => {
+                            tracing::warn!(%error, "ntk-rpc: tcp accept failed");
+                            tokio::select! {
+                                _ = cancel.cancelled() => break,
+                                () = tokio::time::sleep(ACCEPT_ERROR_BACKOFF) => {}
+                            }
+                        }
                     }
                 }
             }
@@ -149,25 +210,74 @@ impl TcpServer {
     }
 }
 
+/// Correlation id of a `Request` envelope that wants a reply, if it is one.
+fn reply_wanted(envelope: &Envelope) -> Option<u64> {
+    match &envelope.body {
+        Some(Body::Request(request)) if request.wait_reply => Some(request.correlation_id),
+        _ => None,
+    }
+}
+
+/// Replaces a response too large for `max_frame_length` with a small error response for the
+/// same correlation id, so one oversize reply neither kills the writer nor leaves the caller
+/// waiting until its timeout.
+fn fit_frame(envelope: Envelope, max_frame_length: usize) -> Envelope {
+    if envelope.encoded_len() <= max_frame_length {
+        return envelope;
+    }
+    let correlation_id = match &envelope.body {
+        Some(Body::Response(response)) => response.correlation_id,
+        _ => return envelope,
+    };
+    tracing::warn!(
+        size = envelope.encoded_len(),
+        max = max_frame_length,
+        "ntk-rpc: response exceeds the frame limit, replying with an error instead"
+    );
+    Envelope::response_err(
+        ProtocolVersion::CURRENT,
+        correlation_id,
+        RemoteError {
+            domain: ErrorDomain::Deserialize as i32,
+            message: "response exceeds the maximum frame size".to_owned(),
+        },
+    )
+}
+
 async fn serve_connection(
     stream: TcpStream,
     max_frame_length: usize,
+    limits: ServerLimits,
     handler: Arc<dyn RpcHandler>,
     cancel: CancellationToken,
 ) {
     let framed = Framed::new(stream, EnvelopeCodec::new(max_frame_length));
     let (mut sink, mut stream) = framed.split();
-    let (write_tx, mut write_rx) = mpsc::unbounded_channel::<Envelope>();
+    let (write_tx, mut write_rx) = mpsc::channel::<Envelope>(limits.reply_queue.max(1));
+    let writer_dead = CancellationToken::new();
 
-    let writer = tokio::spawn(async move {
-        while let Some(envelope) = write_rx.recv().await {
-            if sink.send(envelope).await.is_err() {
-                break;
+    let writer = tokio::spawn({
+        let writer_dead = writer_dead.clone();
+        async move {
+            while let Some(envelope) = write_rx.recv().await {
+                if sink
+                    .send(fit_frame(envelope, max_frame_length))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
             }
+            // A dead writer means no reply can ever reach the peer: end the connection
+            // rather than leaving it half-open.
+            writer_dead.cancel();
         }
     });
 
+    let max_inflight = limits.max_inflight.max(1);
     let mut inflight: JoinSet<()> = JoinSet::new();
+    let idle = tokio::time::sleep(limits.idle_timeout);
+    tokio::pin!(idle);
     loop {
         tokio::select! {
             biased;
@@ -183,8 +293,25 @@ async fn serve_connection(
                 inflight.abort_all();
                 break;
             }
-            Some(_) = inflight.join_next(), if !inflight.is_empty() => {}
-            frame = stream.next() => {
+            _ = writer_dead.cancelled() => {
+                tracing::debug!("ntk-rpc: server connection writer failed, closing");
+                inflight.abort_all();
+                break;
+            }
+            Some(joined) = inflight.join_next(), if !inflight.is_empty() => {
+                if let Err(error) = joined
+                    && error.is_panic()
+                {
+                    tracing::error!("ntk-rpc: request handler panicked");
+                }
+                idle.as_mut().reset(tokio::time::Instant::now() + limits.idle_timeout);
+            }
+            () = &mut idle, if inflight.is_empty() => {
+                tracing::debug!("ntk-rpc: server connection idle, closing");
+                break;
+            }
+            frame = stream.next(), if inflight.len() < max_inflight => {
+                idle.as_mut().reset(tokio::time::Instant::now() + limits.idle_timeout);
                 match frame {
                     None => {
                         tracing::debug!("ntk-rpc: server connection closed by peer (EOF)");
@@ -197,11 +324,27 @@ async fn serve_connection(
                         break;
                     }
                     Some(Ok(envelope)) => {
-                        if let Err(mismatch) = envelope.check_version() {
-                            tracing::warn!(%mismatch, "ntk-rpc: rejecting envelope with incompatible protocol version");
+                        let mismatch = envelope.check_version().err();
+                        let version = envelope.version;
+                        let Some(version) = version.filter(|_| mismatch.is_none()) else {
+                            match &mismatch {
+                                Some(mismatch) => tracing::warn!(%mismatch, "ntk-rpc: rejecting envelope with incompatible protocol version"),
+                                None => tracing::warn!("ntk-rpc: rejecting envelope without a protocol version"),
+                            }
+                            // Answer with our own version so the caller sees a diagnosable
+                            // error instead of waiting out its timeout.
+                            if let Some(correlation_id) = reply_wanted(&envelope) {
+                                let response = Envelope::response_err(
+                                    ProtocolVersion::CURRENT,
+                                    correlation_id,
+                                    malformed("incompatible or missing protocol version"),
+                                );
+                                if write_tx.send(response).await.is_err() {
+                                    break;
+                                }
+                            }
                             continue;
-                        }
-                        let Some(version) = envelope.version else { continue };
+                        };
                         let auth = envelope.auth;
                         // BroadcastRequest/BroadcastAck never arrive on a
                         // stream connection in this design (they are UDP-only,
@@ -218,7 +361,7 @@ async fn serve_connection(
                                     Ok(payload) => Envelope::response_ok(version, correlation_id, payload),
                                     Err(error) => Envelope::response_err(version, correlation_id, error),
                                 };
-                                let _ = write_tx.send(response);
+                                let _ = write_tx.send(response).await;
                             }
                         });
                     }

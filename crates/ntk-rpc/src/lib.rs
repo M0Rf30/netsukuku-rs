@@ -27,4 +27,4 @@ pub use client::{RpcClient, TcpRpcClient};
 pub use codec::EnvelopeCodec;
 pub use error::RpcError;
 pub use fake::{FailureFactory, FakeRpcClient};
-pub use server::{FnHandler, RpcHandler, TcpServer};
+pub use server::{FnHandler, RpcHandler, ServerLimits, TcpServer};

@@ -23,6 +23,7 @@ use crate::error::RpcError;
 pub struct UdpBroadcaster {
     socket: UdpSocket,
     max_packet_size: usize,
+    recv_buf: tokio::sync::Mutex<Vec<u8>>,
     broadcast_addr: SocketAddr,
 }
 
@@ -47,6 +48,7 @@ impl UdpBroadcaster {
         Ok(Self {
             socket,
             max_packet_size,
+            recv_buf: tokio::sync::Mutex::new(Vec::new()),
             broadcast_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::BROADCAST, port)),
         })
     }
@@ -116,7 +118,12 @@ impl UdpBroadcaster {
     /// caller's responsibility, mirroring how zcd's listener hands the
     /// parsed packet to whichever of `request`/`ack` applies.
     pub async fn recv(&self) -> Result<(Envelope, SocketAddr), RpcError> {
-        let mut buf = vec![0u8; self.max_packet_size];
+        // One buffer reused across datagrams: allocating and zeroing max_packet_size per
+        // datagram would amplify an on-link flood of garbage packets.
+        let mut buf = self.recv_buf.lock().await;
+        if buf.len() != self.max_packet_size {
+            buf.resize(self.max_packet_size, 0);
+        }
         let (len, from) = self.socket.recv_from(&mut buf).await?;
         let envelope = Envelope::decode(&buf[..len])?;
         Ok((envelope, from))
