@@ -58,7 +58,7 @@ rand = "0.10"
 # Wireless (nl80211) — test fixtures only, so the `mac80211_hwsim` rung configures radios over
 # netlink like the veth fixture does, rather than shelling out to `iw`. Same rust-netlink family
 # and release train as `rtnetlink`/`netlink-packet-route` above.
-wl-nl80211 = "0.7"
+wl-nl80211 = "0.8"
 genetlink = "0.3"
 netlink-packet-generic = "0.5"
 

@@ -1748,7 +1748,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys",
@@ -2139,9 +2139,9 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wl-nl80211"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91c6509ed5d2d645aa737ef80f162b9cd94d2e5805a3f6a6cece2d413e7bd63f"
+checksum = "0516727b15a4178ed9dd371a7bba59f2b572cffc78ff166db87adf01645ff8e3"
 dependencies = [
  "bitflags",
  "futures",
@@ -2153,6 +2153,7 @@ dependencies = [
  "netlink-sys",
  "thiserror 2.0.21",
  "tokio",
+ "zerocopy",
 ]
 
 [[package]]
