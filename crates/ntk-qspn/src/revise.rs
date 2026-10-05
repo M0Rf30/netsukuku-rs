@@ -98,6 +98,11 @@ pub fn revise_etp(
         .retain(|p| !p.hops.iter().any(|g| my_naddr.pos(g.level) == Some(g.pos)));
 
     // Intrinsic zero-cost path straight to the sender (qspn.vala:1154-1165).
+    if m.fingerprints[v.level].level() != v.level {
+        return Err(QspnError::MalformedEtp(
+            "sender fingerprint level must equal divergence level",
+        ));
+    }
     let sender_fp = m.fingerprints[v.level].clone();
     let sender_nn = m.nodes_inside[v.level];
     m.paths.push(EtpPath {

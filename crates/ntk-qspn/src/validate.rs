@@ -64,6 +64,14 @@ fn check_any_message(m: &EtpMessage, topology: &Topology) -> bool {
         return false;
     }
     let levels = topology.levels();
+    if m.fingerprints.len() != levels + 1
+        || m.fingerprints
+            .iter()
+            .enumerate()
+            .any(|(l, fp)| fp.level() != l)
+    {
+        return false;
+    }
     for p in &m.paths {
         let Some(last) = p.hops.last() else {
             return false;
