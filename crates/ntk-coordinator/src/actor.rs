@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The single-owner actor holding the fixed-keys database state (`research/notes/06-rust-
 //! stack.md` §Concurrency): every level's [`GnodeMemory`], and the propagation dedup set. Every
 //! other module in this crate reaches this state only through [`Handle`] — never directly.

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Injectable timing and redundancy constants, transcribed from
 //! `research/impl/vala/coordinator/peer_service.vala:27-30` and `:93-113`
 //! (`timeout_exec_for_request`) and `research/notes/01-vala-core-routing.md` §7's constants

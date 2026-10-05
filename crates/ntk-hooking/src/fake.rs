@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! In-memory test doubles for [`QspnView`], [`CoordinatorClient`], and
 //! [`HookingStubFactory`] — the fake half of each dependency-inverted seam
 //! (`research/notes/06-rust-stack.md` §"Where Rust traits replace...",

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Installing one identity's kernel routing state to match QSPN's routing decisions.
 //!
 //! Replaces `identity_ip_commands.vala`'s `ip route change ... table ntk` calls

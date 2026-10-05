@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Round-trip and hostile-input coverage for `ntk_proto::domain` — the
 //! shared `ntk-common` <-> wire codec every phase-2 protocol module codes
 //! against.

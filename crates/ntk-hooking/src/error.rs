@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Crate-wide error type for [`crate::manager::HookingHandle`]'s own API
 //! surface (as opposed to [`crate::coordinator::CoordinatorError`]/
 //! [`ntk_rpc::RpcError`], which are the outbound-call error types).

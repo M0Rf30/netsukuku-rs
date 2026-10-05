@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The outbound seam: what [`crate::actor::Handle`] needs from the PeerServices substrate
 //! (`ntk-peerservices`), and an in-memory [`FakeSubstrate`] for tests that don't need a real
 //! multi-node network.

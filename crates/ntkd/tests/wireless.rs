@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Wireless (802.11) integration tests for the `ntkd` daemon core (rung 3): the shared
 //! [`netns`] fixture's real-kernel technique (one dedicated OS thread per network namespace,
 //! `nix::sched::unshare(CLONE_NEWNET)`, its own `current_thread` runtime, assertions read back

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Real-kernel regression test for the multi-NIC outbound-dial defect: a relay node
 //! monitoring 2+ NICs must be able to establish a neighborhood arc — and install a route — over
 //! *every* NIC, not just the first.

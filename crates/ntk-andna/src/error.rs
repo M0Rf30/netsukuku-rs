@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Crate-wide construction, validation, and wire-decode error type.
 
 use thiserror::Error;

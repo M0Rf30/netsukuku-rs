@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`NeighborhoodRpcHandler`]: the inbound [`RpcHandler`] for this module's
 //! 5 `MethodCall` arms (`here_i_am`/`request_arc`/`can_you_export`/
 //! `remove_arc`/`nop`).

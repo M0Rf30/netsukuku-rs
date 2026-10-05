@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Link/arc discovery and liveness monitoring — the Rust port of Vala's
 //! `neighborhood/` module (`research/impl/vala/neighborhood/`,
 //! `research/notes/01-vala-core-routing.md` §4).

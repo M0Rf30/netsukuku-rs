@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Numbered routing-table and rule-priority allocation, replacing
 //! `ntkd/table_names.vala`'s `TableNames` — minus the `/etc/iproute2/rt_tables`
 //! bookkeeping, which existed only so `ip`(8)'s human-facing output could

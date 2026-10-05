@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Round-trip encode/decode coverage for the wire schema, plus a
 //! forward-compatibility test proving an older parser tolerates a newer
 //! message (an unrecognized field is skipped, not a decode error), and a

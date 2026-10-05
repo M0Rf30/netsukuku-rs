@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Generates Rust types from `proto/hooking.proto` at build time. Unlike
 //! sibling protocol crates, `hooking.proto` does not import `ntk-proto`'s
 //! `domain.proto`: none of Hooking's own wire payloads (`TupleGNode` and

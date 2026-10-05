@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Wire codec: converts between this crate's [`EtpMessage`]/[`EtpPath`] and
 //! the `prost`-generated `proto/qspn.proto` types ([`v1`]), reusing
 //! `ntk-proto`'s shared domain codec for the embedded

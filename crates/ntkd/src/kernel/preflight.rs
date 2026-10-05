@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Startup kernel-capability preflight. Upstream's `ntkd/startup.vala` never checks for
 //! `CONFIG_IP_MULTIPLE_TABLES`/`CONFIG_IP_ROUTE_MULTIPATH` before wiring routes — it just fails
 //! deep inside `identity_ip_commands.vala`'s shelled-out `ip` calls with an opaque nonzero exit

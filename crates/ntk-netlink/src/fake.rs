@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! An in-memory, non-privileged stand-in for [`crate::RealNetlink`]. Records
 //! every mutation in invocation order and answers queries from its own
 //! model, so upper-layer crates (and their `turmoil`-based simulations, per

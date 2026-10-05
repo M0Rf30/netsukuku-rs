@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Real-socket, real-kernel proof that a hostname registered on one running `ntkd` daemon
 //! resolves correctly from a *different* running daemon — the first ANDNA scenario to run over
 //! `ntk_rpc::TcpServer`/`TcpRpcClient` (rather than `ntk_rpc::FakeRpcClient`), across two real

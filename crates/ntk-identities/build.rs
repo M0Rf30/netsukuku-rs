@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Generates Rust types from `proto/identities.proto` at build time.
 //!
 //! Mirrors `ntk-proto/build.rs` exactly: `protox` (pure-Rust protobuf

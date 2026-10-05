@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! `enter_net`-rooted identities driven through a real (in-memory) actor,
 //! via [`ntk_qspn::spawn_entering`]: bootstrap-phase gating, driving
 //! bootstrap to completion once a qualifying peer connects, and observing

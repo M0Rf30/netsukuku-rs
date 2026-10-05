@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Network-discovery / g-node-splitting / position-choice: `execute_search`
 //! (`research/impl/vala/hooking/hooking.vala:156-228`), `execute_explore`
 //! (`:230-235`), `execute_delete_reserve` (`:237-242`), `execute_mig`

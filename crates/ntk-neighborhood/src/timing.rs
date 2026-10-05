@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`NeighborhoodTiming`]: every wall-clock interval this crate waits on,
 //! collected into one injectable struct so tests never sleep upstream's
 //! real 28-30s/60s constants (`research/notes/01-vala-core-routing.md` §4).

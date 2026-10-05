@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Injectable configuration: every timer/backoff constant from
 //! `research/impl/vala/hooking/arc_handler.vala` and `hooking.vala`,
 //! collected in one struct so none of it is a scattered magic number.

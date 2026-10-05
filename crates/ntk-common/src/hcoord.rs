@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Hierarchical coordinate: a (level, position) pair naming one g-node.
 
 use std::fmt;

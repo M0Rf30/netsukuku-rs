@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Generates Rust types from `proto/neighborhood.proto` at build time, using
 //! `protox` exactly as `ntk-proto/build.rs` does (no system `protoc`).
 

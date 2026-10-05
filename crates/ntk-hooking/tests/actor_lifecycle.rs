@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Actor-level tests driving a [`ntk_hooking::HookingHandle`] through the
 //! full state machine over in-memory fakes: `create_net` (immediately
 //! hooked), joining an existing (larger) network through one arc, a

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The service-registration surface: [`ServiceId`], [`PeerService`], and the structured
 //! refuse/redo-from-start outcomes a service's request handler can raise.
 

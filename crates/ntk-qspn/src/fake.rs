@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! In-memory [`QspnStubFactory`]/[`QspnStub`] for tests/simulation — the fake
 //! half of the outbound stub substitutability seam
 //! (`research/notes/06-rust-stack.md` §"Where Rust traits replace...",

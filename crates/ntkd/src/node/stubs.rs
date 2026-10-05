@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Outbound stub factories: the real-transport half of every module's `StubFactory` seam, built
 //! over [`PeerLinks`] (one shared [`RpcClient`] per neighbor — see that module's doc comment for
 //! why one connection carries every module's calls).

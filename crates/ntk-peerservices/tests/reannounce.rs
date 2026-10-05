@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! `Config::participation_reannounce_interval`: `None` (the default) performs zero automatic
 //! re-announcements, exactly matching this crate's behavior before the field existed; `Some(d)`
 //! repeats `Handle::register`'s own flood every `d`, wire-identically, until the governing

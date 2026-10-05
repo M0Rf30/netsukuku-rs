@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Shared domain wire codec.
 //!
 //! Converts between `ntk-common`'s validated in-memory domain types

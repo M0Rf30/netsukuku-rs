@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`LinkId`]: the one canonical arc identifier `ntkd` mints per physically-discovered
 //! neighborhood link, and [`LinkRegistry`], the table mapping it to every module's own
 //! opaque per-arc handle.

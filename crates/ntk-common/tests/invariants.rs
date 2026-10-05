@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Property-based invariants for `ntk-common`'s pure algorithmic types
 //! (per `research/notes/06-rust-stack.md` §Deterministic-simulation testing item 3).
 

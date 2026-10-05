@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Wires the PeerServices substrate, Coordinator, ANDNA, and Hooking together for one identity —
 //! the piece that actually registers `CoordinatorService`/`AndnaService`/`CounterService` on the
 //! one `ntk_peerservices::Manager`, and resolves the Hooking<->Coordinator initialization cycle

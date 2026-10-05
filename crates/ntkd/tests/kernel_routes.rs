@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Integration tests for [`ntkd::kernel::routes::RouteInstaller`] against
 //! [`ntk_netlink::FakeNetlink`]'s recorded operation log — see the batch contract's
 //! "route-installation semantics" for the exact behavior asserted here.

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! In-memory payload/helper types — `research/impl/vala/hooking/serializables.vala`
 //! and the free helper functions from `research/impl/vala/hooking/structs.vala:76-165`.
 //! Wire (de)serialization lives in [`crate::wire`].

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Consumer-facing events — the Rust analogue of `QspnManager`'s GObject
 //! signals (`research/impl/vala/qspn/qspn.vala:122-147`), published as a
 //! `tokio::sync::broadcast` stream rather than callbacks/signals.

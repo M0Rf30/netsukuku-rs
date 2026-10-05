@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Origin-auth: the originator of a `contact_peer` request signs its own claimed position
 //! (`client_tuple`), service id, and request payload exactly once; only the servant that
 //! finally executes the request ([`crate::actor::Handle::exec_local`], reached via

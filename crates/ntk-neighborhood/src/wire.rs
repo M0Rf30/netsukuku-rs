@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Wire glue beyond [`crate::NodeId`]: [`NicRef`] (the other module payload
 //! type), `CallerContext`/`ResponsePayload` builders, and the
 //! `unicast_id`/`broadcast_id` placeholder every call needs.

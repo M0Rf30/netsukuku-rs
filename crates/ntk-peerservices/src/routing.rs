@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! `contact_peer`: recursive request routing to whichever node/g-node is closest to a target
 //! address, keeping upstream's three distinct failure modes — servant `refuse` (level-scoped
 //! exclusion), servant `redo_from_start` (full restart), and plain call timeout — as separate,

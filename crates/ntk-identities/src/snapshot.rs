@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Read-only, point-in-time view of the identity registry.
 
 use std::collections::BTreeMap;

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`IdentityId`] and the role an identity plays ([`IdentityStatus`]).
 
 use std::collections::hash_map::RandomState;

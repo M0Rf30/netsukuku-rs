@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Startup sequence and steady-state event loop for one Netsukuku node: first identity,
 //! hooking, qspn bootstrap, peerservices/coordinator/andna participation, route installation —
 //! then the loop upstream's own `startup.vala` never wrote (`// TODO continue`,

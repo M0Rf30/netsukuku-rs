@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Production entry point: CLI dispatch, the root [`tokio::task::JoinSet`]/[`CancellationToken`],
 //! graceful shutdown on SIGINT/SIGTERM, and the final [`ntk_netlink::cleanup`] safety net plus
 //! its [`crate::node::ip_route::cleanup_neighbor_routes`] counterpart (see that function's doc

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`FakeCoordinatorStubFactory`]: in-memory [`CoordinatorStubFactory`] for tests — delivers
 //! directly into a neighbor's [`Handle::handle_execute_prepare_migration`] &c. with no wire
 //! encoding, the fake half of the outbound substitutability seam (mirrors `ntk_rpc::FakeRpcClient`

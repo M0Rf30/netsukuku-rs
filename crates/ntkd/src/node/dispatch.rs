@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The one inbound dispatcher: routes every [`MethodCall`] arm to the module `RpcHandler` that
 //! owns it. Each per-module handler (`NeighborhoodRpcHandler`, `IdentityRpcHandler`, ...)
 //! already returns `ErrorDomain::Deserialize` for any call outside its own arms ("a routing bug

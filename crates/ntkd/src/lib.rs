@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! `ntkd`: the Netsukuku routing daemon. Composition root wiring the eleven `ntk-*` library
 //! crates into a running node; see `research/notes/02-vala-services-daemon.md` §5 for the
 //! upstream daemon this replaces.

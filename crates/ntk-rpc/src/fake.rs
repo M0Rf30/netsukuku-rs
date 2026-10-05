@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! In-memory [`RpcClient`] for tests/simulation: routes calls directly to a
 //! registered [`RpcHandler`] with no socket involved, and supports
 //! configurable latency and failure injection — the fake half of the

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Multi-identity per node (`research/impl/vala/identities/`,
 //! `research/notes/01-vala-core-routing.md` §5).
 //!

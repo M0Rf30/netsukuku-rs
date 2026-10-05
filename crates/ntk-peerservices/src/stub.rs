@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The outbound-call seam ([`PeersStub`]) and the environment a [`crate::actor::Manager`] needs
 //! injected from outside (topology visibility, gateway/neighbor lookup — [`RoutingEnv`]):
 //! upstream's `IPeersManagerStub`/`IPeersMapPaths`/`IPeersNeighborsFactory`

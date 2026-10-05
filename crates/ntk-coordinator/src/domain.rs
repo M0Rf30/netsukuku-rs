@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! In-memory domain types for the fixed-keys database the reserve protocol mutates
 //! (`research/impl/vala/coordinator/serializables.vala:156-201`).
 

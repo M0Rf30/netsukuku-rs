@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Neighborhood-level arc handles and the per-identity view of them.
 
 use crate::identity::IdentityId;

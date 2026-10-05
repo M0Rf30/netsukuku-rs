@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Owned protocol state — the sole owner is the actor task
 //! (`research/notes/06-rust-stack.md` §Concurrency: single-owner actor +
 //! message passing, never `Arc<RwLock<_>>`). This module ports

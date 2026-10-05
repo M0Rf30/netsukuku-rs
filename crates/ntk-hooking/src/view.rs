@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! `IHookingMapPaths` (`research/impl/vala/hooking/api.vala:23-50`), inverted
 //! into a trait this crate declares rather than a dependency on `ntk-qspn`:
 //! the read-only view onto this identity's current position/topology/map

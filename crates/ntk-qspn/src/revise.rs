@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! `revise_etp` (`research/impl/vala/qspn/qspn.vala:1074-1232`): the single
 //! function upstream itself flags as the hardest QSPN rule to port faithfully
 //! (notes/01 §3 rule 4) — full-ETP implicit withdrawal. There is deliberately

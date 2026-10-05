@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Migration-specific invariants, fuzzed with `proptest`: [`QspnState::new_entering`]'s
 //! internal-arc remap never lets a path survive through an arc outside the
 //! freshly constructed identity's own arc set (implicit withdrawal's

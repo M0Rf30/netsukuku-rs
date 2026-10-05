@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The Counter service's per-registrant reservation cache: enforces NTK_RFC 0007/upstream's
 //! 256-live-hostnames-per-registrant cap (`counter_c`/`counter_c_hashes`,
 //! `research/impl/c/netsukuku/src/andna_cache.h:106-143`).

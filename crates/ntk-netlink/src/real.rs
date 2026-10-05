@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The real backend: `rtnetlink`/`netlink-packet-route` over a genuine
 //! `NETLINK_ROUTE` socket, replacing every `ip`(8) subprocess call in
 //! `ntkd/identity_ip_commands.vala` with a native netlink request.

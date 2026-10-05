@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Shared real-kernel N-node mesh fixture for `tests/mesh.rs`, generalizing the two-node
 //! technique proven in `tests/multi_node.rs` (see that file's own "Scenario 3" doc comments for
 //! the full rationale, which this module does not repeat): one dedicated `std::thread` per

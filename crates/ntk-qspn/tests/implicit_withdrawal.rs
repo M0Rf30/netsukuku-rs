@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Pins the exact implicit-withdrawal semantics
 //! (`research/impl/vala/qspn/qspn.vala:1182-1223`, notes/01 §3 rule 4): a
 //! **full** ETP that stays silent about a previously-known path through the

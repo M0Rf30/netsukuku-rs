@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Wire-boundary DoS regression: `HookingSearchMigrationPath`'s `lvl` is a
 //! bare peer-supplied `i32` (`ntk.proto`'s `hooking_search_migration_path`
 //! field, arg: `lvl`), dispatched straight to a remote peer's

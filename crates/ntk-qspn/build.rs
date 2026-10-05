@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Generates Rust types from `proto/qspn.proto` at build time.
 //!
 //! `qspn.proto` imports `ntk-proto`'s `domain.proto` for

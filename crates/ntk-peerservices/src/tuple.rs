@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Position tuples scoped to a bounded address prefix, and the Chord-like geometry built on
 //! them: `dist`/`approximate` (the key→g-node mapping) plus the small set of tuple-algebra
 //! helpers `contact_peer`/`forward_msg` need to translate a target between scopes as a message

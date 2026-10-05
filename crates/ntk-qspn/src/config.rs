@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Injectable configuration: every QSPN timer/threshold constant from
 //! `research/notes/01-vala-core-routing.md` §3 "Constants", collected in one
 //! struct so none of it is scattered as a magic number through the logic.

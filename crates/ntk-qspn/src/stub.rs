@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The outbound RPC seam: `IQspnStubFactory`/`IQspnManagerStub`
 //! (`research/impl/vala/qspn/api.vala:104,141-158`,
 //! `research/impl/vala/ntkdrpc/addr_stub.vala:40-43`) — QSPN's sole coupling

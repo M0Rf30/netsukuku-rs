@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`Arc`]/[`ArcState`]: one discovered link to a neighbor and its
 //! lifecycle (`NeighborhoodRealArc`, `INeighborhoodArc`,
 //! `research/impl/vala/neighborhood/structs.vala`,

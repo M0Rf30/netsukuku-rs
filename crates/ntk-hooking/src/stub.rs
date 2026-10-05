@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The outbound RPC seam: `IHookingManagerStub`/`IIdentityArc.get_stub()`/
 //! `IHookingMapPaths.gateway()` (`research/impl/vala/hooking/api.vala:47-49,86-89`)
 //! — the exact 10-method surface `ntk_proto::v1::MethodCall`'s `hooking_*`

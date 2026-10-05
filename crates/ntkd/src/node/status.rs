@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Introspection and ANDNA control: a unix-socket server the running daemon exposes, and the
 //! `ntkd status`/`andna-register`/`andna-resolve` clients that query it. Wire format is `toml`
 //! (already a workspace dependency, matching `crate::node::codec`'s own choice for other

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The half of `ntkd` that talks to the machine: parsing the on-disk config file, probing the
 //! running kernel's routing capabilities, and translating QSPN's routing decisions into netlink
 //! state. Its sibling, `crate::node`, is the protocol composition half (spawning and wiring the

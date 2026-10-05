@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Signed registration/renewal requests, the record a hash-node holds for one hostname, and the
 //! collision/replay/TTL policy that decides whether a request is accepted
 //! (`andna_reg_pkt`/`andna_cache`, `research/impl/c/netsukuku/src/andna.h:101-116`,

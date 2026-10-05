@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Multi-node convergence tests over the in-memory
 //! [`ntk_qspn::FakeQspnStubFactory`]: a small g-node topology converges to
 //! the expected route set, an arc flap converges back, and a partition

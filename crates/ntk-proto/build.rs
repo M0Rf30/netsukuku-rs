@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Generates Rust types from `proto/ntk.proto` and `proto/domain.proto` at
 //! build time, compiled together so `domain.proto`'s messages are visible to
 //! `ntk.proto` on import (and vice versa, if ever needed).

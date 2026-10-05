@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`SendNetlink`] + [`KernelHandle`]: a `Send`-provable bridge onto [`ntk_netlink::Netlink`],
 //! and a cheap-clone `Arc<K>` wrapper implementing it by delegation — mirroring
 //! `ntk_neighborhood::interface_state::InterfaceState`'s own rationale exactly.

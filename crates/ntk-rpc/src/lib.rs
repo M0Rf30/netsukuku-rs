@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Transport and dispatch for the netsukuku-rs inter-node RPC protocol —
 //! the Rust replacement for zcd (research/notes/02-vala-services-daemon.md
 //! §1). Builds on [`ntk_proto`]'s wire types with:

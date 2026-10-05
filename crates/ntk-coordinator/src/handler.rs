@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`CoordinatorRpcHandler`]: the inbound [`ntk_rpc::RpcHandler`] dispatching the 5
 //! `MethodCall::coordinator_execute_*` arms (`ntk-proto/proto/ntk.proto`) to a [`Handle`].
 //!

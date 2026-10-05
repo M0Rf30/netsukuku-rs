@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! A tiny, dependency-free, non-cryptographic id generator for the
 //! effectively-unique correlation/request/entry/migration ids upstream
 //! mints via `PRNGen.int_range` (`research/impl/vala/hooking/rngen.vala`).

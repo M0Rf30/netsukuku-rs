@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Collective-merge propagation robustness.
 //!
 //! The five propagation methods (`prepare_migration`/`finish_migration`/`prepare_enter`/

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`PeerLinks`]: the one outbound-connection table every module's stub factory shares.
 //!
 //! `ntk_proto::v1::MethodCall` is one enum spanning every module (neighborhood/identities/

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Broadcast/datagram transport over UDP, per-NIC — the Rust replacement
 //! for zcd's `datagram_net_listen`/`send_datagram_net`
 //! (`research/impl/vala/pth-tasklet/tasklet_blocking_sockets.vala:181-241`,

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Pure link-cost math: EMA smoothing and the hysteresis publication gate
 //! (`ArcMonitorRunTasklet`, `research/impl/vala/neighborhood/neighborhood.vala:262-286`,
 //! `research/notes/01-vala-core-routing.md` §4 point 5).

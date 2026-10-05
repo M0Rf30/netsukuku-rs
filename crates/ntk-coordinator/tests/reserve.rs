@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Reserve protocol, eldership, propagation anti-replay, and multi-node election tests.
 //!
 //! Exercises the real public contract: [`ntk_peerservices::PeerService::exec`] directly for the

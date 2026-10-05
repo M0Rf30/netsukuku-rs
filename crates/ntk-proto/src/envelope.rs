@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Hand-written glue codegen cannot produce: envelope construction /
 //! inspection helpers and a [`ProtocolVersion`] compatibility check.
 

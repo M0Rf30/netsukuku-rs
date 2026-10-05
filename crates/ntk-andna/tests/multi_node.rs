@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Multi-node integration test: a real `ntk-peerservices` network (the same 4-node, 2-level,
 //! full-mesh harness `ntk-peerservices/tests/routing.rs` uses over `ntk_rpc::FakeRpcClient`) with
 //! this crate's `AndnaService`/`CounterService` registered on every node, proving a hostname

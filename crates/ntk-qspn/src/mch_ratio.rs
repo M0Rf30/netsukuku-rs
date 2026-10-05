@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! `get_mch_ratio` (`research/impl/vala/qspn/qspn.vala:1888-1909`): the
 //! size/gateway-adaptive overlap-tolerance ratio disjoint-path admission
 //! checks candidate paths against.

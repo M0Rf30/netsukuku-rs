@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Server side: [`RpcHandler`] decodes/routes/encodes one call at a time;
 //! [`TcpServer`] is the listener task shaped for the actor model — each
 //! connection owns its socket, is cancellable via a `CancellationToken`,

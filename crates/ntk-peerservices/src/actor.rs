@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The single-owner actor holding all mutable PeerServices state
 //! (`research/notes/06-rust-stack.md` §Concurrency): the registered services, the participation
 //! maps, and the routing layer's in-flight `waiting_answer_map`

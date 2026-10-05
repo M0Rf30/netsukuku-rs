@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Integration coverage for the duplication/migration handshake, driven
 //! through `ntk_rpc::FakeRpcClient` with injectable time
 //! (`tokio::time::pause`/`advance`) instead of real sleeps.

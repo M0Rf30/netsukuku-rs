@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! QSPN v2: the netsukuku-rs routing core.
 //!
 //! Ports `research/impl/vala/qspn/` (NORMATIVE upstream source) faithfully,

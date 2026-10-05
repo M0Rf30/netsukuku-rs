@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Wire-shaped path/ETP domain types — the Rust analogue of
 //! `research/impl/vala/qspn/serializables.vala:25-217` and
 //! `research/impl/vala/qspn/destinations.vala`.

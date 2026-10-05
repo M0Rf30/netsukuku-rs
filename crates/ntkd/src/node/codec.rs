@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! `TypedValue` codecs for the payloads that cross the boundary between
 //! [`ntk_hooking::CoordinatorClient`] (the asker, implemented in [`crate::node::adapters`])
 //! and `ntk_coordinator`'s `EvaluateEnterHandler`/`BeginEnterHandler`/`CompletedEnterHandler`/

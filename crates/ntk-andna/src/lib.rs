@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! ANDNA: the distributed hostname service, built as two `PeerService` registrations on
 //! `ntk-peerservices` (RFC 0014 §2: "a generic P2P service framework... ANDNA \[is\] two
 //! instances of that service") rather than the bespoke hash-gnode/counter-gnode routing upstream

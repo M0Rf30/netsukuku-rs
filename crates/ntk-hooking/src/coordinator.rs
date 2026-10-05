@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! `ICoordinator` (`research/impl/vala/hooking/api.vala:59-81`), inverted
 //! into a trait this crate declares rather than a dependency on
 //! `ntk-coordinator`. Every method here is a *client-side* outbound call:

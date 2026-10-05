@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Length-delimited framing for [`ntk_proto::v1::Envelope`], built on
 //! `tokio_util`'s `LengthDelimitedCodec` (4-byte length prefix, mirroring
 //! zcd's own stream framing — `research/impl/vala/zcd/connection_protocol.vala:34-141`)

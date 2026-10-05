@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`RealIpRouteManager`]: the real-transport [`ntk_neighborhood::IpRouteManager`], over the
 //! concrete [`ntk_netlink::RealNetlink`] (not generic — `IpRouteManager`'s methods return
 //! `BoxFuture`, which needs a provably-`Send` future; `ntk_netlink`'s `async fn`-in-trait

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! ETP construction for outbound sends — `research/impl/vala/qspn/etp_message.vala:24-245`.
 //! Building an outgoing `EtpMessage` and the `ignore_outside` pruning pass
 //! are read-only over [`QspnState`], so both live here as free functions

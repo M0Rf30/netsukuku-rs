@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Inbound RPC dispatch: [`ntk_rpc::RpcHandler`] for the 10 `hooking_*` arms
 //! of `ntk_proto::v1::MethodCall` — `retrieve_network_data`
 //! (`hooking.vala:495-514`), `search_migration_path` (`:516-579`), and the

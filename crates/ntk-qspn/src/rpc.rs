@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Inbound RPC dispatch: [`ntk_rpc::RpcHandler`] for the 4 `qspn_*` arms of
 //! `ntk_proto::v1::MethodCall` (`qspn_get_full_etp`, `qspn_send_etp`,
 //! `qspn_got_prepare_destroy`, `qspn_got_destroy`), plus [`ArcResolver`] —

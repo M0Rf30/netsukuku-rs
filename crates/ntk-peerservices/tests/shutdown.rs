@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Pins the actor-shutdown defect: cancelling a [`Manager`] while a `contact_peer` call has
 //! genuine in-flight state registered with it (a `WaitingAnswer` for a real routing search) must
 //! never panic in the caller's task. Before the fix, `Handle::call`/`Handle::cast` treated a

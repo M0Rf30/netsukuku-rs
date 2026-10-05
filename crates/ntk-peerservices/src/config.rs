@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Injectable timing and redundancy constants, transcribed from
 //! `research/notes/02-vala-services-daemon.md` §3 and RFC 0014 §2.2, rather than hard-coded at
 //! their use sites.

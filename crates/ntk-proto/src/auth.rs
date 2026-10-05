@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Sender-authentication primitives for [`crate::v1::Auth`]: a canonical
 //! signing encoding, `sign`/`verify`, and a bounded replay guard.
 //!

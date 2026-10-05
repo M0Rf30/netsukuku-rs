@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Multi-node routing tests over the in-memory fake transport (`ntk_rpc::FakeRpcClient` +
 //! [`PeersRpcHandler`]): a small 4-node, 2-level network (`gsizes = [2, 2]`), each node running
 //! its own [`Manager`] actor, wired full-mesh via [`RpcPeersStub`] so every node can reach every

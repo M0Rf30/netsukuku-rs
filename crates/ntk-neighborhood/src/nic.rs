@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Local-NIC seams: [`LocalNic`] (what a caller hands to
 //! [`crate::Handle::start_monitor`]), [`RttProbe`] (upstream's
 //! `INeighborhoodNetworkInterface::measure_rtt`) and [`IpRouteManager`]

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Generates Rust types from `proto/peerservices.proto` at build time, exactly as
 //! `ntk-proto/build.rs` does (pure-Rust `protox`, no system `protoc`).
 //!

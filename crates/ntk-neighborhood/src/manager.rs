@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The actor: [`Manager`] owns every mutable piece of protocol state behind
 //! one `mpsc` command queue (`research/notes/06-rust-stack.md` §Concurrency
 //! — no `Arc<RwLock<_>>` over protocol state); [`Handle`] is the

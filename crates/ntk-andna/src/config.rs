@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Injectable timing and capacity constants, transcribed from
 //! `research/notes/02-vala-services-daemon.md` §4, NTK_RFC 0009, and
 //! `research/impl/c/netsukuku/src/andna_cache.h`/`snsd_cache.h`, rather than hard-coded at their

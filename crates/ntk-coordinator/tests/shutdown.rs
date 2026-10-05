@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Pins the `finish_enter` teardown-race defect: `Handle::finish_enter` spawns a detached task
 //! that calls into the injected `PropagationHandler` (which, in `ntkd`, triggers `rehook()` and
 //! tears down the very Coordinator generation the task belongs to) and then calls

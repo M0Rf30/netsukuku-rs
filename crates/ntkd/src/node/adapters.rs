@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The dependency-inverted wiring: real implementations of every trait `ntk-hooking`,
 //! `ntk-peerservices`, and `ntk-coordinator` declare instead of depending on a sibling
 //! protocol crate directly. This is the heart of the composition — see each `impl` below for

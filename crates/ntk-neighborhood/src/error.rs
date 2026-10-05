@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`NeighborhoodError`]: this crate's single error type, covering wire
 //! decode failures, local API misuse, and the local-only failures a caller
 //! can hit driving [`crate::Handle`] — never a wire-carried outcome (that

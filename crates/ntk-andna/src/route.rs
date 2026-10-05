@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! DHT route-key derivation: which target [`ntk_peerservices::hash_to_tuple`] should place a
 //! hostname's `Andna` record at, and which target it should place a registrant's `Counter`
 //! record at.

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The `ntkd` node composition: CLI, supervisor, transport wiring, and steady-state loop.
 
 pub mod adapters;

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Kernel-capability preflight: Netsukuku's L3 routing model needs
 //! `CONFIG_IP_MULTIPLE_TABLES` (per-peer policy routing, `research/README.md`
 //! "Netsukuku is an L3 routing protocol, not a TUN overlay — ... needs

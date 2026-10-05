@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Wire encoding: conversions between this crate's domain types and its own generated
 //! `ntk.coordinator.v1` protobuf messages (`crate::v1`), plus [`RpcCoordinatorStub`] — the
 //! [`CoordinatorStub`] implementation that adapts a real `ntk_rpc::RpcClient` (or

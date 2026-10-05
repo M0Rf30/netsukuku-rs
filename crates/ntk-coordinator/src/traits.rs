@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Capabilities Coordinator needs from the rest of the daemon, declared as this crate's own
 //! traits rather than a dependency on `ntk-qspn`/`ntk-hooking` (mirrors how `ntk-peerservices`
 //! declares [`ntk_peerservices::RoutingEnv`] instead of depending on Neighborhood/QSPN/Hooking).

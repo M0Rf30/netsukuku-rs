@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Multi-node integration tests for the `ntkd` daemon core, driving the real startup/steady-state
 //! sequence ([`node::lifecycle::run`]) over an in-memory transport: [`ntk_netlink::FakeNetlink`]
 //! for kernel state per simulated node, and a hand-rolled in-process [`Medium`] mirroring

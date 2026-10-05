@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Full-triangle topology: three single-NIC nodes on one flat segment,
 //! `gsizes = [2, 2]`, where `a` sits alone in level-1 slot 0 and `b1`/`b2`
 //! are the two level-0 siblings of slot 1 — every pair directly adjacent.

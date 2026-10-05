@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`CoordinatorClient`]: the DHT-routed proxy to whichever node is currently elected servant
 //! for a level (`CoordClient`, `research/impl/vala/coordinator/peer_service.vala:115-314`) —
 //! the client half `ntk-hooking`'s own `trait CoordinatorClient` is implemented against in

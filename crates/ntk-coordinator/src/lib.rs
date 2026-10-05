@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Coordinator: the reserved-position allocator and per-level election
 //! (`research/notes/01-vala-core-routing.md` §7). Not a separate network protocol — implemented
 //! entirely **as** a [`ntk_peerservices::PeerService`] over PeerServices' fixed-keys DHT

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Wire encoding for this module's payload types
 //! (`proto/identities.proto`), and the `TypedValue` glue built on
 //! `ntk_proto::domain`'s generic `typed_value`/`from_typed_value` helpers

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Wire encoding: conversions between this crate's domain types and its own generated
 //! `ntk.andna.v1` protobuf messages (`crate::v1`), plus the `TypedValue` pack/unpack helpers
 //! [`crate::service`] uses to carry ANDNA's own request/reply schema over the generic

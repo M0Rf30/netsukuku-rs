@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Benchmarks for the two hot paths the audit flagged as unmeasured:
 //! [`QspnState::snapshot`] (rebuilds the whole exported route set) and
 //! [`QspnState::update_map`] (the per-ETP admission workhorse,

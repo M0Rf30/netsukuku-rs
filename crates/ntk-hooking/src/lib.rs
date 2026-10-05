@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Hooking: the bootstrap/join protocol.
 //!
 //! Ports `research/impl/vala/hooking/` (NORMATIVE upstream source)

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! On-disk daemon configuration.
 //!
 //! Upstream's `ntkd` has no config file at all — its topology and NIC list are hard-wired

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The Hooking actor: single-owner protocol state (per-arc phase, hooked
 //! status, chosen address) fed by an `mpsc` command queue with `oneshot`
 //! replies (`research/notes/06-rust-stack.md` §Concurrency) — the Rust

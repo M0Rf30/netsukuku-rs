@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Participation-map flood-gossip: registering a service, propagating a new `set_participant`
 //! fact, and merging/forwarding a neighbor's `give_participant_maps` snapshot
 //! (`research/impl/vala/peerservices/map_handler.vala`).

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Shared base types for `netsukuku-rs`, the Rust analogue of Vala's
 //! `ntkd-common` (`research/impl/vala/ntkd-common/`).
 //!

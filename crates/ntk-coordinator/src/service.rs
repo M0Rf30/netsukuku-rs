@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`CoordinatorService`]: the [`ntk_peerservices::PeerService`] registration that runs the
 //! fixed-keys database as a DHT-hash-based election over PeerServices (`research/notes/01-vala-
 //! core-routing.md` §7; `CoordService`, `research/impl/vala/coordinator/peer_service.vala:25-91`).

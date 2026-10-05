@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Integration tests against a genuine `NETLINK_ROUTE` socket.
 //!
 //! These require `CAP_NET_ADMIN` and mutate real kernel state, so they are

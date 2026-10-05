@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Persistence for the daemon's ANDNA ed25519 signing key (RFC 0014 registrant identity).
 //!
 //! ANDNA has TTL/renewal semantics, so a registered hostname must survive a daemon restart —

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Inbound dispatch: adapts a running identity-manager [`Handle`] into an
 //! [`ntk_rpc::RpcHandler`] serving the three `IdentityManager` arms of
 //! [`ntk_proto::v1::MethodCall`] (`match_duplication`, `get_peer_main_id`,

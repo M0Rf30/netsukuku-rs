@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! `MessageRouting` (`research/impl/vala/hooking/message_routing.vala`): the
 //! real [`SearchRouter`] implementation, plus the inbound handlers for the
 //! 8 `route_*` wire methods, wired to [`crate::rpc::HookingRpcHandler`].

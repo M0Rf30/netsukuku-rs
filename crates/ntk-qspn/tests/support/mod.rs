@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Shared test harness: spawns QSPN actors wired together through
 //! [`FakeQspnStubFactory`] instances, using a deterministic sequential
 //! [`ArcIdSource`] so a test can predict exactly which [`ArcId`] `add_arc`

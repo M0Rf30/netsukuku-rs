@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Wire schema for the netsukuku-rs inter-node RPC protocol.
 //!
 //! This crate is generated-code-plus-glue: [`v1`] holds the `prost`-generated

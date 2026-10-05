@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The local-vs-remote error distinction from
 //! research/notes/02-vala-services-daemon.md §1
 //! (`research/impl/vala/ntkdrpc/api.vala:23-32`): upstream's `StubError` is

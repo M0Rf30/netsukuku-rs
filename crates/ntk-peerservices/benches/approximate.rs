@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Benchmarks [`ntk_peerservices::approximate`] — the DHT key->position function
 //! (RFC 0014 §2, Definition 2.3) called once per `Handle::contact_peer` hop
 //! (`crates/ntk-peerservices/src/routing.rs`).

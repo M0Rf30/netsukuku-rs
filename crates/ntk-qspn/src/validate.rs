@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! ETP shape validation — `check_incoming_message`/`check_outgoing_message`/
 //! `check_any_message`/`check_tplist`
 //! (`research/impl/vala/qspn/etp_message.vala:125-191`). Every ETP this actor

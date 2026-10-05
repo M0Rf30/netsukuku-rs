@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Generates Rust types from `proto/coordinator.proto` at build time (pure-Rust `protox`, no
 //! system `protoc`), exactly as sibling module crates do.
 //!

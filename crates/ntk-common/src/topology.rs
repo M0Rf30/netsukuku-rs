@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Network shape: number of hierarchy levels and each level's g-node size.
 
 use std::sync::Arc;

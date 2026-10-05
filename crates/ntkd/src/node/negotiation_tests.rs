@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Unit-level coverage for the negotiated re-address path (`crate::node::lifecycle`'s
 //! "Negotiated re-address" module doc): alone stays create-net-equivalent, a discovered peer
 //! resolves a real join and the daemon adopts it (rehook), an unresolvable arc (incompatible

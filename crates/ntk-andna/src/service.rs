@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`AndnaService`]/[`CounterService`]: the two `PeerService` registrations RFC 0014 describes
 //! ANDNA as ("two peer-to-peer services, Andna and Counter",
 //! `research/notes/02-vala-services-daemon.md` §4).

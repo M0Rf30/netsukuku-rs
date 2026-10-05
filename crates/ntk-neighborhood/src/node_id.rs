@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`NodeId`]: the per-identity random discovery id
 //! (`NeighborhoodNodeID`, `research/impl/vala/neighborhood/serializables.vala:23-35`).
 

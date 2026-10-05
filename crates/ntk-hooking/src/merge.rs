@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The size-based merge-direction heuristic —
 //! `research/impl/vala/hooking/arc_handler.vala:150-214` — extracted as
 //! pure functions so the decision boundary (smaller/larger/within-10x/tie)

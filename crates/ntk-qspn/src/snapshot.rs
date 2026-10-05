@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The exported per-level route set: an immutable snapshot published via
 //! `tokio::sync::watch` after each processed command, for the daemon to hand
 //! to `ntk-netlink` (`research/notes/06-rust-stack.md` §Concurrency,

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Consumer-facing events — the Rust analogue of `HookingManager`'s GObject
 //! signals (`research/impl/vala/hooking/hooking.vala:112-122`), published as
 //! a `tokio::sync::broadcast` stream rather than callbacks/signals.

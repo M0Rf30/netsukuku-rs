@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`RpcClient`]: the async, object-safe substitutability seam that
 //! upstream's `IQspnStubFactory`-style per-(root,medium) stub factories
 //! played (research/notes/06-rust-stack.md §"Where Rust traits replace...").

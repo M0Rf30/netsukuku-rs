@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Native kernel-state manipulation for Netsukuku's L3 routing daemon.
 //!
 //! Upstream's `ntkd` drives the kernel exclusively by shelling out to

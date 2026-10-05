@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Real-kernel N-node mesh scenarios (Rung 2): multi-hop forwarding, a two-g-node merge, a
 //! partition's debounced split signal, and a level-1 destination's CIDR arithmetic — all driven
 //! over the shared fixture in `tests/netns/mod.rs`. See that module's own doc comment for the

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Collective-merge decision tests.
 //!
 //! `CoordinatorClient::decide_merge` (`src/coordinator.rs`) routes the

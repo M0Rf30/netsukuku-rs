@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Domain types at the crate's API boundary: std `Ipv4Addr`, `u8` prefix
 //! lengths and `u32` table ids only — no `ipnet`/`macaddr`/third-party
 //! address crates, per the phase-1 contract.

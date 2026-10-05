@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The single-owner actor holding this node's ANDNA state, and [`Handle`], the only interaction
 //! path — both this crate's own [`crate::service::AndnaService`]/[`crate::service::CounterService`]
 //! (inbound, from the network) and top-level `register`/`resolve`/`renew` callers (outbound, to

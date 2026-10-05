@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Wire codec: converts between this crate's domain types
 //! ([`crate::domain`]) and the `prost`-generated `proto/hooking.proto`
 //! types ([`v1`]). `From` (domain -> wire) is infallible; `TryFrom`

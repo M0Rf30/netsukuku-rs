@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The pure, synchronous half of upstream's `IdentityManager`
 //! (`identities.vala:60-215,344-397`) — the identity map and its
 //! invariants, with all async/RPC machinery in [`crate::actor`]. Kept

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! `ArcId` plus the per-arc state machine — `ArcHandler.add_arc_tasklet`
 //! (`research/impl/vala/hooking/arc_handler.vala:62-359`): one independent
 //! task per identity-arc, driven purely by that arc's peer. Each arc's task

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Full K4 mesh: two level-0 sibling pairs (`q0`,`q1` in level-1 slot 0;
 //! `q2`,`q3` in level-1 slot 1), every pair directly adjacent — the in-memory
 //! analogue of `ntkd/tests/mesh.rs`'s

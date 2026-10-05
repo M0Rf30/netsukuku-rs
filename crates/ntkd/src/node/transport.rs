@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Production-only transport composition: binds the real [`ntk_rpc::TcpServer`] and one
 //! [`ntk_rpc::UdpBroadcaster`] per configured NIC, spawns [`ntk_neighborhood::Manager`] against
 //! the real [`ntk_netlink::RealNetlink`] backend (the one call site allowed to name that

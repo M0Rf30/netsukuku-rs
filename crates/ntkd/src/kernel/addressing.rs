@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! NIP↔IPv4 address computation: translates a hierarchical [`Naddr`]/[`HCoord`] into the
 //! `10.0.0.0/8` IPv4 representation the kernel actually routes on.
 //!

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Outbound `destroy` (`research/impl/vala/qspn/qspn.vala:2481-2505`): a retiring identity tells
 //! its neighbours, and each one's implicit withdrawal retracts whatever was only reachable
 //! through it.

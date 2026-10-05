@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`InterfaceState`]: a `Send`-provable adapter over
 //! `ntk_netlink::TopologyQuery`, used for this crate's "which local
 //! interfaces participate" responsibility (`crate::Manager::start_monitor`/

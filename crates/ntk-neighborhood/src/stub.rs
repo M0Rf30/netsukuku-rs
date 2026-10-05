@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Outbound-call seam (`INeighborhoodStubFactory`,
 //! `research/impl/vala/neighborhood/api.vala:50-60`): [`NeighborhoodStubFactory`]
 //! plus [`BroadcastRpcClient`], the real broadcast-transport adapter over

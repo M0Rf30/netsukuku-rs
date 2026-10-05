@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! [`Hostname`]: a validated, case-folded ANDNA name, and its `blake3` route key.
 
 use std::fmt;

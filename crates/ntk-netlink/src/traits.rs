@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The trait seam: every kernel-state operation upstream's
 //! `identity_ip_commands.vala`/`cleaning.vala` performs by shelling out to
 //! `ip`(8), reimplemented as async traits over real netlink. Split into four

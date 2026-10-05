@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The key→g-node mapping's hashing half: turning an already-hashed key into a target
 //! [`TupleNode`] in this topology's address space. Pairing this with [`crate::tuple::approximate`]
 //! (which then finds the closest *existing* participant to that target) implements RFC 0014 §2,

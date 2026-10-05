@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Participation maps: which g-nodes are known to participate in which service, and the
 //! flood-gossip fold/merge algorithm that keeps `retrieved_below_level` a monotonic freshness
 //! marker (`research/impl/vala/peerservices/map_handler.vala`,

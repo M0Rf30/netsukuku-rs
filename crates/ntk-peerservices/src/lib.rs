@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Generic distributed-service substrate (DHT-over-topology) that `ntk-coordinator` and
 //! `ntk-andna` register on (`research/notes/02-vala-services-daemon.md` §3; RFC 0014,
 //! "P2P over Netsukuku").
