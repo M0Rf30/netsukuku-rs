@@ -137,16 +137,10 @@ fn build_peers_network() -> (Vec<PeersHandle>, CancellationToken) {
     (handles, cancel)
 }
 
-/// Boots the 4-node network and registers this crate's two services on every node.
-///
-/// Every node registers *both* services on itself, so `contact_peer`'s optimistic routing (try
-/// the closest candidate; if it turns out not to actually hold the service locally, exclude it
-/// and retry) always converges without needing to wait for participation gossip first — unlike
-/// `ntk-peerservices/tests/routing.rs`'s own harness, which registers a given service on only
-/// *one* node and so does wait for gossip. Waiting here would also be substantially slower: two
-/// services registered back-to-back from the same node collide in `ntk-peerservices`' gossip
-/// dedup (`recent_published: BTreeSet<HCoord>` is keyed by position only, not `(p_id, HCoord)`),
-/// so the second registration's participation fact is silently suppressed for 60 real seconds.
+/// Boots the 4-node network and registers this crate's two services on every node, then waits
+/// until every node has learned (via participation gossip) of the other g-nodes hosting both
+/// services — routing decisions otherwise race the gossip and make per-registrant Counter
+/// accounting depend on timing.
 async fn build_andna_network(config: Config) -> (Vec<ntk_andna::Handle>, CancellationToken) {
     let (peers_handles, cancel) = build_peers_network();
 
@@ -158,6 +152,29 @@ async fn build_andna_network(config: Config) -> (Vec<ntk_andna::Handle>, Cancell
         handle.register_services().await;
         andna_handles.push(handle);
     }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    for peers_handle in &peers_handles {
+        let snapshot = peers_handle.snapshot();
+        for p_id in [
+            ntk_andna::andna_service_id(),
+            ntk_andna::counter_service_id(),
+        ] {
+            // Each node sits in a 2x2 topology: one level-0 sibling and one level-1 g-node.
+            while snapshot
+                .borrow()
+                .participants
+                .get(&p_id)
+                .is_none_or(|m| m.len() < 2)
+            {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "participation gossip for service {p_id:?} did not converge"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
     (andna_handles, cancel)
 }
 
@@ -166,8 +183,14 @@ fn signed_request(
     name: &str,
     owner: &Naddr,
     sequence: u64,
-    now: u64,
+    _label_time: u64,
 ) -> RegisterRequest {
+    // Hash-nodes reject timestamps far from their wall clock, so sign with the real time; the
+    // last argument only labels the call site's intended ordering.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     RegisterRequest::sign(
         key,
         Hostname::new(name).unwrap(),

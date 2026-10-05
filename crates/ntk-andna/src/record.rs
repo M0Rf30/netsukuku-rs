@@ -19,8 +19,11 @@
 //! so upstream's own scheme only rate-limits replay via the separate `ANDNA_MIN_UPDATE_TIME`
 //! cooldown, not by rejecting it outright. This crate requires `sequence` to *strictly* increase
 //! on every accepted registration/renewal, so a byte-for-byte replay of any prior accepted
-//! request is unconditionally rejected as [`RegisterRejected::StaleSequence`], independent of the
-//! cooldown.
+//! request against a live record is rejected as [`RegisterRejected::StaleSequence`], independent
+//! of the cooldown. The stored sequence is dropped when a record expires, so the signed
+//! `timestamp_unix` must additionally lie within [`MAX_TIMESTAMP_SKEW_SECS`] of the hash-node's
+//! clock ([`RegisterRejected::StaleTimestamp`]); that bounds replay after expiry to a window
+//! far shorter than the name TTL.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -31,6 +34,9 @@ use ntk_common::Naddr;
 use crate::error::Error;
 use crate::hostname::Hostname;
 use crate::snsd::{SnsdRecord, SnsdTable, SnsdTarget, ZERO_SERVICE};
+
+/// How far (seconds) a request's signed `timestamp_unix` may deviate from the hash-node's clock.
+pub const MAX_TIMESTAMP_SKEW_SECS: u64 = 3600;
 
 /// Deterministic domain-level encoding of a target, for [`RegisterRequest::signing_bytes`] —
 /// distinct from this crate's protobuf wire format, which is not guaranteed byte-stable and is
@@ -232,6 +238,10 @@ pub enum RegisterRejected {
     /// stale, or not-yet-purged) — only a brand-new key hits this once the cache is full.
     #[error("this node already hosts the maximum {cap} hostname records")]
     HostCapacityExceeded { cap: usize },
+    /// The signed `timestamp_unix` is further from this node's clock than
+    /// [`MAX_TIMESTAMP_SKEW_SECS`]: an expired-and-purged name's old request cannot be replayed.
+    #[error("request timestamp {timestamp} is too far from node time {now}")]
+    StaleTimestamp { timestamp: u64, now: u64 },
 }
 
 /// SNSD-cap violations, surfaced separately from [`Error`] since they are a registration-request
@@ -285,6 +295,15 @@ impl Cache {
             .map_err(|_| RegisterRejected::InvalidSignature)?;
         if req.snsd_records.iter().any(|r| r.service == ZERO_SERVICE) {
             return Err(RegisterRejected::ReservedServiceZero);
+        }
+        // The sequence high-water mark is dropped with the record at expiry/purge, so without a
+        // freshness bound a captured old request would re-register the name after that.
+        let skew = req.timestamp_unix.abs_diff(now);
+        if skew > MAX_TIMESTAMP_SKEW_SECS {
+            return Err(RegisterRejected::StaleTimestamp {
+                timestamp: req.timestamp_unix,
+                now,
+            });
         }
 
         // A brand-new hostname key would grow `self.records` past its cap — refuse it outright.
@@ -524,6 +543,44 @@ mod tests {
             RegisterRejected::StaleSequence {
                 given: 1,
                 stored: 1
+            }
+        );
+    }
+
+    #[test]
+    fn replay_of_an_old_request_after_expiry_and_purge_is_rejected() {
+        let mut cache = Cache::new();
+        let owner = key(1);
+        let req = signed(&owner, "angelica", 1, 1000);
+        cache
+            .register(
+                &req,
+                1000,
+                Duration::from_secs(100),
+                Duration::ZERO,
+                16,
+                256,
+                usize::MAX,
+            )
+            .unwrap();
+        let later = 1000 + 100 + MAX_TIMESTAMP_SKEW_SECS + 1;
+        cache.purge_expired(later);
+        let err = cache
+            .register(
+                &req,
+                later,
+                Duration::from_secs(100),
+                Duration::ZERO,
+                16,
+                256,
+                usize::MAX,
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            RegisterRejected::StaleTimestamp {
+                timestamp: 1000,
+                now: later
             }
         );
     }
