@@ -735,11 +735,18 @@ mod tests {
     async fn realize_transitions_a_virtual_installer_to_real_in_place() {
         let topology = ntk_common::Topology::new([4, 2]).unwrap();
         let virtual_naddr = Naddr::new_allowing_virtual(topology.clone(), [4, 0]).unwrap();
-        let kernel = ntk_netlink::FakeNetlink::with_links(vec![ntk_netlink::LinkInfo {
-            index: 1,
-            name: "lo".into(),
-            is_up: true,
-        }]);
+        let kernel = ntk_netlink::FakeNetlink::with_links(vec![
+            ntk_netlink::LinkInfo {
+                index: 1,
+                name: "lo".into(),
+                is_up: true,
+            },
+            ntk_netlink::LinkInfo {
+                index: 2,
+                name: "eth0".into(),
+                is_up: true,
+            },
+        ]);
         let mut installer = RouteInstaller::new(kernel, virtual_naddr, 200, 9_990);
         let via: Ipv4Addr = "169.254.1.1".parse().unwrap();
         installer.set_arc_endpoint(ArcId::from(1), via, Interface::name("eth0"));
@@ -890,6 +897,11 @@ mod tests {
             ntk_netlink::LinkInfo {
                 index: 1,
                 name: "lo".into(),
+                is_up: true,
+            },
+            ntk_netlink::LinkInfo {
+                index: 2,
+                name: "eth0".into(),
                 is_up: true,
             },
         ]));

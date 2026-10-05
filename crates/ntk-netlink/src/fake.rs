@@ -16,7 +16,7 @@ use crate::table::guard_table;
 use crate::traits::{AddressTable, RouteTable, RuleTable, TopologyQuery, resolve_interface};
 use crate::types::{
     AddressEntry, Interface, Ipv4Net, LinkInfo, NeighbourInfo, Operation, RouteKey, RouteSpec,
-    RuleSpec,
+    RouteTarget, RuleSpec,
 };
 
 #[derive(Debug)]
@@ -105,6 +105,32 @@ impl FakeNetlink {
         self.lock().route_failures.insert(destination, error);
     }
 
+    /// Resolves every interface a route names, exactly as [`crate::RealNetlink`] does before
+    /// building its message, and rejects a multipath route listing the same `(via, ifindex)`
+    /// nexthop twice (which the kernel refuses).
+    async fn validate_route_target(&self, route: &RouteSpec) -> Result<(), NetlinkError> {
+        match &route.target {
+            RouteTarget::Unreachable => {}
+            RouteTarget::Gateway { dev, .. } | RouteTarget::OnLink { dev } => {
+                resolve_interface(self, dev).await?;
+            }
+            RouteTarget::Multipath(nexthops) => {
+                let mut seen = Vec::with_capacity(nexthops.len());
+                for nexthop in nexthops {
+                    let link = resolve_interface(self, &nexthop.dev).await?;
+                    if seen.contains(&(nexthop.via, link.index)) {
+                        return Err(NetlinkError::AlreadyExists(format!(
+                            "duplicate multipath nexthop {} dev {}",
+                            nexthop.via, nexthop.dev
+                        )));
+                    }
+                    seen.push((nexthop.via, link.index));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, FakeState> {
         self.state.lock().expect("FakeNetlink mutex poisoned")
     }
@@ -187,6 +213,7 @@ impl AddressTable for FakeNetlink {
 impl RouteTable for FakeNetlink {
     async fn add_route(&self, route: &RouteSpec) -> Result<(), NetlinkError> {
         guard_table(route.table)?;
+        self.validate_route_target(route).await?;
         let mut state = self.lock();
         if let Some(error) = state.route_failures.remove(&route.destination) {
             return Err(error);
@@ -205,6 +232,7 @@ impl RouteTable for FakeNetlink {
 
     async fn change_route(&self, route: &RouteSpec) -> Result<(), NetlinkError> {
         guard_table(route.table)?;
+        self.validate_route_target(route).await?;
         let mut state = self.lock();
         if let Some(error) = state.route_failures.remove(&route.destination) {
             return Err(error);
@@ -369,7 +397,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_lifecycle_is_recorded_in_order() {
-        let fake = FakeNetlink::new();
+        let fake = fake_with_eth0();
         let destination = Ipv4Net::new(Ipv4Addr::new(10, 1, 0, 0), 16).unwrap();
         let spec = RouteSpec {
             destination,
@@ -514,5 +542,57 @@ mod tests {
         fake.clear_operations();
         assert!(fake.operations().is_empty());
         assert_eq!(fake.list_addresses(None).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn route_ops_resolve_every_named_interface_like_the_real_backend() {
+        let fake = FakeNetlink::new();
+        let destination = Ipv4Net::new(Ipv4Addr::new(10, 3, 0, 0), 16).unwrap();
+        let via = Ipv4Addr::new(10, 0, 0, 2);
+        for target in [
+            RouteTarget::Gateway {
+                via,
+                dev: eth0(),
+                src: None,
+            },
+            RouteTarget::OnLink { dev: eth0() },
+            RouteTarget::Multipath(vec![crate::types::Nexthop {
+                via,
+                dev: eth0(),
+                weight: 1,
+            }]),
+        ] {
+            let spec = RouteSpec {
+                destination,
+                table: 200,
+                target,
+            };
+            assert!(matches!(
+                fake.add_route(&spec).await,
+                Err(NetlinkError::InterfaceNotFound(_))
+            ));
+            assert!(matches!(
+                fake.change_route(&spec).await,
+                Err(NetlinkError::InterfaceNotFound(_))
+            ));
+        }
+        assert!(fake.operations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn multipath_with_a_duplicate_nexthop_is_rejected() {
+        let fake = fake_with_eth0();
+        let hop = crate::types::Nexthop {
+            via: Ipv4Addr::new(10, 0, 0, 2),
+            dev: eth0(),
+            weight: 1,
+        };
+        let spec = RouteSpec {
+            destination: Ipv4Net::new(Ipv4Addr::new(10, 4, 0, 0), 16).unwrap(),
+            table: 200,
+            target: RouteTarget::Multipath(vec![hop.clone(), hop]),
+        };
+        assert!(fake.add_route(&spec).await.is_err());
+        assert!(fake.operations().is_empty());
     }
 }
