@@ -15,7 +15,7 @@ use crate::counter::CounterRejected;
 use crate::error::Error;
 use crate::hostname::{Hostname, HostnameHash};
 use crate::record::{RegisterOutcome, RegisterRejected, RegisterRequest};
-use crate::snsd::{SnsdRecord, SnsdTarget};
+use crate::snsd::{MAX_WEIGHT, SnsdRecord, SnsdTarget};
 use crate::v1 as wire;
 
 const TAG_REGISTER_REQUEST: &str = "andna.RegisterRequest";
@@ -42,6 +42,16 @@ fn snsd_record_to_wire(r: &SnsdRecord) -> wire::SnsdRecord {
     }
 }
 
+/// A wire weight must fit a `u8` and the RFC 0009 [`MAX_WEIGHT`] ceiling; it is never clamped,
+/// because the weight is covered by the owner's signature.
+fn weight_from_wire(raw: u32, field: &'static str) -> Result<u8, Error> {
+    let weight = u8::try_from(raw).map_err(|_| Error::FieldOutOfRange(field))?;
+    if weight > MAX_WEIGHT {
+        return Err(Error::WeightTooLarge(weight));
+    }
+    Ok(weight)
+}
+
 fn snsd_record_from_wire(w: &wire::SnsdRecord) -> Result<SnsdRecord, Error> {
     let target = match w.target.as_ref().ok_or(Error::MissingField("target"))? {
         wire::snsd_record::Target::Address(wrapped) => {
@@ -57,8 +67,7 @@ fn snsd_record_from_wire(w: &wire::SnsdRecord) -> Result<SnsdRecord, Error> {
         u16::try_from(w.service).map_err(|_| Error::FieldOutOfRange("snsd_record.service"))?;
     let priority =
         u8::try_from(w.priority).map_err(|_| Error::FieldOutOfRange("snsd_record.priority"))?;
-    let weight =
-        u8::try_from(w.weight).map_err(|_| Error::FieldOutOfRange("snsd_record.weight"))?;
+    let weight = weight_from_wire(w.weight, "snsd_record.weight")?;
     Ok(SnsdRecord {
         service,
         priority,
@@ -113,8 +122,9 @@ pub(crate) fn unpack_register_request(tv: &TypedValue) -> Result<RegisterRequest
         owner_naddr,
         sequence: w.sequence,
         timestamp_unix: w.timestamp_unix,
-        zero_priority: u8::try_from(w.zero_priority).unwrap_or(u8::MAX),
-        zero_weight: u8::try_from(w.zero_weight).unwrap_or(u8::MAX),
+        zero_priority: u8::try_from(w.zero_priority)
+            .map_err(|_| Error::FieldOutOfRange("zero_priority"))?,
+        zero_weight: weight_from_wire(w.zero_weight, "zero_weight")?,
         snsd_records: w
             .snsd_records
             .iter()
@@ -246,5 +256,33 @@ pub(crate) fn unpack_counter_reply(tv: &TypedValue) -> Result<Result<usize, Stri
     match w.outcome.ok_or(Error::MissingField("outcome"))? {
         Outcome::ReservedCount(count) => Ok(Ok(count as usize)),
         Outcome::DeniedReason(reason) => Ok(Err(reason)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snsd_record_weight_over_the_rfc_limit_is_rejected_not_clamped() {
+        let w = wire::SnsdRecord {
+            service: 80,
+            priority: 1,
+            weight: u32::from(MAX_WEIGHT) + 1,
+            target: Some(wire::snsd_record::Target::Hostname("alias".to_owned())),
+        };
+        assert!(matches!(
+            snsd_record_from_wire(&w),
+            Err(Error::WeightTooLarge(128))
+        ));
+    }
+
+    #[test]
+    fn weight_exceeding_a_byte_is_out_of_range() {
+        assert!(matches!(
+            weight_from_wire(300, "zero_weight"),
+            Err(Error::FieldOutOfRange("zero_weight"))
+        ));
+        assert_eq!(weight_from_wire(u32::from(MAX_WEIGHT), "w").unwrap(), 127);
     }
 }

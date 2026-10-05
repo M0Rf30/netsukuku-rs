@@ -242,6 +242,10 @@ pub enum RegisterRejected {
     /// [`MAX_TIMESTAMP_SKEW_SECS`]: an expired-and-purged name's old request cannot be replayed.
     #[error("request timestamp {timestamp} is too far from node time {now}")]
     StaleTimestamp { timestamp: u64, now: u64 },
+    /// `zero_weight` exceeds RFC 0009's [`crate::snsd::MAX_WEIGHT`]; never clamped, because the
+    /// weight is part of what the owner signed.
+    #[error("zero record weight {0} exceeds the RFC 0009 limit")]
+    WeightTooLarge(u8),
 }
 
 /// SNSD-cap violations, surfaced separately from [`Error`] since they are a registration-request
@@ -295,6 +299,9 @@ impl Cache {
             .map_err(|_| RegisterRejected::InvalidSignature)?;
         if req.snsd_records.iter().any(|r| r.service == ZERO_SERVICE) {
             return Err(RegisterRejected::ReservedServiceZero);
+        }
+        if req.zero_weight > crate::snsd::MAX_WEIGHT {
+            return Err(RegisterRejected::WeightTooLarge(req.zero_weight));
         }
         // The sequence high-water mark is dropped with the record at expiry/purge, so without a
         // freshness bound a captured old request would re-register the name after that.

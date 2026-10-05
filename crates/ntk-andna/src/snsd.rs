@@ -150,10 +150,10 @@ impl SnsdTable {
         if let Some(old) = self.by_service.remove(&ZERO_SERVICE) {
             self.total -= old.len();
         }
-        // weight is separately capped to MAX_WEIGHT by callers constructing the request; a
-        // malformed value here is clamped rather than panicking, since this is a purely internal
-        // reconciliation step (the caller-facing validation already happened in `RegisterRequest`).
-        let weight = weight.min(MAX_WEIGHT);
+        // `weight` is part of the signed registration, so it is stored verbatim: every producer
+        // (`RegisterRequest::sign`, `wire::unpack_register_request`) already refuses a value over
+        // `MAX_WEIGHT`, and silently changing it here would make the stored record differ from
+        // what the owner signed.
         self.by_service.insert(
             ZERO_SERVICE,
             vec![SnsdRecord {
