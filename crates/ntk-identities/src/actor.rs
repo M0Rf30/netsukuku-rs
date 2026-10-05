@@ -57,6 +57,10 @@ const MIGRATION_CALL_FLOOR: Duration = Duration::from_secs(3);
 /// (`Timer(500)`, `identities.vala:674,705`).
 const NOTIFY_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Upper bound on a peer-supplied MAC / link-local string accepted by
+/// `on_neighbour_migrated`.
+const MAX_PEER_STRING_LEN: usize = 64;
+
 /// A migration this node knows about but has not (yet) executed —
 /// upstream's `MigrationData` (`identities.vala:997-1009`).
 ///
@@ -572,6 +576,14 @@ impl State {
         reply: oneshot::Sender<Result<IdentityId, Error>>,
     ) {
         let mut broken_arcs = Vec::new();
+        if self.registry.get(new_id).is_none() {
+            let _ = reply.send(Err(Error::UnknownIdentity(new_id)));
+            return;
+        }
+        let outcomes: Vec<ArcDuplicationOutcome> = outcomes
+            .into_iter()
+            .filter(|o| self.arcs.contains_key(&o.arc))
+            .collect();
         for outcome in outcomes {
             let arc = outcome.arc;
             for ia in outcome.identity_arcs {
@@ -679,6 +691,14 @@ impl State {
         let Some(list) = self.identity_arcs.get_mut(&(my_id, arc)) else {
             return;
         };
+        if list.iter().any(|w| w.peer_id == my_peer_new_id) {
+            return;
+        }
+        if my_peer_old_id_new_mac.len() > MAX_PEER_STRING_LEN
+            || my_peer_old_id_new_linklocal.len() > MAX_PEER_STRING_LEN
+        {
+            return;
+        }
         let Some(w0) = list.iter_mut().find(|w| w.peer_id == my_peer_old_id) else {
             return;
         };
@@ -808,6 +828,8 @@ impl State {
             let _ = reply.send(Err(Error::UnknownIdentity(old_id)));
             return;
         }
+        self.pending_migrations
+            .retain(|&(_, pending_old), p| !(pending_old == old_id && p.new_id == Some(new_id)));
         if self.registry.main_id() == new_id {
             self.registry.reassign_main(old_id);
         }
@@ -1039,7 +1061,11 @@ async fn run(mut state: State, mut cmd_rx: mpsc::Receiver<Cmd>, cancel: Cancella
             Some(_) = background.join_next(), if !background.is_empty() => {}
         }
     }
-    while background.join_next().await.is_some() {}
+    // Close the command channel first: background tasks blocked on `cmd_tx.send().await`
+    // against a full queue would otherwise never finish, and in-flight RPC awaits ignore
+    // `cancel`, so abort whatever is left instead of waiting out their timeouts.
+    drop(cmd_rx);
+    background.shutdown().await;
 }
 
 /// Cheap-clone handle to a running identity-manager actor — the only way

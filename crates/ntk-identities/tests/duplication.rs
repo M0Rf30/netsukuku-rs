@@ -673,3 +673,72 @@ async fn abort_migration_reverts_a_successor_that_never_hooks() {
         },
     );
 }
+
+/// After an abort the pending migration must be gone: a second `migrate` under the same
+/// ids must not fork again from a stale, still-`ready` entry.
+#[tokio::test]
+async fn abort_migration_consumes_the_pending_migration() {
+    let (a, b, _arc) = two_peers().await;
+    let _ = b;
+    let a_main = a.main_id();
+
+    let migration = MigrationId(100);
+    a.prepare_migration(migration, a_main)
+        .await
+        .expect("prepare");
+    let a_new = a
+        .migrate(migration, a_main, devices("aa:aa:aa:aa:aa:a5", "fe80::a5"))
+        .await
+        .expect("migrate");
+    a.abort_migration(a_main, a_new).await.expect("abort");
+
+    let err = a
+        .migrate(migration, a_main, devices("aa:aa:aa:aa:aa:a6", "fe80::a6"))
+        .await
+        .expect_err("the aborted migration must not be forkable again");
+    assert!(matches!(err, Error::UnknownMigration { .. }), "{err:?}");
+}
+
+/// A replayed unmatched `match_duplication` must not grow the identity-arc list or re-emit
+/// events: `on_neighbour_migrated` is a no-op once the peer's new id is already recorded.
+#[tokio::test]
+async fn replayed_unmatched_match_duplication_is_idempotent() {
+    let arc = ArcId(9);
+    let stub: Arc<dyn IdentityStubFactory> = Arc::new(FixedStubFactory {
+        arc,
+        peer_main_id: IdentityId::from_raw(1001),
+    });
+    let cancel = CancellationToken::new();
+    let (b, _join) = Handle::spawn(None, stub.clone(), cancel.clone());
+    let b_main = b.main_id();
+    let rpc = IdentityRpcHandler::new(b.clone(), stub.clone());
+    b.add_arc(arc, arc_info("cc:cc:cc:cc:cc:cc", "fe80::c"))
+        .await
+        .expect("add arc");
+    let mut events = b.subscribe();
+
+    for _ in 0..3 {
+        rpc.handle(
+            caller_context(),
+            TypedValue::default(),
+            build_match_duplication_call(MigrationId(300), b_main),
+            None,
+        )
+        .await
+        .expect("handler answers");
+    }
+
+    let mut added = 0;
+    while let Ok(event) = events.try_recv() {
+        if matches!(
+            event,
+            IdentityEvent::IdentityArc {
+                change: IdentityArcChange::Added { .. },
+                ..
+            }
+        ) {
+            added += 1;
+        }
+    }
+    assert_eq!(added, 1, "replays must not add further identity-arcs");
+}
