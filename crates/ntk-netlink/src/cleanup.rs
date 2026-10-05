@@ -30,16 +30,12 @@
 //! - **Rule ownership**: identical predicate, applied to
 //!   [`RuleSpec::table`] — this covers both the main identity's plain
 //!   `table <main>` rule and every per-peer `fwmark <tid> table <tid>` rule.
-//! - **Address ownership**: an address belongs to Netsukuku *iff* (a) it
-//!   falls inside [`NETSUKUKU_ADDRESS_SPACE`] (`10.0.0.0/8`,
-//!   `ipv4_compute.vala:23-168`), **and** (b) it is on an interface the
-//!   caller explicitly names as `managed_interfaces` (mirroring `ntkclean
-//!   -i <dev>`, `cleaning.vala:36`) or on loopback (`lo`, upstream's own
-//!   special case at `cleaning.vala:173-188`). Condition (b) exists because,
-//!   unlike table ids, `10.0.0.0/8` is not exclusively Netsukuku's — nothing
-//!   stops another process from owning a `10.x` address on an interface this
-//!   daemon was never told about, so we only ever look at the interfaces we
-//!   were explicitly given.
+//! - **Address ownership**: an address belongs to Netsukuku *iff* it is a
+//!   `/32` inside [`NETSUKUKU_ADDRESS_SPACE`] (`10.0.0.0/8`,
+//!   `ipv4_compute.vala:23-168`) **on loopback** — the only place the daemon
+//!   installs its identity address. Unlike table ids, `10.0.0.0/8` is not
+//!   exclusively Netsukuku's, so operator LAN/VIP addresses (other prefix
+//!   lengths, or any address on a managed NIC) are never deleted.
 //!
 //! **Explicitly out of scope** (unlike upstream's `ntkclean`): stale
 //! `ntkv*` network namespaces, `macvlan` pseudo-devices, and
@@ -77,45 +73,57 @@ impl CleanupReport {
 
 /// Removes every piece of kernel state this crate can determine belongs to
 /// Netsukuku — see the module documentation for the exact, per-object-kind
-/// ownership predicate. `managed_interfaces` should be the same interface
-/// list the daemon was started with (mirroring `ntkclean -i <dev>`); `lo` is
-/// always included in addition, matching upstream's own special case.
+/// ownership predicate. `_managed_interfaces` is accepted for API compatibility but no longer
+/// widens the address sweep: only the identity `/32` on `lo` is removed.
 pub async fn cleanup<T, K>(
     kernel: &T,
     table_allocator: &TableAllocator<K>,
-    managed_interfaces: &[Interface],
+    _managed_interfaces: &[Interface],
 ) -> Result<CleanupReport, NetlinkError>
 where
     T: AddressTable + RouteTable + RuleTable + TopologyQuery,
 {
     let mut report = CleanupReport::default();
 
-    let mut interfaces = managed_interfaces.to_vec();
-    interfaces.push(Interface::name("lo"));
-    for interface in &interfaces {
-        for entry in kernel.list_addresses(Some(interface)).await? {
-            if NETSUKUKU_ADDRESS_SPACE.contains(entry.network.address()) {
-                kernel.remove_address(interface, entry.network).await?;
-                report.addresses_removed.push(entry);
+    // Only what the daemon itself installs is swept: its identity address, a /32 inside
+    // 10.0.0.0/8 on loopback. Any other 10/8 address — an operator's LAN or VIP address on a
+    // managed NIC or on `lo` with a shorter prefix — is not ours to delete.
+    let lo = Interface::name("lo");
+    for entry in kernel.list_addresses(Some(&lo)).await? {
+        if entry.network.prefix_len() == 32
+            && NETSUKUKU_ADDRESS_SPACE.contains(entry.network.address())
+        {
+            match kernel.remove_address(&lo, entry.network).await {
+                Ok(()) => report.addresses_removed.push(entry),
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error),
             }
         }
     }
 
-    for table in table_allocator.owned_tables() {
-        for route in kernel.list_routes(Some(table)).await? {
-            let key = RouteKey {
-                destination: route.destination,
-                table: route.table,
-            };
-            kernel.remove_route(key).await?;
-            report.routes_removed.push(key);
+    // One unfiltered dump, filtered by table ownership here, instead of one dump per table.
+    for route in kernel.list_routes(None).await? {
+        if !table_allocator.owns_table(route.table) {
+            continue;
+        }
+        let key = RouteKey {
+            destination: route.destination,
+            table: route.table,
+        };
+        match kernel.remove_route(key).await {
+            Ok(()) => report.routes_removed.push(key),
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error),
         }
     }
 
     for rule in kernel.list_rules().await? {
         if table_allocator.owns_table(rule.table) {
-            kernel.remove_rule(&rule).await?;
-            report.rules_removed.push(rule);
+            match kernel.remove_rule(&rule).await {
+                Ok(()) => report.rules_removed.push(rule),
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error),
+            }
         }
     }
 
@@ -150,9 +158,10 @@ mod tests {
         let eth0 = Interface::name("eth0");
         let allocator: TableAllocator<&str> = TableAllocator::new();
 
-        // Owned: a Netsukuku address on a managed interface.
+        let lo = Interface::name("lo");
+        // Owned: the identity /32 on loopback.
         let owned_addr = Ipv4Net::new(Ipv4Addr::new(10, 0, 0, 5), 32).unwrap();
-        fake.add_address(&eth0, owned_addr).await.unwrap();
+        fake.add_address(&lo, owned_addr).await.unwrap();
         // Foreign: not in 10.0.0.0/8, must survive.
         let foreign_addr = Ipv4Net::new(Ipv4Addr::new(192, 168, 1, 5), 32).unwrap();
         fake.add_address(&eth0, foreign_addr).await.unwrap();
@@ -194,7 +203,7 @@ mod tests {
         assert_eq!(
             report.addresses_removed,
             vec![AddressEntry {
-                interface_index: 2,
+                interface_index: 1,
                 network: owned_addr
             }]
         );
@@ -223,7 +232,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleans_loopback_even_when_not_in_managed_interfaces() {
+    async fn operator_ten_slash_eight_addresses_are_never_deleted() {
+        let fake = managed_fake();
+        let eth0 = Interface::name("eth0");
+        let lo = Interface::name("lo");
+        let lan = Ipv4Net::new(Ipv4Addr::new(10, 1, 2, 3), 24).unwrap();
+        let vip_on_nic = Ipv4Net::new(Ipv4Addr::new(10, 9, 9, 9), 32).unwrap();
+        let wide_on_lo = Ipv4Net::new(Ipv4Addr::new(10, 8, 0, 1), 16).unwrap();
+        fake.add_address(&eth0, lan).await.unwrap();
+        fake.add_address(&eth0, vip_on_nic).await.unwrap();
+        fake.add_address(&lo, wide_on_lo).await.unwrap();
+
+        let allocator: TableAllocator<&str> = TableAllocator::new();
+        let report = cleanup(&fake, &allocator, std::slice::from_ref(&eth0))
+            .await
+            .unwrap();
+
+        assert!(report.is_empty(), "nothing of ours was present: {report:?}");
+        assert_eq!(fake.list_addresses(None).await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn identity_address_on_loopback_is_swept_without_managed_interfaces() {
         let fake = managed_fake();
         let lo = Interface::name("lo");
         let owned_addr = Ipv4Net::new(Ipv4Addr::new(10, 0, 0, 1), 32).unwrap();
@@ -239,6 +269,25 @@ mod tests {
                 network: owned_addr
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn routes_in_every_owned_table_are_swept_from_one_dump() {
+        let fake = managed_fake();
+        let allocator: TableAllocator<&str> = TableAllocator::new();
+        let tables = [200, 233, allocator.main_table()];
+        for table in tables {
+            fake.add_route(&RouteSpec {
+                destination: Ipv4Net::new(Ipv4Addr::new(10, 5, 0, 0), 16).unwrap(),
+                table,
+                target: RouteTarget::Unreachable,
+            })
+            .await
+            .unwrap();
+        }
+        let report = cleanup(&fake, &allocator, &[]).await.unwrap();
+        assert_eq!(report.routes_removed.len(), 3);
+        assert!(fake.list_routes(None).await.unwrap().is_empty());
     }
 
     #[tokio::test]
