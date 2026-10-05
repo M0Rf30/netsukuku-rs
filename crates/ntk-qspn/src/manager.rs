@@ -1669,7 +1669,10 @@ impl Actor {
 
     /// `arc_remove` triggered internally after a failed call
     /// (`send_etp_uni`/`retrieve_full_etp` failure paths, e.g.
-    /// `qspn.vala:753-757,58-62`). Purely local.
+    /// `qspn.vala:753-757,58-62`). Like [`Self::handle_remove_arc`], the
+    /// removed arc's dead paths are flooded to the remaining neighbours
+    /// (`qspn.vala:1053`); otherwise they would keep routing through this
+    /// node until the next periodic full ETP.
     fn do_remove_arc(&mut self, arc: ArcId, bad_link: bool) {
         let removal = self.state.remove_arc(arc);
         // See `handle_remove_arc`'s doc: no admitted path removed means
@@ -1679,6 +1682,9 @@ impl Actor {
         self.emit(QspnEvent::ArcRemoved { arc, bad_link });
         if changed {
             self.publish_snapshot();
+        }
+        if !removal.dead_paths.is_empty() {
+            self.spawn_gather(None, removal.dead_paths);
         }
     }
 

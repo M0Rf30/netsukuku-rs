@@ -72,6 +72,43 @@ async fn announcing_retirement_with_no_arcs_is_a_success_not_an_error() {
         .expect("no arcs is not a failure");
 }
 
+/// `b` sits between `a` and `c`. When `a` retires, `b` drops the arc through its internal
+/// `GotDestroy` path (not the public `remove_arc`), and must still tell `c` right away instead of
+/// leaving `c` routing through `b` until the hour-long periodic full ETP.
+#[tokio::test]
+async fn an_internal_arc_removal_floods_the_withdrawal_to_other_neighbours() {
+    let topo = Topology::new([3, 2]).expect("valid topology");
+    let a = Node::spawn(naddr(&topo, [0, 0]), 1, fast_config());
+    let b = Node::spawn(naddr(&topo, [1, 0]), 2, fast_config());
+    let c = Node::spawn(naddr(&topo, [2, 0]), 3, fast_config());
+
+    link(&a, &b, Cost::Finite(10)).await;
+    link(&b, &c, Cost::Finite(10)).await;
+
+    let converged = wait_for(
+        || cost_to(&c.handle.snapshot(), 0, 0) == vec![Cost::Finite(20)],
+        400,
+    )
+    .await;
+    assert!(
+        converged,
+        "the chain never converged, so the withdrawal below would prove nothing: c={:?}",
+        c.handle.snapshot()
+    );
+
+    a.handle
+        .announce_destroy()
+        .await
+        .expect("announcing retirement must reach a live actor");
+
+    let withdrawn = wait_for(|| cost_to(&c.handle.snapshot(), 0, 0).is_empty(), 400).await;
+    assert!(
+        withdrawn,
+        "b's internal removal of a's arc must flood the withdrawal to c: c={:?}",
+        c.handle.snapshot()
+    );
+}
+
 fn cost_to(snapshot: &ntk_qspn::RouteSnapshot, level: usize, pos: u32) -> Vec<Cost> {
     let Some(entries) = snapshot.levels.get(level) else {
         return Vec::new();
