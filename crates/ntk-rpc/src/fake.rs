@@ -49,7 +49,7 @@ impl Fault {
             Fault::Always(factory) => Some(factory()),
             Fault::Nth { at, factory } => (call_number == *at).then(|| factory()),
             Fault::NextN { remaining, factory } => remaining
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
                 .is_ok()
                 .then(|| factory()),
         }

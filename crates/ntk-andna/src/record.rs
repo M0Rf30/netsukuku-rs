@@ -239,7 +239,8 @@ pub enum RegisterRejected {
     #[error("this node already hosts the maximum {cap} hostname records")]
     HostCapacityExceeded { cap: usize },
     /// The signed `timestamp_unix` is further from this node's clock than
-    /// [`MAX_TIMESTAMP_SKEW_SECS`]: an expired-and-purged name's old request cannot be replayed.
+    /// `MAX_TIMESTAMP_SKEW_SECS` (one hour): an expired-and-purged name's old request cannot be
+    /// replayed.
     #[error("request timestamp {timestamp} is too far from node time {now}")]
     StaleTimestamp { timestamp: u64, now: u64 },
     /// `zero_weight` exceeds RFC 0009's [`crate::snsd::MAX_WEIGHT`]; never clamped, because the
