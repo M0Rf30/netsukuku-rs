@@ -41,6 +41,11 @@ use crate::path::{
 };
 use crate::snapshot::{RouteEntry, RouteSnapshot};
 
+/// Hard bound on admitted paths per destination, as a multiple of
+/// `max_paths`: mandatory (fingerprint/gateway/sibling-covering) paths bypass
+/// `max_paths` itself, but their number legitimately stays small.
+const MANDATORY_PATH_FACTOR: usize = 4;
+
 /// This node's record of one of its own arcs: the peer's advertised cost
 /// (upstream re-reads `arc.i_qspn_get_cost()` live off the `IQspnArc` object;
 /// here it is stored, updated explicitly by `set_arc_cost`) and the peer's
@@ -939,6 +944,20 @@ impl QspnState {
             }
         }
 
+        // Identical (hops, arcs) candidates add nothing; keep only the
+        // cheapest (the set is sorted ascending). A peer could otherwise
+        // repeat one route with many distinct fingerprint ids.
+        let mut seen_routes: Vec<(Vec<HCoord>, Vec<ArcId>)> = Vec::new();
+        od_set.retain(|np| {
+            let key = (np.path.hops.clone(), np.path.arcs.clone());
+            if seen_routes.contains(&key) {
+                false
+            } else {
+                seen_routes.push(key);
+                true
+            }
+        });
+
         // vnd: g-nodes I reach via a direct arc; z1d: my own siblings at every
         // level below d (qspn.vala:1487-1502).
         let mut vnd: Vec<HCoord> = Vec::new();
@@ -1005,7 +1024,12 @@ impl QspnState {
                 }
             }
             if mandatory {
-                rd.push(p1.clone());
+                // Mandatory paths bypass `max_paths`, but not a hard bound:
+                // fingerprint ids are peer-chosen, so each one would
+                // otherwise be admitted for free.
+                if rd.len() < max_paths.saturating_mul(MANDATORY_PATH_FACTOR) {
+                    rd.push(p1.clone());
+                }
                 continue;
             }
             if rd.len() >= max_paths {
