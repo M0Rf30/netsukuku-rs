@@ -811,6 +811,25 @@ impl Handle {
         Some(service.exec(request, client_tuple).await)
     }
 
+    /// Next origin-auth sequence: strictly increasing, and never below the wall clock in
+    /// microseconds, so a restarted process (counter back at zero) still outruns the
+    /// high-water mark its previous incarnation left in every servant's `SequenceGuard`.
+    pub(crate) fn allocate_sequence(&self) -> u64 {
+        let now_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX));
+        let update = |prev: u64| Some(prev.saturating_add(1).max(now_micros));
+        let prev = self
+            .next_sequence
+            .try_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                update,
+            )
+            .unwrap_or_else(|p| p);
+        prev.saturating_add(1).max(now_micros)
+    }
+
     /// Signs this attempt's origin assertion if [`Handle::with_signing_key`] configured a
     /// signing key — `None` (the default) leaves `PeerMessageForwarder::auth` unset, exactly
     /// today's unauthenticated wire shape. A fresh signature (and sequence) every call, never
@@ -823,9 +842,7 @@ impl Handle {
         request: &TypedValue,
     ) -> Option<ntk_proto::v1::Auth> {
         let key = self.signing_key.as_deref()?;
-        let sequence = self
-            .next_sequence
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let sequence = self.allocate_sequence();
         let payload = crate::origin_auth::origin_signing_payload(client_tuple, p_id, request);
         Some(ntk_proto::auth::sign(
             key,
@@ -1118,5 +1135,38 @@ mod capacity_tests {
 
         cancel.cancel();
         manager_task.await.unwrap();
+    }
+
+    /// A freshly started process (counter at zero) must still sign above any sequence a previous
+    /// incarnation could have used, or servants' replay guards reject it until it catches up.
+    #[tokio::test]
+    async fn sequence_counter_is_seeded_from_the_wall_clock_and_stays_monotonic() {
+        let topology = Topology::new([4]).unwrap();
+        let my_pos = Naddr::new(topology.clone(), vec![0]).unwrap();
+        let env: Arc<dyn RoutingEnv> = Arc::new(NoopEnv);
+        let (_manager, handle) = Manager::new(
+            topology.clone(),
+            my_pos,
+            env,
+            Config::default(),
+            topology.levels(),
+        );
+
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+        let first = handle.allocate_sequence();
+        let second = handle.allocate_sequence();
+        let third = handle.allocate_sequence();
+
+        assert!(
+            first >= before,
+            "first sequence must start at the wall clock"
+        );
+        assert!(
+            first < second && second < third,
+            "sequences must strictly increase"
+        );
     }
 }
