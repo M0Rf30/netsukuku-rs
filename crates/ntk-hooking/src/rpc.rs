@@ -90,6 +90,10 @@ fn typed_ok(tv: TypedValue) -> Result<ResponsePayload, RemoteError> {
     })
 }
 
+/// Upper bound on one server-side `search_migration_path`, kept below the guest's 10 s RPC
+/// timeout so the host stops working for a guest that has already given up.
+const SEARCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// [`RpcHandler`] for the 10 `hooking_*` [`MethodCall`] arms, wired to a
 /// single identity's [`QspnView`]/[`CoordinatorClient`]/[`MessageRouting`].
 /// Any other `MethodCall` arm is a routing bug in whoever composed the
@@ -186,33 +190,50 @@ impl HookingRpcHandler {
             "hooking: search_migration_path minted reserve_request_id (this node is the search servant)"
         );
 
-        let mut solutions = find_shortest_mig(
-            self.view.as_ref(),
-            self.router.as_ref(),
-            reserve_request_id,
-            first_host_lvl,
-            ok_host_lvl,
-        )
-        .await;
-        if solutions.is_empty() {
-            return Err(HookingServerError::NoMigrationPathFound);
-        }
-        // The best (shallowest) solution is always last, see
-        // find_shortest_mig's docs.
-        let sol = solutions.pop().expect("just checked non-empty");
-        for rejected in &solutions {
-            if let Some(target) = rejected.cleanup_target(levels) {
-                self.router
-                    .send_delete_reserve_request(target, reserve_request_id);
+        // The guest's RPC client gives up after ~10 s, while a single dead BFS hop can stall
+        // for `routing_response_timeout` (100 s default). Bound the whole server-side search
+        // so the host never keeps working for a guest that has already departed; the guest
+        // treats this as the retryable `MigrationPathExecuteFailure`.
+        let search = async {
+            let mut solutions = find_shortest_mig(
+                self.view.as_ref(),
+                self.router.as_ref(),
+                reserve_request_id,
+                first_host_lvl,
+                ok_host_lvl,
+            )
+            .await;
+            if solutions.is_empty() {
+                return Err(HookingServerError::NoMigrationPathFound);
             }
-        }
+            // The best (shallowest) solution is always last, see
+            // find_shortest_mig's docs.
+            let sol = solutions.pop().expect("just checked non-empty");
+            for rejected in &solutions {
+                if let Some(target) = rejected.cleanup_target(levels) {
+                    self.router
+                        .send_delete_reserve_request(target, reserve_request_id);
+                }
+            }
 
-        if sol.distance() > 0 {
-            execute_shortest_mig(self.view.as_ref(), self.router.as_ref(), &sol)
-                .await
-                .map_err(|_| HookingServerError::MigrationPathExecuteFailure)?;
+            if sol.distance() > 0
+                && execute_shortest_mig(self.view.as_ref(), self.router.as_ref(), &sol)
+                    .await
+                    .is_err()
+            {
+                // The chosen reservation would otherwise sit until its TTL expires.
+                if let Some(target) = sol.cleanup_target(levels) {
+                    self.router
+                        .send_delete_reserve_request(target, reserve_request_id);
+                }
+                return Err(HookingServerError::MigrationPathExecuteFailure);
+            }
+            Ok(sol.resolve_entry_data(self.view.as_ref()))
+        };
+        match tokio::time::timeout(SEARCH_BUDGET, search).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(HookingServerError::MigrationPathExecuteFailure),
         }
-        Ok(sol.resolve_entry_data(self.view.as_ref()))
     }
 }
 

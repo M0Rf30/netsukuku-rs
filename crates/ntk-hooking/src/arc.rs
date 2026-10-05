@@ -52,6 +52,10 @@ pub struct ArcId(pub u64);
 /// eventual-abort semantics for a target that is genuinely unreachable.
 const EVALUATE_ENTER_UNREACHABLE_RETRIES: u32 = 5;
 
+/// Consecutive `search_migration_path` execution failures (or timeouts) tolerated before the
+/// arc handler gives up this round and restarts from the top after a full restart wait.
+const MAX_EXEC_FAILURES: u32 = 4;
+
 /// Bound on how many times [`ask_again_backoff`] doubles the wait before it stops growing
 /// (still clamped to `cap` regardless) — `2^4 = 16x` the base `ask_again_wait`, enough spread
 /// that a stuck contention is not spinning at a fixed interval while never approaching `cap`.
@@ -404,6 +408,7 @@ pub(crate) async fn run_arc_handler(ctx: ArcHandlerCtx, arc: ArcId, cancel: Canc
 
         // (6) begin/search loop (arc_handler.vala:250-334).
         let mut ask_lvl = ask_lvl;
+        let mut exec_failures: u32 = 0;
         let entry_data = 'begin: loop {
             ctx.handle
                 .set_arc_phase(arc, ArcPhase::Entering { ask_lvl });
@@ -423,10 +428,15 @@ pub(crate) async fn run_arc_handler(ctx: ArcHandlerCtx, arc: ArcId, cancel: Canc
                 }
             }
 
-            loop {
+            {
                 match stub.search_migration_path(ask_lvl).await {
                     Ok(entry) => break 'begin entry,
-                    Err(e) => match remote_domain(&e) {
+                    Err(e) => match if matches!(e, RpcError::Timeout) {
+                        // The host's bounded search or a slow hop: retryable, not a bad arc.
+                        Some(ErrorDomain::MigrationPathExecuteFailure)
+                    } else {
+                        remote_domain(&e)
+                    } {
                         Some(ErrorDomain::NoMigrationPathFound) => {
                             if let Err(err) = enter_guard.abort(ask_lvl).await {
                                 warn!(?arc, error = %err, "hooking arc: abort_enter proxy error, aborting");
@@ -450,7 +460,33 @@ pub(crate) async fn run_arc_handler(ctx: ArcHandlerCtx, arc: ArcId, cancel: Canc
                             ask_lvl -= 1;
                             continue 'begin;
                         }
-                        Some(ErrorDomain::MigrationPathExecuteFailure) => continue,
+                        Some(ErrorDomain::MigrationPathExecuteFailure) => {
+                            if let Err(err) = enter_guard.abort(ask_lvl).await {
+                                warn!(?arc, error = %err, "hooking arc: abort_enter proxy error, aborting");
+                                return;
+                            }
+                            exec_failures += 1;
+                            let wait = ctx.config.restart_wait(ctx.view.n_nodes());
+                            if exec_failures >= MAX_EXEC_FAILURES {
+                                warn!(
+                                    ?arc,
+                                    exec_failures,
+                                    "hooking arc: migration execution kept failing, restarting"
+                                );
+                                if sleep_or_cancelled(wait, &cancel).await {
+                                    return;
+                                }
+                                continue 'outer;
+                            }
+                            // Exponential backoff; the reservation was released above and a
+                            // fresh `begin_enter` re-reserves.
+                            if sleep_or_cancelled(wait / 8 * (1 << exec_failures.min(3)), &cancel)
+                                .await
+                            {
+                                return;
+                            }
+                            continue 'begin;
+                        }
                         _ => {
                             warn!(?arc, error = %e, "hooking arc: bad arc on search_migration_path");
                             ctx.handle.emit(HookingEvent::FailingArc(arc));
@@ -1132,6 +1168,100 @@ mod tests {
         assert!(
             !calls.iter().any(|c| c.starts_with("abort_enter")),
             "the ask_lvl >= 1 gate must not engage at ask_lvl == 0: {calls:?}"
+        );
+    }
+
+    /// A host whose bounded search times out (or whose migration execution fails) must make
+    /// the guest release its reservation (`abort_enter`) and retry after a backoff, then
+    /// converge -- not spin immediately with a fresh reservation each time, and not give up
+    /// permanently as a "bad arc".
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_search_releases_the_reservation_and_retries_with_backoff() {
+        let topo = Topology::new([4]).expect("valid topology");
+        let mut inner = FakeQspnView::new(topo, vec![0]);
+        inner.network_id = 100;
+        inner.subnetlevel = 0;
+        let view: Arc<dyn QspnView> = Arc::new(inner);
+
+        let coord = Arc::new(crate::fake::FakeCoordinatorClient::new(1));
+        let coord_dyn: Arc<dyn CoordinatorClient> = coord.clone();
+
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_in_stub = Arc::clone(&attempts);
+        let stubs = Arc::new(FakeHookingStubFactory::new());
+        let arc_id = ArcId(1);
+        stubs.register_arc(
+            arc_id,
+            Arc::new(ScriptedHookingStub::new(
+                |_ask_coord| {
+                    Ok(NetworkData {
+                        network_id: 200,
+                        neighbor_n_nodes: 100,
+                        neighbor_min_level: 0,
+                        gsizes: vec![4],
+                        neighbor_pos: vec![0],
+                    })
+                },
+                move |_lvl| {
+                    let n = attempts_in_stub.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if n < 2 {
+                        Err(RpcError::Timeout)
+                    } else {
+                        Ok(EntryData {
+                            network_id: 200,
+                            pos: vec![0],
+                            elderships: vec![0],
+                        })
+                    }
+                },
+            )),
+        );
+        let stubs: Arc<dyn HookingStubFactory> = stubs;
+        let cancel = CancellationToken::new();
+        let config = HookingConfig {
+            not_bootstrapped_retry: Duration::from_millis(5),
+            merge_reject_wait: Duration::from_millis(5),
+            global_timeout: Arc::new(|_| Duration::from_millis(80)),
+            ask_again_divisor: 1,
+            restart_multiplier: 1,
+            routing_response_timeout: Duration::from_millis(200),
+        };
+
+        let (handle, _actor) = spawn(
+            HookingOrigin::Joining,
+            view,
+            coord_dyn,
+            stubs,
+            config,
+            cancel.clone(),
+        );
+        handle.add_arc(arc_id).await.expect("add_arc succeeds");
+
+        let mut settled = false;
+        for _ in 0..200 {
+            if matches!(
+                handle.snapshot().arcs.get(&arc_id),
+                Some(ArcPhase::Entered { ask_lvl: 0 })
+            ) {
+                settled = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            settled,
+            "arc did not converge after transient timeouts: {:?}",
+            handle.snapshot().arcs.get(&arc_id)
+        );
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+        let aborts = coord
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("abort_enter"))
+            .count();
+        assert_eq!(
+            aborts, 2,
+            "each failed attempt must release its reservation"
         );
     }
 
