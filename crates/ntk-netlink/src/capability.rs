@@ -16,6 +16,7 @@
 use std::fmt;
 use std::net::Ipv4Addr;
 
+use crate::error::NetlinkError;
 use crate::traits::{RouteTable, RuleTable, TopologyQuery};
 use crate::types::{Interface, Ipv4Net, Nexthop, RouteKey, RouteSpec, RouteTarget};
 
@@ -79,17 +80,33 @@ impl std::error::Error for UnsupportedKernel {}
 
 /// Probes `kernel` for [`KernelCapabilities`]. Never fails: every probe
 /// failure (missing feature, permission error, disconnected socket) is
-/// reported as that capability being absent rather than propagated, since
-/// this function's whole purpose is to turn "can this even work" into a
-/// plain status report a caller inspects with [`KernelCapabilities::ensure_supported`].
+/// reported as that capability being absent rather than propagated. Callers that must tell
+/// "feature missing" from "not privileged" use [`probe`] instead.
 pub async fn detect<T>(kernel: &T) -> KernelCapabilities
 where
     T: RuleTable + RouteTable + TopologyQuery,
 {
     KernelCapabilities {
         multiple_routing_tables: kernel.list_rules().await.is_ok(),
-        multipath_routes: probe_multipath(kernel).await,
+        multipath_routes: probe_multipath(kernel).await.unwrap_or(false),
     }
+}
+
+/// Like [`detect`], but a kernel refusal for lack of privilege (`EPERM`/`EACCES` — no
+/// `CAP_NET_ADMIN`) is returned as [`NetlinkError::PermissionDenied`] instead of being reported
+/// as a missing kernel feature, so the operator is told to grant the capability rather than to
+/// rebuild the kernel. A stale probe route left by a crashed run is cleared and retried.
+///
+/// # Errors
+/// [`NetlinkError::PermissionDenied`] if the multipath probe route was refused for privilege.
+pub async fn probe<T>(kernel: &T) -> Result<KernelCapabilities, NetlinkError>
+where
+    T: RuleTable + RouteTable + TopologyQuery,
+{
+    Ok(KernelCapabilities {
+        multiple_routing_tables: kernel.list_rules().await.is_ok(),
+        multipath_routes: probe_multipath(kernel).await?,
+    })
 }
 
 /// Installs a throwaway ECMP route entirely within `127.0.0.0/8` via `lo`
@@ -98,12 +115,12 @@ where
 /// `CAP_NET_ADMIN` against a real kernel, like every other mutating call in
 /// this crate — [`crate::FakeNetlink`] always succeeds, exercising this
 /// function's control flow without privilege.
-async fn probe_multipath<T: RouteTable + TopologyQuery>(kernel: &T) -> bool {
+async fn probe_multipath<T: RouteTable + TopologyQuery>(kernel: &T) -> Result<bool, NetlinkError> {
     let Ok(links) = kernel.list_links().await else {
-        return false;
+        return Ok(false);
     };
     let Some(loopback) = links.iter().find(|link| link.name == "lo") else {
-        return false;
+        return Ok(false);
     };
     let destination =
         Ipv4Net::new(Ipv4Addr::new(127, 255, 255, 0), 24).expect("valid literal prefix length");
@@ -123,16 +140,33 @@ async fn probe_multipath<T: RouteTable + TopologyQuery>(kernel: &T) -> bool {
             },
         ]),
     };
-    let installed = kernel.add_route(&probe).await.is_ok();
-    if installed {
+    let mut attempt = kernel.add_route(&probe).await;
+    if matches!(&attempt, Err(error) if error.is_already_exists()) {
+        // A previous run crashed between add and remove: clear the stale probe route and retry.
         let _ = kernel
             .remove_route(RouteKey {
                 destination,
                 table: CAPABILITY_PROBE_TABLE,
             })
             .await;
+        attempt = kernel.add_route(&probe).await;
     }
-    installed
+    match attempt {
+        Ok(()) => {
+            if let Err(error) = kernel
+                .remove_route(RouteKey {
+                    destination,
+                    table: CAPABILITY_PROBE_TABLE,
+                })
+                .await
+            {
+                tracing::warn!(%error, "capability probe route could not be removed");
+            }
+            Ok(true)
+        }
+        Err(error) if error.is_permission_denied() => Err(error),
+        Err(_) => Ok(false),
+    }
 }
 
 #[cfg(test)]
@@ -174,5 +208,48 @@ mod tests {
         let err = caps.ensure_supported().unwrap_err();
         assert!(err.missing_multipath_routes);
         assert!(err.to_string().contains("CONFIG_IP_ROUTE_MULTIPATH"));
+    }
+
+    fn lo_fake() -> FakeNetlink {
+        FakeNetlink::with_links(vec![LinkInfo {
+            index: 1,
+            name: "lo".into(),
+            is_up: true,
+        }])
+    }
+
+    fn probe_destination() -> Ipv4Net {
+        Ipv4Net::new(Ipv4Addr::new(127, 255, 255, 0), 24).unwrap()
+    }
+
+    #[tokio::test]
+    async fn permission_denied_is_not_reported_as_missing_multipath() {
+        let fake = lo_fake();
+        fake.arm_route_failure(
+            probe_destination(),
+            NetlinkError::PermissionDenied("Operation not permitted".into()),
+        );
+        let error = probe(&fake).await.unwrap_err();
+        assert!(error.is_permission_denied());
+    }
+
+    #[tokio::test]
+    async fn stale_probe_route_from_a_crashed_run_is_cleared() {
+        let fake = lo_fake();
+        fake.add_route(&RouteSpec {
+            destination: probe_destination(),
+            table: CAPABILITY_PROBE_TABLE,
+            target: RouteTarget::Unreachable,
+        })
+        .await
+        .unwrap();
+        let caps = probe(&fake).await.unwrap();
+        assert!(caps.multipath_routes);
+        assert!(
+            fake.list_routes(Some(CAPABILITY_PROBE_TABLE))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

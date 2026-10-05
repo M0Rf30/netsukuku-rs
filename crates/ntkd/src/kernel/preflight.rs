@@ -9,8 +9,7 @@
 //! error message up front, before any identity or protocol actor is spawned.
 
 use ntk_netlink::{
-    KernelCapabilities, Netlink, NetlinkError, TopologyQuery, UnsupportedKernel,
-    detect_capabilities,
+    KernelCapabilities, Netlink, NetlinkError, TopologyQuery, UnsupportedKernel, probe_capabilities,
 };
 
 /// Probes `kernel` for the routing features Netsukuku's L3 model requires, returning the full
@@ -19,7 +18,10 @@ use ntk_netlink::{
 /// # Errors
 /// [`PreflightError`] naming exactly which feature(s) are missing and how to enable them.
 pub async fn check<K: Netlink>(kernel: &K) -> Result<KernelCapabilities, PreflightError> {
-    let capabilities = detect_capabilities(kernel).await;
+    let capabilities = match probe_capabilities(kernel).await {
+        Ok(capabilities) => capabilities,
+        Err(error) => return Err(PreflightError::PermissionDenied(error.to_string())),
+    };
     capabilities.ensure_supported()?;
     Ok(capabilities)
 }
@@ -168,13 +170,28 @@ impl std::error::Error for MissingNics {
     }
 }
 
-/// The running kernel is missing a routing feature Netsukuku requires to start.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PreflightError(UnsupportedKernel);
+/// The running kernel cannot support Netsukuku, or this process lacks the privilege to find out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreflightError {
+    /// A routing feature is missing from the running kernel.
+    Unsupported(UnsupportedKernel),
+    /// The kernel refused the capability probe for lack of privilege (`EPERM`): the kernel may
+    /// well be fine, this process just needs `CAP_NET_ADMIN`.
+    PermissionDenied(String),
+}
 
 impl std::fmt::Display for PreflightError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}; enable {}", self.0, Self::remedy(&self.0))
+        match self {
+            Self::Unsupported(unsupported) => {
+                write!(f, "{unsupported}; enable {}", Self::remedy(unsupported))
+            }
+            Self::PermissionDenied(detail) => write!(
+                f,
+                "not permitted to program kernel routing ({detail}); run ntkd as root or grant \
+                 it CAP_NET_ADMIN (and CAP_NET_BIND_SERVICE for privileged ports)"
+            ),
+        }
     }
 }
 
@@ -182,7 +199,7 @@ impl std::error::Error for PreflightError {}
 
 impl From<UnsupportedKernel> for PreflightError {
     fn from(unsupported: UnsupportedKernel) -> Self {
-        Self(unsupported)
+        Self::Unsupported(unsupported)
     }
 }
 
@@ -231,6 +248,25 @@ mod tests {
             .await
             .expect_err("no lo means no multipath probe");
         assert!(err.to_string().contains("IP_ROUTE_MULTIPATH"));
+    }
+
+    #[tokio::test]
+    async fn permission_denied_probe_asks_for_cap_net_admin_not_a_kernel_rebuild() {
+        let kernel = FakeNetlink::with_links(vec![LinkInfo {
+            index: 1,
+            name: "lo".into(),
+            is_up: true,
+        }]);
+        kernel.arm_route_failure(
+            ntk_netlink::Ipv4Net::new(std::net::Ipv4Addr::new(127, 255, 255, 0), 24)
+                .expect("valid network"),
+            NetlinkError::PermissionDenied("Operation not permitted".into()),
+        );
+        let err = check(&kernel).await.expect_err("probe was refused");
+        assert!(matches!(err, PreflightError::PermissionDenied(_)));
+        let message = err.to_string();
+        assert!(message.contains("CAP_NET_ADMIN"));
+        assert!(!message.contains("rebuild"));
     }
 
     #[test]

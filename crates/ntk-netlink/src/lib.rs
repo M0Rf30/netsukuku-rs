@@ -46,7 +46,10 @@ mod table;
 mod traits;
 mod types;
 
-pub use capability::{KernelCapabilities, UnsupportedKernel, detect as detect_capabilities};
+pub use capability::{
+    KernelCapabilities, UnsupportedKernel, detect as detect_capabilities,
+    probe as probe_capabilities,
+};
 pub use cleanup::{CleanupReport, cleanup};
 pub use error::NetlinkError;
 pub use fake::FakeNetlink;
