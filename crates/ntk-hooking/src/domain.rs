@@ -28,7 +28,7 @@ impl TupleGNode {
     /// The hierarchy level this tuple starts at, given the topology's total
     /// `levels` — `level(TupleGNode)` (`structs.vala:120-124`).
     pub fn level(&self, levels: usize) -> usize {
-        levels - self.pos.len()
+        levels.saturating_sub(self.pos.len())
     }
 
     /// Whether `self` fully contains `outside` as a descendant g-node —
@@ -59,21 +59,21 @@ impl TupleGNode {
     /// upstream's own reference deployments never exercise. This port
     /// allows `target_level == levels` rather than inheriting an assertion
     /// that would gratuitously panic on a legal (if unusual) topology.
-    pub fn truncate_to_level(&self, target_level: usize, levels: usize) -> TupleGNode {
-        assert!(
-            levels >= target_level,
-            "target_level must not exceed levels"
-        );
+    ///
+    /// Returns `None` when the request is not satisfiable (target level
+    /// above `levels`, tuple shallower than the target, or mismatched
+    /// `pos`/`eldership` lengths): tuples and levels come from peers, so
+    /// this must not panic.
+    pub fn truncate_to_level(&self, target_level: usize, levels: usize) -> Option<TupleGNode> {
+        if levels < target_level || self.eldership.len() != self.pos.len() {
+            return None;
+        }
         let posnum = levels - target_level;
-        assert!(
-            self.pos.len() >= posnum,
-            "cannot truncate to a shallower level"
-        );
-        let todel = self.pos.len() - posnum;
-        TupleGNode {
+        let todel = self.pos.len().checked_sub(posnum)?;
+        Some(TupleGNode {
             pos: self.pos[todel..].to_vec(),
             eldership: self.eldership[todel..].to_vec(),
-        }
+        })
     }
 }
 
@@ -135,7 +135,10 @@ pub fn i_am_inside(tuple: &TupleGNode, view: &dyn QspnView) -> bool {
 /// connectivity (not-yet-fully-integrated) g-node.
 pub fn tuple_has_virtual_pos(tuple: &TupleGNode, view: &dyn QspnView) -> bool {
     let levels = view.topology().levels();
-    let d = levels - tuple.pos.len();
+    let Some(d) = levels.checked_sub(tuple.pos.len()) else {
+        // Longer than the hierarchy: malformed, never a usable real tuple.
+        return true;
+    };
     (d..levels).any(|i| {
         let gsize = view.topology().gsize(i).unwrap_or(0);
         tuple.pos[i - d] >= gsize
@@ -145,26 +148,25 @@ pub fn tuple_has_virtual_pos(tuple: &TupleGNode, view: &dyn QspnView) -> bool {
 /// `tuple_to_hc` (`structs.vala:148-164`): the coordinate of the highest
 /// level at which `a` diverges from my own current position.
 ///
-/// # Panics
-/// If `a` never diverges from my own position (a malformed/self-referential
-/// tuple) — matches upstream's own `assert(i >= 0)`/`assert(j >= 0)`.
-pub fn tuple_to_hc(a: &TupleGNode, view: &dyn QspnView) -> HCoord {
+/// Returns `None` for a malformed tuple (empty, longer than the hierarchy,
+/// or never diverging from my own position) instead of upstream's
+/// `assert(i >= 0)`: tuples arrive from untrusted peers.
+pub fn tuple_to_hc(a: &TupleGNode, view: &dyn QspnView) -> Option<HCoord> {
     let levels = view.topology().levels();
+    if a.pos.is_empty() || a.pos.len() > levels {
+        return None;
+    }
     let mut i = levels;
     let mut j = a.pos.len();
-    loop {
+    while i > 0 && j > 0 {
         i -= 1;
         j -= 1;
-        let my_pos = view.my_pos(i);
         let a_pos = a.pos[j];
-        if my_pos != a_pos {
-            return HCoord::new(i, a_pos);
+        if view.my_pos(i) != a_pos {
+            return Some(HCoord::new(i, a_pos));
         }
-        assert!(
-            i > 0 && j > 0,
-            "tuple_to_hc: tuple never diverges from my own position"
-        );
     }
+    None
 }
 
 /// One step of a `SearchMigrationPathRequest`/`ExploreGNodeRequest` routing
@@ -387,8 +389,40 @@ mod tests {
     fn truncate_to_level_drops_inner_levels() {
         let v = view();
         let t = make_tuple_from_level(0, &v);
-        let truncated = t.truncate_to_level(1, 3);
+        let truncated = t.truncate_to_level(1, 3).unwrap();
         assert_eq!(truncated.pos, vec![2, 3]);
+    }
+
+    #[test]
+    fn truncate_to_level_rejects_peer_levels_instead_of_panicking() {
+        let v = view();
+        let t = make_tuple_from_level(1, &v);
+        assert!(t.truncate_to_level(4, 3).is_none());
+        assert!(t.truncate_to_level(0, 3).is_none());
+        let skewed = TupleGNode::new(vec![1, 2], vec![0]);
+        assert!(skewed.truncate_to_level(1, 3).is_none());
+    }
+
+    #[test]
+    fn tuple_to_hc_rejects_malformed_peer_tuples() {
+        let v = view();
+        assert!(tuple_to_hc(&TupleGNode::default(), &v).is_none());
+        // Longer than the hierarchy, tail equal to my own positions.
+        let long = TupleGNode::new(vec![7, 7, 1, 2, 3], vec![0; 5]);
+        assert!(tuple_to_hc(&long, &v).is_none());
+        // Never diverges from my own position.
+        let me = make_tuple_from_level(0, &v);
+        assert!(tuple_to_hc(&me, &v).is_none());
+        let other = TupleGNode::new(vec![1, 2, 0], vec![0; 3]);
+        assert_eq!(tuple_to_hc(&other, &v), Some(HCoord::new(2, 0)));
+    }
+
+    #[test]
+    fn overlong_tuple_is_virtual_and_level_does_not_underflow() {
+        let v = view();
+        let long = TupleGNode::new(vec![1; 5], vec![0; 5]);
+        assert!(tuple_has_virtual_pos(&long, &v));
+        assert_eq!(long.level(3), 0);
     }
 
     #[test]

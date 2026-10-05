@@ -40,7 +40,7 @@ use crate::search::{
     RoutingError, SearchRouter, SearchStepResult, execute_delete_reserve, execute_mig,
     execute_search,
 };
-use crate::stub::HookingStubFactory;
+use crate::stub::{HookingStub, HookingStubFactory};
 use crate::view::QspnView;
 
 type SearchReply = oneshot::Sender<Result<SearchMigrationPathResponse, ()>>;
@@ -85,6 +85,13 @@ impl MessageRouting {
         }
     }
 
+    /// Gateway stub toward `tuple`'s g-node; `None` for a malformed tuple
+    /// (peer-supplied) or an unreachable gateway.
+    fn gateway_for(&self, tuple: &crate::domain::TupleGNode) -> Option<Arc<dyn HookingStub>> {
+        self.stubs
+            .gateway_stub(tuple_to_hc(tuple, self.view.as_ref())?)
+    }
+
     fn my_tuple(&self) -> crate::domain::TupleGNode {
         make_tuple_from_level(0, self.view.as_ref())
     }
@@ -112,10 +119,7 @@ impl MessageRouting {
             }
             return;
         }
-        if let Some(stub) = self
-            .stubs
-            .gateway_stub(tuple_to_hc(&target, self.view.as_ref()))
-        {
+        if let Some(stub) = self.gateway_for(&target) {
             let _ = stub.route_search_request(req).await;
         }
     }
@@ -148,10 +152,7 @@ impl MessageRouting {
             }
             return;
         }
-        if let Some(stub) = self
-            .stubs
-            .gateway_stub(tuple_to_hc(&pkt.origin, self.view.as_ref()))
-        {
+        if let Some(stub) = self.gateway_for(&pkt.origin) {
             let _ = stub.route_search_error(pkt).await;
         }
     }
@@ -164,10 +165,7 @@ impl MessageRouting {
             }
             return;
         }
-        if let Some(stub) = self
-            .stubs
-            .gateway_stub(tuple_to_hc(&resp.origin, self.view.as_ref()))
-        {
+        if let Some(stub) = self.gateway_for(&resp.origin) {
             let _ = stub.route_search_response(resp).await;
         }
     }
@@ -190,10 +188,7 @@ impl MessageRouting {
             self.route_explore_response(resp).await;
             return;
         }
-        if let Some(stub) = self
-            .stubs
-            .gateway_stub(tuple_to_hc(&target, self.view.as_ref()))
-        {
+        if let Some(stub) = self.gateway_for(&target) {
             let _ = stub.route_explore_request(req).await;
         }
     }
@@ -206,10 +201,7 @@ impl MessageRouting {
             }
             return;
         }
-        if let Some(stub) = self
-            .stubs
-            .gateway_stub(tuple_to_hc(&resp.origin, self.view.as_ref()))
-        {
+        if let Some(stub) = self.gateway_for(&resp.origin) {
             let _ = stub.route_explore_response(resp).await;
         }
     }
@@ -228,10 +220,7 @@ impl MessageRouting {
             .await;
             return;
         }
-        if let Some(stub) = self
-            .stubs
-            .gateway_stub(tuple_to_hc(&req.dest_gnode, self.view.as_ref()))
-        {
+        if let Some(stub) = self.gateway_for(&req.dest_gnode) {
             let _ = stub.route_delete_reserve_request(req).await;
         }
     }
@@ -247,10 +236,7 @@ impl MessageRouting {
             self.route_mig_response(resp).await;
             return;
         }
-        if let Some(stub) = self
-            .stubs
-            .gateway_stub(tuple_to_hc(&req.dest, self.view.as_ref()))
-        {
+        if let Some(stub) = self.gateway_for(&req.dest) {
             let _ = stub.route_mig_request(req).await;
         }
     }
@@ -263,10 +249,7 @@ impl MessageRouting {
             }
             return;
         }
-        if let Some(stub) = self
-            .stubs
-            .gateway_stub(tuple_to_hc(&resp.dest, self.view.as_ref()))
-        {
+        if let Some(stub) = self.gateway_for(&resp.dest) {
             let _ = stub.route_mig_response(resp).await;
         }
     }
@@ -296,10 +279,7 @@ impl SearchRouter for MessageRouting {
             let pkt_id = crate::idgen::next_i32();
             let (tx, rx) = oneshot::channel();
             self.pending_search.lock().await.insert(pkt_id, tx);
-            let Some(stub) = self
-                .stubs
-                .gateway_stub(tuple_to_hc(&target, self.view.as_ref()))
-            else {
+            let Some(stub) = self.gateway_for(&target) else {
                 self.pending_search.lock().await.remove(&pkt_id);
                 return Err(RoutingError);
             };
@@ -350,10 +330,7 @@ impl SearchRouter for MessageRouting {
             let pkt_id = crate::idgen::next_i32();
             let (tx, rx) = oneshot::channel();
             self.pending_explore.lock().await.insert(pkt_id, tx);
-            let Some(stub) = self
-                .stubs
-                .gateway_stub(tuple_to_hc(&target, self.view.as_ref()))
-            else {
+            let Some(stub) = self.gateway_for(&target) else {
                 self.pending_explore.lock().await.remove(&pkt_id);
                 return Err(RoutingError);
             };
@@ -398,10 +375,7 @@ impl SearchRouter for MessageRouting {
             });
             return;
         }
-        if let Some(stub) = self
-            .stubs
-            .gateway_stub(tuple_to_hc(&dest_gnode, self.view.as_ref()))
-        {
+        if let Some(stub) = self.gateway_for(&dest_gnode) {
             let req = DeleteReservationRequest {
                 dest_gnode,
                 reserve_request_id,
@@ -427,10 +401,7 @@ impl SearchRouter for MessageRouting {
             packet.src = self.my_tuple();
             let (tx, rx) = oneshot::channel();
             self.pending_mig.lock().await.insert(pkt_id, tx);
-            let Some(stub) = self
-                .stubs
-                .gateway_stub(tuple_to_hc(&packet.dest, self.view.as_ref()))
-            else {
+            let Some(stub) = self.gateway_for(&packet.dest) else {
                 self.pending_mig.lock().await.remove(&pkt_id);
                 return Err(RoutingError);
             };

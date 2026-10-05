@@ -68,9 +68,14 @@ impl From<&TupleGNode> for v1::TupleGNode {
 
 impl From<&v1::TupleGNode> for TupleGNode {
     fn from(t: &v1::TupleGNode) -> Self {
+        // Peer data: force `eldership` to the same length as `pos` (padding
+        // with the "not yet known" `-1`) so later slicing cannot go out of
+        // bounds.
+        let mut eldership = t.eldership.clone();
+        eldership.resize(t.pos.len(), -1);
         TupleGNode {
             pos: t.pos.clone(),
-            eldership: t.eldership.clone(),
+            eldership,
         }
     }
 }

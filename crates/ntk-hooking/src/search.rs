@@ -110,7 +110,9 @@ pub async fn execute_search(
     }
 
     let levels = view.topology().levels();
-    let gsize = |lvl: usize| view.topology().gsize(lvl - 1).unwrap_or(0);
+    // `max_host_lvl` may come from a peer: never climb past the hierarchy.
+    let max_host_lvl = max_host_lvl.min(levels);
+    let gsize = |lvl: usize| view.topology().gsize(lvl.saturating_sub(1)).unwrap_or(0);
 
     let mut min_host_lvl = visiting_gnode.level(levels);
     let (pos, eldership) = loop {
@@ -144,18 +146,13 @@ pub async fn execute_search(
     let mut real_new_pos = None;
     let mut real_new_eldership = None;
     while final_host_lvl <= max_host_lvl {
-        // `assert_not_reached()` on a `CoordReserveError` here
-        // (`hooking.vala:202-206`): upstream assumes any host level above
-        // one that already answered once will always answer again. This
-        // crate keeps that assumption explicit via `expect` rather than
-        // silently swallowing a state upstream declares impossible.
+        // Upstream `assert_not_reached()`s on a `CoordReserveError` here
+        // (`hooking.vala:202-206`); a transient coordinator failure must not
+        // abort the daemon, so treat it as "no answer".
         let r = coord
             .reserve(final_host_lvl, reserve_request_id)
             .await
-            .expect(
-                "a host level above an already-successful reservation must not fail to reserve \
-                 (hooking.vala:202-206 asserts this unreachable)",
-            );
+            .ok()?;
         if r.pos < gsize(final_host_lvl) {
             real_new_pos = Some(r.pos);
             real_new_eldership = Some(r.eldership);
@@ -223,9 +220,17 @@ pub async fn execute_mig(
     match packet.operation {
         MigOp::PrepareMigration => coord.prepare_migration(lvl, packet.migration_id).await,
         MigOp::FinishMigration => {
+            // Peer-supplied positions: reject negatives instead of coercing
+            // them to a valid-looking position 0.
+            let (Ok(real_new_pos), Ok(conn_gnode_pos)) = (
+                u32::try_from(packet.real_new_pos),
+                u32::try_from(packet.conn_gnode_pos),
+            ) else {
+                return;
+            };
             let mut pos = packet.host_gnode.pos.clone();
             let mut elderships = packet.host_gnode.eldership.clone();
-            pos.insert(0, u32::try_from(packet.real_new_pos).unwrap_or(0));
+            pos.insert(0, real_new_pos);
             elderships.insert(0, packet.real_new_eldership);
             let migration_data = crate::domain::EntryData {
                 network_id: 0,
@@ -235,7 +240,7 @@ pub async fn execute_mig(
             let data = crate::domain::FinishMigrationData {
                 migration_id: packet.migration_id,
                 migration_data,
-                go_connectivity_position: u32::try_from(packet.conn_gnode_pos).unwrap_or(0),
+                go_connectivity_position: conn_gnode_pos,
             };
             coord.finish_migration(lvl, data).await;
         }
@@ -282,7 +287,7 @@ impl MigrationSolution {
     /// The dest g-node a rejected (non-chosen) solution's reservation
     /// should be released against — `hooking.vala:536-539`.
     #[must_use]
-    pub fn cleanup_target(&self, levels: usize) -> TupleGNode {
+    pub fn cleanup_target(&self, levels: usize) -> Option<TupleGNode> {
         self.leaf
             .visiting_gnode
             .truncate_to_level(self.final_host_lvl, levels)
@@ -439,14 +444,22 @@ pub async fn find_shortest_mig(
                 continue;
             }
         };
-        if step.min_host_lvl > levels || step.min_host_lvl > max_host_lvl {
+        if step.min_host_lvl > levels
+            || step.min_host_lvl > max_host_lvl
+            || step.final_host_lvl > levels
+            || step.final_host_lvl < step.min_host_lvl
+        {
             continue;
         }
+        let Some(truncated) = current
+            .visiting_gnode
+            .truncate_to_level(step.min_host_lvl, levels)
+        else {
+            continue;
+        };
 
         current = Arc::new(SolutionStep {
-            visiting_gnode: current
-                .visiting_gnode
-                .truncate_to_level(step.min_host_lvl, levels),
+            visiting_gnode: truncated,
             previous_migrating_gnode: current.previous_migrating_gnode.clone(),
             previous_gnode_new_conn_vir_pos: current.previous_gnode_new_conn_vir_pos,
             previous_gnode_new_eldership: current.previous_gnode_new_eldership,
@@ -518,7 +531,7 @@ pub async fn find_shortest_mig(
                 let bigger = step_ref
                     .visiting_gnode
                     .truncate_to_level(step.min_host_lvl, levels);
-                if positions_equal(&bigger, &n) {
+                if bigger.is_some_and(|b| positions_equal(&b, &n)) {
                     in_prev_step = true;
                     break;
                 }
@@ -981,5 +994,60 @@ mod tests {
             let unique: std::collections::HashSet<u32> = positions.iter().copied().collect();
             proptest::prop_assert_eq!(unique.len(), positions.len());
         }
+    }
+
+    fn two_level_view() -> FixedView {
+        FixedView {
+            topology: ntk_common::Topology::new([8, 8]).unwrap(),
+            my_pos: vec![0, 0],
+            subnetlevel: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_search_clamps_a_peer_sent_max_host_level() {
+        let view = two_level_view();
+        let coord = crate::fake::FakeCoordinatorClient::new(1);
+        coord.fail_reserve_at(2);
+        let root = TupleGNode::new(Vec::new(), Vec::new());
+        let out = execute_search(&view, &coord, &root, usize::MAX, 1).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn execute_search_survives_a_failing_upper_host_level() {
+        let view = two_level_view();
+        let coord = crate::fake::FakeCoordinatorClient::new(1);
+        coord.set_next_pos(1, 8);
+        coord.fail_reserve_at(2);
+        let gnode = TupleGNode::new(vec![0], vec![0]);
+        let out = execute_search(&view, &coord, &gnode, 2, 1).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn execute_mig_ignores_negative_peer_positions() {
+        let view = two_level_view();
+        let coord = crate::fake::FakeCoordinatorClient::new(1);
+        for (real_new_pos, conn_gnode_pos) in [(-1, 0), (0, -1)] {
+            let packet = RequestPacket {
+                pkt_id: 1,
+                dest: TupleGNode::new(vec![0], vec![0]),
+                src: TupleGNode::default(),
+                operation: MigOp::FinishMigration,
+                migration_id: 7,
+                conn_gnode_pos,
+                host_gnode: TupleGNode::new(vec![0], vec![0]),
+                real_new_pos,
+                real_new_eldership: 0,
+            };
+            execute_mig(&coord, &view, &packet).await;
+        }
+        assert!(
+            coord
+                .calls()
+                .iter()
+                .all(|c| !c.starts_with("finish_migration"))
+        );
     }
 }

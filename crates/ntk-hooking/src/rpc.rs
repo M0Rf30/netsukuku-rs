@@ -201,8 +201,10 @@ impl HookingRpcHandler {
         // find_shortest_mig's docs.
         let sol = solutions.pop().expect("just checked non-empty");
         for rejected in &solutions {
-            self.router
-                .send_delete_reserve_request(rejected.cleanup_target(levels), reserve_request_id);
+            if let Some(target) = rejected.cleanup_target(levels) {
+                self.router
+                    .send_delete_reserve_request(target, reserve_request_id);
+            }
         }
 
         if sol.distance() > 0 {
