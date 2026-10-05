@@ -209,8 +209,13 @@ impl<K: Netlink> RouteInstaller<K> {
     /// a snapshot is always visible to the `self.applied`-vs-`next` diff and gets its
     /// `remove_route` issued, instead of being invisible to both sides and orphaned forever.
     ///
+    /// A failing add/change/remove for one destination does not abort the batch: every other
+    /// destination is still processed and the stale-removal pass always runs. The failed
+    /// destination stays as it was in `self.applied` (retried on the next call) and the first
+    /// failure is returned once the whole batch has been attempted.
+    ///
     /// # Errors
-    /// [`RouteError::Netlink`] if a kernel mutation fails.
+    /// [`RouteError::Netlink`] if any kernel mutation fails (after all others were attempted).
     pub async fn apply(&mut self, snapshot: &RouteSnapshot) -> Result<AppliedDelta, RouteError> {
         if self.my_naddr.is_virtual() {
             return Ok(AppliedDelta::default());
@@ -243,6 +248,7 @@ impl<K: Netlink> RouteInstaller<K> {
         }
 
         let mut delta = AppliedDelta::default();
+        let mut first_error: Option<ntk_netlink::NetlinkError> = None;
         for (destination, spec) in &next {
             let is_new = self
                 .applied
@@ -251,14 +257,25 @@ impl<K: Netlink> RouteInstaller<K> {
             if !is_new {
                 continue;
             }
-            if self.applied.contains_key(destination) {
-                self.kernel.change_route(spec).await?;
-                delta.changed += 1;
+            let result = if self.applied.contains_key(destination) {
+                self.kernel.change_route(spec).await
             } else {
-                self.kernel.add_route(spec).await?;
-                delta.added += 1;
+                self.kernel.add_route(spec).await
+            };
+            match result {
+                Ok(()) => {
+                    if self.applied.contains_key(destination) {
+                        delta.changed += 1;
+                    } else {
+                        delta.added += 1;
+                    }
+                    self.applied.insert(*destination, spec.clone());
+                }
+                Err(error) => {
+                    tracing::warn!(%error, ?destination, "route install failed; will retry");
+                    first_error.get_or_insert(error);
+                }
             }
-            self.applied.insert(*destination, spec.clone());
         }
 
         let stale: Vec<HCoord> = self
@@ -285,13 +302,20 @@ impl<K: Netlink> RouteInstaller<K> {
                 // The kernel already dropped it (link down, prefsrc address removed): the
                 // desired state is reached, so forget the entry instead of wedging on it.
                 Err(error) if error.is_not_found() => {}
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    tracing::warn!(%error, ?destination, "stale route removal failed; will retry");
+                    first_error.get_or_insert(error);
+                    continue;
+                }
             }
             self.applied.remove(&destination);
             delta.removed += 1;
         }
 
-        Ok(delta)
+        match first_error {
+            Some(error) => Err(error.into()),
+            None => Ok(delta),
+        }
     }
 
     /// Removes everything this installer added: every currently-applied route, then the
@@ -1110,5 +1134,30 @@ mod resilience_tests {
         assert!(installer.is_installed(), "the failed route stays tracked");
         installer.teardown().await.unwrap();
         assert!(!installer.is_installed());
+    }
+
+    #[tokio::test]
+    async fn one_failing_destination_does_not_starve_the_rest_of_the_batch() {
+        let mut installer = installer();
+        installer.install_identity().await.unwrap();
+        let (a, b, c) = (HCoord::new(0, 1), HCoord::new(0, 2), HCoord::new(0, 3));
+        installer.apply(&snapshot(&[(c, 3)])).await.unwrap();
+        let broken = addressing::gnode_destination(&installer.my_naddr, a).unwrap();
+        installer.kernel_ref().arm_route_failure(
+            broken,
+            ntk_netlink::NetlinkError::PermissionDenied("denied".into()),
+        );
+        // `a` fails first in BTreeMap order; `b` must still install and `c` still be withdrawn.
+        let result = installer.apply(&snapshot(&[(a, 1), (b, 2)])).await;
+        assert!(result.is_err(), "the batch error must be reported");
+        assert!(
+            installer.applied.contains_key(&b),
+            "later destination installed"
+        );
+        assert!(!installer.applied.contains_key(&c), "stale loop still ran");
+        assert!(!installer.applied.contains_key(&a));
+
+        let delta = installer.apply(&snapshot(&[(a, 1), (b, 2)])).await.unwrap();
+        assert_eq!(delta.added, 1, "only the failed destination is retried");
     }
 }
