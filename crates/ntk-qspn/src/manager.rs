@@ -1466,7 +1466,13 @@ impl Actor {
         is_full: bool,
     ) -> Option<Ingested> {
         let old_peer = self.state.record_peer_naddr(arc, etp.node_address.clone());
-        let existing = self.state.paths_via_arc0(arc);
+        // Only a full ETP reads the slice (implicit withdrawal), so skip the
+        // full-map scan and deep clone for incremental ETPs.
+        let existing = if is_full {
+            self.state.paths_via_arc0(arc)
+        } else {
+            Vec::new()
+        };
         let revised = match revise_etp(
             self.state.my_naddr(),
             etp,
