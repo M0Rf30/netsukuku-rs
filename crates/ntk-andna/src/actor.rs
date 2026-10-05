@@ -141,7 +141,14 @@ impl State {
                             },
                         };
                         let _ = self.events_tx.send(event);
-                        self.publish_snapshot(now);
+                        // Patch only the changed hostname into the published snapshot rather
+                        // than cloning every hosted record on each registration.
+                        if let Some(record) = self.cache.records().get(&req.hostname).cloned() {
+                            let hostname = req.hostname.clone();
+                            self.snapshot_tx.send_modify(|s| {
+                                s.hosted.insert(hostname, record);
+                            });
+                        }
                     }
                     Err(rejected) => {
                         tracing::debug!(
@@ -177,8 +184,10 @@ impl State {
                     self.config.max_hostnames_per_registrant,
                     self.config.max_counter_registrants,
                 );
-                if outcome.is_ok() {
-                    self.publish_snapshot(now);
+                if let Ok(count) = outcome {
+                    self.snapshot_tx.send_modify(|s| {
+                        s.counters.insert(registrant, count);
+                    });
                 }
                 let _ = reply.send(outcome);
             }

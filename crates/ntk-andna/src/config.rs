@@ -90,7 +90,9 @@ pub struct Config {
     /// **Default, justified**: 65536 records. At the low end of this port's own per-record size
     /// estimate (~254 bytes for a bare hostname, no extra SNSD records) that is ~16 MiB; at the
     /// pathological high end (256 SNSD records per hostname, this crate's own
-    /// [`Config::max_snsd_records_total`] ceiling) it is bounded at a few hundred MiB — large
+    /// [`Config::max_snsd_records_total`] ceiling) it is `65536 x 256` ≈ 16.8 M records at
+    /// 100+ bytes each — on the order of **a few GiB**, not the hundreds of MiB an earlier
+    /// revision of this note claimed — large
     /// relative to upstream's own "few hundred kilobytes" worst-case expectation (this port's
     /// SNSD surface is considerably richer than the 2008 spec's), but still a hard, finite
     /// ceiling instead of the unbounded growth this field replaces. Renewals of hostnames

@@ -118,6 +118,13 @@ pub struct Config {
     /// the cap. Each entry is an `HCoord` (two integers) in a `BTreeSet`, so one maxed-out
     /// service costs on the order of a few hundred KiB.
     pub max_participants_per_service: usize,
+    /// Upper bound on how many distinct services this node tracks participant maps for.
+    /// `ServiceId` is a `u16` and any peer may announce any id, so without this bound
+    /// `max_participants_per_service x 65536` maps could be forced into memory (and cloned into
+    /// every published snapshot). A fact for a brand-new service is refused once the bound is
+    /// reached, exactly like [`Self::max_participants_per_service`]'s refuse-new policy; services
+    /// registered locally are always tracked. **Default**: 256.
+    pub max_services: usize,
     /// Multiplier applied to a [`crate::Handle::replicate`] call's own `timeout_exec` to derive
     /// its overall wall-clock deadline, independent of `q` or how many sequential
     /// [`crate::Handle::contact_peer`] attempts that takes.
@@ -163,6 +170,7 @@ impl Default for Config {
             participation_reannounce_interval: None,
             max_contact_peer_hops: 64,
             max_participants_per_service: 8192,
+            max_services: 256,
             replicate_deadline_multiplier: 4,
             require_auth: false,
         }

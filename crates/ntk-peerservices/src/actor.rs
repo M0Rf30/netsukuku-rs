@@ -489,6 +489,20 @@ impl State {
         if self.my_pos.pos(h.level) == Some(h.pos) {
             return; // ignore myself
         }
+        if !self.participant_set.contains_key(&p_id)
+            && !self.services.contains_key(&p_id)
+            && self.participant_set.len() >= self.config.max_services
+        {
+            if self.capacity_warned.insert(p_id) {
+                tracing::warn!(
+                    ?p_id,
+                    cap = self.config.max_services,
+                    "tracking the maximum number of services: refusing participant facts for \
+                     a new service"
+                );
+            }
+            return;
+        }
         let map = self.participant_set.entry(p_id).or_default();
         if !map.contains(h) && map.len() >= self.config.max_participants_per_service {
             if self.capacity_warned.insert(p_id) {
@@ -503,7 +517,12 @@ impl State {
             return;
         }
         if map.insert(h) {
-            self.publish_snapshot();
+            // Patch the published snapshot in place instead of cloning the whole map per fact.
+            let retrieved_below_level = self.retrieved_below_level;
+            self.snapshot_tx.send_modify(|s| {
+                s.retrieved_below_level = retrieved_below_level;
+                s.participants.entry(p_id).or_default().insert(h);
+            });
             let _ = self.events_tx.send(Event::ParticipantAdded { p_id, at: h });
         }
     }
@@ -1284,6 +1303,34 @@ mod capacity_tests {
             ids.windows(2).any(|w| w[1].wrapping_sub(w[0]) != 1),
             "ids must not be a plain counter"
         );
+
+        cancel.cancel();
+        manager_task.await.unwrap();
+    }
+
+    /// Any peer can announce any of 65536 service ids; the number of tracked services is bounded.
+    #[tokio::test]
+    async fn participant_facts_for_new_services_are_refused_past_max_services() {
+        let topology = Topology::new([50]).unwrap();
+        let my_pos = Naddr::new(topology.clone(), vec![0]).unwrap();
+        let env: Arc<dyn RoutingEnv> = Arc::new(NoopEnv);
+        let config = Config {
+            max_services: 2,
+            ..Config::default()
+        };
+        let (manager, handle) =
+            Manager::new(topology.clone(), my_pos, env, config, topology.levels());
+        let cancel = CancellationToken::new();
+        let manager_task = tokio::spawn(manager.run(cancel.child_token()));
+
+        for id in 1..=3u16 {
+            handle
+                .apply_participant(ServiceId::new(id), HCoord::new(0, 1))
+                .await;
+        }
+        let snapshot = handle.snapshot().borrow().clone();
+        let tracked: Vec<ServiceId> = snapshot.participants.keys().copied().collect();
+        assert_eq!(tracked, vec![ServiceId::new(1), ServiceId::new(2)]);
 
         cancel.cancel();
         manager_task.await.unwrap();
