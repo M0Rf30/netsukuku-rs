@@ -119,7 +119,7 @@ required anywhere.
 
 ### Privileged test tier
 
-545 tests pass in the `cargo test --workspace` run above. 24 more, across seven files, need real
+570 tests pass in the `cargo test --workspace` run above. 24 more, across seven files, need real
 kernel or root privileges and are `#[ignore]`d — not part of that run:
 
 | File | Ignored | Needs |
@@ -327,7 +327,7 @@ routing permanently, and a missing bootstrap-phase gate letting a still-hooking 
 premature routing state into the network — were real gaps too, until this release: both are
 fixed in 0.1.3 (`CHANGELOG.md`), not carried in the list above.
 
-**Maturity.** 545 unit/property tests pass in the default `cargo test --workspace` run; 24 more
+**Maturity.** 570 unit/property tests pass in the default `cargo test --workspace` run; 24 more
 are `#[ignore]`d because they need real kernel/root privileges (§4 lists all seven files and
 their invocations). Two real `ntkd` daemons, each in its own network namespace joined by a real
 veth pair, do register and resolve an ANDNA hostname across that network —
@@ -373,8 +373,8 @@ construction (`crates/ntk-coordinator/src/actor.rs:94`), and a colliding *bootst
 resolved by arc retry. Both paths were verified working in live traces.
 
 These failures predate 0.1.3, verified by re-running the suite with this release's fixes stashed
-out. They are invisible in CI because the whole tier is `#[ignore]`d and the privileged CI job has
-never been observed to pass (`AGENTS.md`). They are left red rather than weakened.
+out. They are invisible in CI because the whole tier is `#[ignore]`d and the privileged CI job
+covers only a subset (`.github/workflows/ci.yml`). They are left red rather than weakened.
 
 So: single-process, two-node, multi-hop chain, level-1 aggregation and partition *detection* are
 demonstrated on a real kernel. Partition *withdrawal* and cross-group merge are not. No deployment

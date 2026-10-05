@@ -802,15 +802,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
-name = "memoffset"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
-dependencies = [
- "autocfg",
-]
-
-[[package]]
 name = "miette"
 version = "7.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -928,7 +919,6 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
- "memoffset",
 ]
 
 [[package]]
@@ -1007,14 +997,12 @@ dependencies = [
  "ntk-common",
  "ntk-proto",
  "ntk-rpc",
- "proptest",
  "prost",
  "prost-build",
  "protox",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
- "tracing",
 ]
 
 [[package]]
@@ -1027,7 +1015,6 @@ dependencies = [
  "ntk-netlink",
  "ntk-proto",
  "ntk-rpc",
- "proptest",
  "prost",
  "prost-build",
  "protox",
@@ -1044,7 +1031,6 @@ version = "0.1.8"
 dependencies = [
  "futures",
  "netlink-packet-route",
- "nix 0.31.3",
  "rtnetlink",
  "thiserror 2.0.21",
  "tokio",
@@ -1076,7 +1062,6 @@ name = "ntk-proto"
 version = "0.1.8"
 dependencies = [
  "blake3",
- "bytes",
  "criterion",
  "ed25519-dalek",
  "ntk-common",

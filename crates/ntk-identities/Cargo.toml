@@ -24,12 +24,10 @@ tokio-util.workspace = true
 futures.workspace = true
 prost.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 
 [build-dependencies]
 prost-build.workspace = true
 protox.workspace = true
 
 [dev-dependencies]
-proptest.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

@@ -42,7 +42,7 @@ ntk-hooking.workspace = true
 ntk-coordinator.workspace = true
 ntk-andna.workspace = true
 ed25519-dalek.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "time", "signal", "net", "io-util", "fs", "process"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "time", "signal", "net", "io-util"] }
 tokio-util.workspace = true
 futures.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -60,5 +60,5 @@ proptest.workspace = true
 nix = { workspace = true, features = ["sched"] }
 rtnetlink.workspace = true
 wl-nl80211.workspace = true
-netlink-packet-core = "0.9"
-tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "time", "signal", "net", "io-util", "fs", "process", "test-util"] }
+netlink-packet-core.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "time", "signal", "net", "io-util", "test-util"] }

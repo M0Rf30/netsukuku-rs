@@ -36,8 +36,12 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+# Least privilege by default; the `binaries` job widens to `contents: write` for itself.
+permissions:
+  contents: read
+
 jobs:
-  # The same gate `ci.yml` enforces. Duplicated deliberately: a tag can point at any commit,
+  # The same gate `ci.yml` enforces (build, test, clippy, fmt, doc, seam guard). Duplicated deliberately: a tag can point at any commit,
   # including one that never passed CI, and an unpublish is not available as a remedy. Both
   # `publish` and `binaries` depend on this job and not on each other, so a crates.io rate
   # limit in `publish` can never block a user from getting a binary, and a slow binary build
@@ -45,6 +49,7 @@ jobs:
   test:
     name: build, test, lint
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -58,16 +63,38 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: cargo build --workspace --all-targets
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets --locked
 
       - name: cargo test --workspace
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: cargo clippy --workspace --all-targets -- -D warnings
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: cargo fmt --all --check
         run: cargo fmt --all --check
+
+      - name: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --no-deps --locked
+
+      - name: netlink stays inside ntk-netlink
+        run: |
+          leaks=$(grep -rn --include='*.rs' -E '^[[:space:]]*use (rtnetlink|netlink_packet_route|netlink_sys)\b' \
+                    crates/*/src | grep -v '^crates/ntk-netlink/src/' || true)
+          if [ -n "$leaks" ]; then
+            echo "$leaks"
+            echo "::error::Linux netlink types leaked outside ntk-netlink"
+            exit 1
+          fi
+
+      - name: OpenWrt PKG_VERSION matches the workspace version
+        run: |
+          ws=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          pkg=$(sed -n 's/^PKG_VERSION:=\(.*\)/\1/p' contrib/openwrt/net/netsukuku-rs/Makefile)
+          if [ "$ws" != "$pkg" ]; then
+            echo "::error::OpenWrt PKG_VERSION ($pkg) != workspace version ($ws)"
+            exit 1
+          fi
 
       # Resolved once here and shared via job output, so neither `publish`'s dry-run nor
       # `binaries`' tarball naming has to re-derive it from `cargo metadata`.
@@ -96,6 +123,8 @@ jobs:
     name: publish to crates.io
     needs: test
     runs-on: ubuntu-latest
+    # Rate-limit retries sleep up to 6 x 630 s per crate; keep the cap generous but finite.
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
 
@@ -189,6 +218,7 @@ jobs:
     name: static binary (${{ matrix.target }})
     needs: test
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     # Only this job writes anything (release assets); every other job keeps the default
     # (read-only) GITHUB_TOKEN.
     permissions:
@@ -251,6 +281,20 @@ jobs:
             exit 1
           fi
           echo "no INTERP segment: statically linked"
+
+      # The dist profile (panic=abort, opt-level=z, fat LTO) is never exercised by the test
+      # suite, and the runner is native-arch, so the static binary can simply be run.
+      - name: smoke-test the dist binary
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/dist/ntkd"
+          "$bin" --version
+          printf 'nics = []\ngsizes = []\n' > "$RUNNER_TEMP/bad.toml"
+          if "$bin" run --config "$RUNNER_TEMP/bad.toml" >"$RUNNER_TEMP/out.txt" 2>&1; then
+            echo "::error::ntkd accepted an invalid config"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/out.txt"
 
       - name: package tarball
         run: |

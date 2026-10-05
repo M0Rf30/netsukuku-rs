@@ -23,7 +23,6 @@ workspace = true
 
 [dependencies]
 prost.workspace = true
-bytes.workspace = true
 ntk-common.workspace = true
 thiserror.workspace = true
 ed25519-dalek.workspace = true

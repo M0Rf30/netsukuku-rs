@@ -20,7 +20,6 @@ rtnetlink.workspace = true
 netlink-packet-route.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "net", "sync"] }
 futures.workspace = true
-nix = { workspace = true, features = ["sched", "net"] }
 thiserror.workspace = true
 tracing.workspace = true
 

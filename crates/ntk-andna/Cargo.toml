@@ -18,7 +18,6 @@ workspace = true
 [dependencies]
 ntk-common.workspace = true
 ntk-proto.workspace = true
-ntk-rpc.workspace = true
 ntk-peerservices.workspace = true
 ed25519-dalek = { workspace = true, features = ["rand_core"] }
 blake3.workspace = true
@@ -35,5 +34,6 @@ prost-build.workspace = true
 protox.workspace = true
 
 [dev-dependencies]
+ntk-rpc.workspace = true
 proptest.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "time", "test-util"] }

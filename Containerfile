@@ -78,7 +78,7 @@ RUN mkdir -p /out/tmp && chmod 1777 /out/tmp
 ########################################################################
 FROM scratch
 
-ARG NTKD_VERSION=0.1.1
+ARG NTKD_VERSION=0.1.8
 ARG NTKD_REVISION=unknown
 
 LABEL org.opencontainers.image.title="ntkd" \
@@ -90,11 +90,13 @@ LABEL org.opencontainers.image.title="ntkd" \
 
 COPY --from=builder /out/ /
 
-# Fixed, unallocated-in-/etc/passwd numeric UID:GID (the common "nonroot" convention popularized
-# by Google's distroless images). CAP_NET_ADMIN/CAP_NET_RAW granted via `--cap-add` at `run`
-# time apply to the container's initial process regardless of its UID -- Linux capabilities are
-# independent of the setuid/root model, so this does not need to run as UID 0 to manage routes.
-USER 65532:65532
+# Runs as UID 0 *inside the container* on purpose. `--cap-add` only widens the container's
+# bounding/permitted sets; Docker and Podman do not set ambient capabilities, so a non-root UID
+# would lose CAP_NET_ADMIN / CAP_NET_RAW / CAP_NET_BIND_SERVICE at execve of a binary that has
+# no file capabilities, and netlink writes plus the bind of port 269 would fail. Root is still
+# confined to the capabilities granted with `--cap-add` (everything else is dropped by the
+# runtime's default profile), so this is no wider than the daemon needs.
+USER 0:0
 
 ENTRYPOINT ["/usr/local/bin/ntkd"]
 # No config ships in the image (there is no sane default topology to bake in). Mount one at

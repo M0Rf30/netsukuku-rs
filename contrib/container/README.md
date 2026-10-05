@@ -30,14 +30,18 @@ neighbours off real NICs and installs real routes into the kernel routing table 
   and *look* healthy while routing nothing at all — the daemon has no visibility into whatever
   network you actually wanted it to join. Host networking is what gives it that visibility.
 
+The image runs as UID 0 inside the container (capabilities are not ambient for non-root UIDs, so
+`--cap-add` would be ineffective); the capability set is still limited to what you add. The
+daemon binds port 269, which needs `CAP_NET_BIND_SERVICE` unless you configure a port >= 1024.
+
 Running this image without all three is a common enough mistake to call out explicitly: you will
 get a process that appears to work and does nothing.
 
 ## Build
 
 ```sh
-podman build -t ntkd:0.1.1 \
-  --build-arg NTKD_VERSION=0.1.1 \
+podman build -t ntkd:0.1.8 \
+  --build-arg NTKD_VERSION=0.1.8 \
   --build-arg NTKD_REVISION="$(git rev-parse --short HEAD)" \
   -f Containerfile .
 # or: docker build ...
@@ -53,10 +57,10 @@ the comment in `.github/workflows/container.yml`.
 
 ```sh
 podman run -d --name ntkd \
-  --cap-add=NET_ADMIN --cap-add=NET_RAW \
+  --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=NET_BIND_SERVICE \
   --network host \
   -v /path/to/ntkd.toml:/etc/ntkd/config.toml:ro \
-  ghcr.io/m0rf30/netsukuku-rs:0.1.1
+  ghcr.io/m0rf30/netsukuku-rs:0.1.8
 # or: docker run ... (identical flags)
 ```
 
@@ -64,9 +68,9 @@ The image ships no config (there is no sane default topology to bake in) — mou
 `/etc/ntkd/config.toml`, or override the command entirely, e.g.:
 
 ```sh
-podman run --rm --cap-add=NET_ADMIN --network host \
+podman run --rm --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=NET_BIND_SERVICE --network host \
   -v /path/to/ntkd.toml:/etc/ntkd.toml:ro \
-  ghcr.io/m0rf30/netsukuku-rs:0.1.1 \
+  ghcr.io/m0rf30/netsukuku-rs:0.1.8 \
   run --config /etc/ntkd.toml --nic wlan0 --log-level debug
 ```
 

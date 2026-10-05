@@ -4,7 +4,7 @@
 
 Rust reimplementation of the Netsukuku mesh-networking protocol suite: QSPN v2 routing, Hooking
 (network join/merge), Coordinator (position reservation), PeerServices (DHT substrate), ANDNA
-(distributed hostnames). 12 crates, ~44k lines of source.
+(distributed hostnames). 12 crates, ~52k lines of source.
 
 **The normative upstream is Luca Dionisi's Vala rewrite (2017-2020)**, vendored at
 `research/impl/vala/`. The legacy C daemon (`research/impl/c/netsukuku`) is *not* the reference —
@@ -70,10 +70,10 @@ verdicts and the concurrency strategy.
 
 ```bash
 cargo build --workspace --all-targets
-cargo test  --workspace                              # 527 pass, 24 ignored (privilege-gated)
+cargo test  --workspace                              # 570 pass, 24 ignored (privilege-gated)
 cargo clippy --workspace --all-targets -- -D warnings # must stay at zero warnings
 cargo fmt --all --check
-cargo run -p ntkd -- --help                          # subcommands: run, status
+cargo run -p ntkd -- --help                          # subcommands: run, status, andna-register, andna-resolve
 cargo bench --workspace                              # criterion; see `crates/*/benches`
 ```
 
@@ -140,7 +140,7 @@ solution in `find_shortest_mig`, regex-scraping `ip` output for cleanup).
 
 | File | Why it matters |
 |---|---|
-| `crates/ntkd/src/node/lifecycle.rs` | Bootstrap, the steady-state loop, and `rehook()`. The daemon's brain; largest file in `ntkd`. |
+| `crates/ntkd/src/node/lifecycle.rs` | Bootstrap, the steady-state loop, and `migrate()`. The daemon's brain (~2.1k lines; `adapters.rs` is larger). |
 | `crates/ntkd/src/node/adapters.rs` | Where `ntk-hooking`'s inverted traits meet the real crates. Two level-arithmetic bugs lived here. |
 | `crates/ntkd/src/node/dispatch.rs` | The single inbound routing table for all 39 methods. |
 | `crates/ntk-qspn/src/{revise,state}.rs` | Implicit withdrawal and `update_map` — the highest-risk algorithms in the project. |
@@ -207,10 +207,11 @@ duplicated link-local address, a wedged arc-dial cycle, a `broadcast` subscripti
 rather than papered over.
 
 `ntk-neighborhood` has no `tests/` directory — all of its coverage is inline, and its
-`src/manager.rs` (~1.7k lines) is the largest file in the repo. Both are known gaps, not a pattern
+`src/manager.rs` (~4.3k lines, ~1.9k of it production code) is the largest file in the repo. Both are known gaps, not a pattern
 to copy.
 
 CI (`.github/workflows/ci.yml`) runs the four standard commands plus a separate privileged job. That
 job uses `sudo unshare --net`, **not** `--map-root-user`, because GitHub's ubuntu-24.04 image
-restricts unprivileged user namespaces via AppArmor. That CI path has not yet been observed to pass
-— if the privileged job fails on a first run, start there rather than assuming a code regression.
+restricts unprivileged user namespaces via AppArmor. The privileged job's earlier failures were
+traced to cargo needing the network inside the namespace (build outside, run `--offline`);
+if it fails, still check the environment before assuming a code regression.

@@ -40,6 +40,12 @@ LockPersonality=true
 RemoveIPC=true
 MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+PrivateDevices=yes
+ProtectProc=invisible
+ProcSubset=pid
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

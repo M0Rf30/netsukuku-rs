@@ -34,5 +34,4 @@ prost-build.workspace = true
 protox.workspace = true
 
 [dev-dependencies]
-proptest.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
