@@ -65,6 +65,15 @@ fn total_bits(topology: &Topology) -> Result<u32, AddressingError> {
     Ok(needed)
 }
 
+/// Checks that `topology` can be encoded into the `10.0.0.0/8` address space at all, so a
+/// config that could never be addressed is rejected before any kernel state is touched.
+///
+/// # Errors
+/// [`AddressingError::TopologyTooWide`] if the positions plus the kind bits exceed 24 bits.
+pub fn check_topology_fits(topology: &Topology) -> Result<(), AddressingError> {
+    total_bits(topology).map(|_| ())
+}
+
 /// Packs `kind` plus one position per level (`positions(level)`, outermost level first) into the
 /// low 24 bits of a `10.x.x.x` address, and returns the CIDR prefix length that would leave every
 /// level below `zero_below` as a wildcard (`32` if `zero_below == 0`, i.e. nothing is wildcarded).

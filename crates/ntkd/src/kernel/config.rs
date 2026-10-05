@@ -84,14 +84,16 @@ impl NtkdConfig {
     ///
     /// # Errors
     /// [`ConfigError::Toml`] on malformed TOML; [`ConfigError::Topology`] if `gsizes` does not
-    /// describe a valid [`Topology`] (e.g. empty, or a zero-sized level).
+    /// describe a valid [`Topology`] (e.g. empty, or a zero-sized level); [`ConfigError::Addressing`]
+    /// if it needs more than the 24 address bits `10.0.0.0/8` offers.
     #[allow(
         clippy::should_implement_trait,
         reason = "contracted method name/signature, not a FromStr impl"
     )]
     pub fn from_str(text: &str) -> Result<Self, ConfigError> {
         let config: Self = toml::from_str(text)?;
-        config.topology()?;
+        let topology = config.topology()?;
+        crate::kernel::addressing::check_topology_fits(&topology)?;
         if config.require_auth && config.node_key_path.is_none() {
             return Err(ConfigError::AuthWithoutKey);
         }
@@ -155,6 +157,9 @@ pub enum ConfigError {
     /// `gsizes` does not describe a valid topology.
     #[error("invalid topology: {0}")]
     Topology(#[from] ntk_common::Error),
+    /// `gsizes` describes a topology too wide to encode into `10.0.0.0/8`.
+    #[error("topology cannot be addressed: {0}")]
+    Addressing(#[from] crate::kernel::addressing::AddressingError),
     /// `require_auth` was set without a `node_key_path`. Refused rather than defaulted: a node
     /// that rejects unauthenticated peers but cannot sign its own calls would be unreachable in
     /// both directions, which is a silent, hard-to-diagnose outage.
@@ -274,5 +279,22 @@ mod tests {
     fn rejects_malformed_toml() {
         let err = NtkdConfig::from_str("not valid toml {{{").expect_err("malformed toml");
         assert!(matches!(err, ConfigError::Toml(_)));
+    }
+
+    #[test]
+    fn rejects_a_topology_too_wide_for_the_address_space() {
+        // 13 levels of 16 positions need 52 bits; only 22 are usable after the kind bits.
+        let text = r#"
+            gsizes = [16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16]
+            nics = ["eth0"]
+            port = 269
+        "#;
+        let err = NtkdConfig::from_str(text).expect_err("unaddressable topology");
+        assert!(matches!(
+            err,
+            ConfigError::Addressing(
+                crate::kernel::addressing::AddressingError::TopologyTooWide { .. }
+            )
+        ));
     }
 }
