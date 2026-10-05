@@ -583,6 +583,16 @@ const NO_RTT_FALLBACK_THRESHOLD: u32 = 3;
 /// route at all.
 const NO_RTT_FALLBACK_COST_US: u64 = 1_000_000;
 
+/// Starting value for the outbound auth sequence counter: wall-clock microseconds, so a
+/// restarted process reusing its persistent signing key does not replay sequences peers'
+/// `SequenceGuard` already saw (a counter restarting at 0 gets every signed message rejected
+/// until it overtakes the previous run's high-water mark).
+fn initial_sequence() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(1, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX / 2))
+}
+
 impl<K> Manager<K>
 where
     K: InterfaceState + 'static,
@@ -615,7 +625,7 @@ where
             events_tx: events_tx.clone(),
             tasks: JoinSet::new(),
             signing_key: config.signing_key.map(StdArc::new),
-            sequence_counter: StdArc::new(AtomicU64::new(0)),
+            sequence_counter: StdArc::new(AtomicU64::new(initial_sequence())),
             sequence_guard: SequenceGuard::new(),
             require_auth: config.require_auth,
         };
@@ -852,6 +862,39 @@ where
         }
     }
 
+    /// Gate for a peer-supplied `nic_addr` before it can become an arc or a kernel on-link
+    /// `/32` route: it must be an RFC 3927 link-local IPv4 address (`169.254.0.0/16`), must
+    /// not be one of our own NIC addresses, and must not already belong to a different
+    /// neighbour MAC (a shared address would let one arc's teardown delete another's route).
+    fn peer_nic_addr_acceptable(&self, its_mac: &str, its_nic_addr: &str) -> bool {
+        let Ok(addr) = its_nic_addr.parse::<std::net::Ipv4Addr>() else {
+            tracing::debug!(mac = %its_mac, "ntk-neighborhood: peer nic_addr is not an IPv4 address");
+            return false;
+        };
+        let octets = addr.octets();
+        if octets[0] != 169 || octets[1] != 254 {
+            tracing::debug!(mac = %its_mac, %addr, "ntk-neighborhood: peer nic_addr outside 169.254.0.0/16");
+            return false;
+        }
+        if self
+            .nics
+            .values()
+            .any(|nic| nic.local_address == its_nic_addr)
+        {
+            tracing::debug!(mac = %its_mac, %addr, "ntk-neighborhood: peer nic_addr equals one of ours");
+            return false;
+        }
+        if self
+            .arcs
+            .values()
+            .any(|a| a.arc.neighbour_nic_addr == its_nic_addr && a.arc.neighbour_mac != its_mac)
+        {
+            tracing::debug!(mac = %its_mac, %addr, "ntk-neighborhood: peer nic_addr already used by another arc");
+            return false;
+        }
+        true
+    }
+
     /// The four dedup/collision rules gating `here_i_am`/`request_arc`/
     /// `remove_arc` (`neighborhood.vala:397-410`) — see [`NeighborArc`]'s
     /// doc comment for why one map keyed by MAC plus these filters replaces
@@ -1070,6 +1113,9 @@ where
             );
             return;
         }
+        if !self.peer_nic_addr_acceptable(&sender_mac, &sender_nic_addr) {
+            return;
+        }
         if self.arcs.contains_key(&sender_mac) {
             tracing::debug!(
                 my_id = ?self.my_id, mac = %sender_mac, dev = %received_on_dev,
@@ -1198,6 +1244,9 @@ where
         }
         self.reap_stale_pending().await;
         if self.find_collision(&sender_mac, &sender_nic_addr, sender_id, &received_on_dev) {
+            return;
+        }
+        if !self.peer_nic_addr_acceptable(&sender_mac, &sender_nic_addr) {
             return;
         }
         if let Err(error) = self.authenticate(&sender_mac, verified) {
@@ -1692,6 +1741,19 @@ where
             }
             MonitorOutcome::FirstSample(rtt) => {
                 if let Some(entry) = self.arcs.get_mut(&key) {
+                    if entry.arc.cost.is_some() {
+                        // A NoRtt fallback cost already published ArcAdded; the monitor's
+                        // first real sample is a cost update, never a second arc.
+                        if let Some(Cost::Finite(published)) = entry.arc.cost
+                            && cost::exceeds_hysteresis(published, rtt)
+                        {
+                            entry.arc.cost = Some(Cost::Finite(rtt));
+                            let snapshot = entry.arc.clone();
+                            self.publish_snapshot();
+                            let _ = self.events_tx.send(Event::ArcCostChanged(snapshot));
+                        }
+                        return;
+                    }
                     entry.arc.cost = Some(Cost::Finite(rtt));
                     let snapshot = entry.arc.clone();
                     self.publish_snapshot();
@@ -1819,6 +1881,11 @@ async fn run_arc_monitor(ctx: ArcMonitorContext, cancel: CancellationToken) {
                 "ntk-neighborhood: arc monitor's nop failed, arc will be torn down"
             );
         }
+        // A monitor cancelled while its probes were in flight must not report: the key (MAC)
+        // may already belong to a fresh arc, which would absorb this stale outcome.
+        if cancel.is_cancelled() {
+            return;
+        }
         if nop_result.is_err() {
             let _ = ctx.commands.send(Command::MonitorResult {
                 key: ctx.key.clone(),
@@ -1907,6 +1974,11 @@ async fn run_arc_confirmation(ctx: ArcMonitorContext, cancel: CancellationToken)
                 my_id = ?ctx.my_id, mac = %ctx.key, ticks, %error, is_remote = error.is_remote(),
                 "ntk-neighborhood: arc confirmation's nop was rejected, arc will be torn down"
             ),
+        }
+        // A monitor cancelled while its probe was in flight must not report: the key (MAC) may
+        // already belong to a fresh arc.
+        if cancel.is_cancelled() {
+            return;
         }
         if result.is_err() {
             let _ = ctx.commands.send(Command::MonitorResult {
@@ -2057,7 +2129,7 @@ mod tests {
             ip_route_manager: StdArc::new(FakeIpRouteManager::new()),
             rtt_probe: StdArc::new(FixedRttProbe(Some(10))),
             timing: fast_timing(),
-            new_linklocal_address: Box::new(|| "10.0.0.1".to_owned()),
+            new_linklocal_address: Box::new(|| "169.254.0.1".to_owned()),
             nics: HashMap::new(),
             disabling: HashSet::new(),
             arcs: HashMap::new(),
@@ -2104,7 +2176,7 @@ mod tests {
             arc_entry(
                 NodeId::from_raw(2).unwrap(),
                 "peer-mac",
-                "10.0.0.9",
+                "169.254.0.9",
                 "eth0",
                 ArcState::Discovered,
                 None,
@@ -2112,29 +2184,44 @@ mod tests {
         );
 
         // Same MAC, different node id -> collision.
-        assert!(mgr.find_collision("peer-mac", "10.0.0.9", NodeId::from_raw(3).unwrap(), "eth0"));
+        assert!(mgr.find_collision(
+            "peer-mac",
+            "169.254.0.9",
+            NodeId::from_raw(3).unwrap(),
+            "eth0"
+        ));
         // Same MAC, different linklocal -> collision.
         assert!(mgr.find_collision(
             "peer-mac",
-            "10.0.0.10",
+            "169.254.0.10",
             NodeId::from_raw(2).unwrap(),
             "eth0"
         ));
         // Same MAC, different my_dev -> collision.
-        assert!(mgr.find_collision("peer-mac", "10.0.0.9", NodeId::from_raw(2).unwrap(), "eth1"));
+        assert!(mgr.find_collision(
+            "peer-mac",
+            "169.254.0.9",
+            NodeId::from_raw(2).unwrap(),
+            "eth1"
+        ));
         // Same node id + same dev, different MAC -> collision.
         assert!(mgr.find_collision(
             "other-mac",
-            "10.0.0.11",
+            "169.254.0.11",
             NodeId::from_raw(2).unwrap(),
             "eth0"
         ));
         // Exact match (the "I already have this arc" case) is not a collision.
-        assert!(!mgr.find_collision("peer-mac", "10.0.0.9", NodeId::from_raw(2).unwrap(), "eth0"));
+        assert!(!mgr.find_collision(
+            "peer-mac",
+            "169.254.0.9",
+            NodeId::from_raw(2).unwrap(),
+            "eth0"
+        ));
         // Unrelated neighbour -> not a collision.
         assert!(!mgr.find_collision(
             "unrelated-mac",
-            "10.0.0.20",
+            "169.254.0.20",
             NodeId::from_raw(9).unwrap(),
             "eth2"
         ));
@@ -2146,14 +2233,14 @@ mod tests {
     async fn here_i_am_creates_discovered_arc() {
         let (mut mgr, _self_rx) = test_manager(NodeId::from_raw(1).unwrap(), true);
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         let peer_id = NodeId::from_raw(2).unwrap();
 
         mgr.handle_here_i_am(
             "eth0".to_owned(),
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             None,
         )
         .await;
@@ -2166,17 +2253,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn here_i_am_rejects_peer_nic_addr_outside_link_local_range() {
+        let (mut mgr, _self_rx) = test_manager(NodeId::from_raw(1).unwrap(), true);
+        mgr.nics
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
+
+        for bad in ["8.8.8.8", "10.0.0.2", "not-an-ip", "169.253.0.2"] {
+            mgr.handle_here_i_am(
+                "eth0".to_owned(),
+                NodeId::from_raw(2).unwrap(),
+                "bb:bb".to_owned(),
+                bad.to_owned(),
+                None,
+            )
+            .await;
+            assert!(mgr.arcs.is_empty(), "{bad} must not create an arc");
+        }
+    }
+
+    #[tokio::test]
+    async fn here_i_am_rejects_our_own_or_another_arcs_nic_addr() {
+        let (mut mgr, _self_rx) = test_manager(NodeId::from_raw(1).unwrap(), true);
+        mgr.nics
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
+
+        mgr.handle_here_i_am(
+            "eth0".to_owned(),
+            NodeId::from_raw(2).unwrap(),
+            "bb:bb".to_owned(),
+            "169.254.0.1".to_owned(),
+            None,
+        )
+        .await;
+        assert!(mgr.arcs.is_empty(), "our own address must be rejected");
+
+        mgr.handle_here_i_am(
+            "eth0".to_owned(),
+            NodeId::from_raw(2).unwrap(),
+            "bb:bb".to_owned(),
+            "169.254.0.2".to_owned(),
+            None,
+        )
+        .await;
+        mgr.handle_here_i_am(
+            "eth0".to_owned(),
+            NodeId::from_raw(3).unwrap(),
+            "cc:cc".to_owned(),
+            "169.254.0.2".to_owned(),
+            None,
+        )
+        .await;
+        assert!(mgr.arcs.contains_key("bb:bb"));
+        assert!(
+            !mgr.arcs.contains_key("cc:cc"),
+            "a second MAC must not share bb:bb's nic_addr"
+        );
+    }
+
+    #[tokio::test]
     async fn here_i_am_duplicate_is_suppressed() {
         let (mut mgr, _self_rx) = test_manager(NodeId::from_raw(1).unwrap(), true);
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         let peer_id = NodeId::from_raw(2).unwrap();
 
         mgr.handle_here_i_am(
             "eth0".to_owned(),
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             None,
         )
         .await;
@@ -2184,7 +2329,7 @@ mod tests {
             "eth0".to_owned(),
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             None,
         )
         .await;
@@ -2200,13 +2345,13 @@ mod tests {
     async fn here_i_am_rejects_mac_claimed_by_two_node_ids() {
         let (mut mgr, _self_rx) = test_manager(NodeId::from_raw(1).unwrap(), true);
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
 
         mgr.handle_here_i_am(
             "eth0".to_owned(),
             NodeId::from_raw(2).unwrap(),
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             None,
         )
         .await;
@@ -2215,7 +2360,7 @@ mod tests {
             "eth0".to_owned(),
             NodeId::from_raw(3).unwrap(),
             "bb:bb".to_owned(),
-            "10.0.0.3".to_owned(),
+            "169.254.0.3".to_owned(),
             None,
         )
         .await;
@@ -2232,13 +2377,13 @@ mod tests {
         let my_id = NodeId::from_raw(1).unwrap();
         let (mut mgr, _self_rx) = test_manager(my_id, true);
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
 
         mgr.handle_here_i_am(
             "eth0".to_owned(),
             my_id,
             "aa:aa".to_owned(),
-            "10.0.0.1".to_owned(),
+            "169.254.0.1".to_owned(),
             None,
         )
         .await;
@@ -2265,7 +2410,7 @@ mod tests {
         let ip_route_manager = StdArc::new(FakeIpRouteManager::new());
         mgr.ip_route_manager = ip_route_manager.clone();
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
 
         let cap = mgr.pending_arc_cap();
         assert_eq!(cap, 8);
@@ -2275,7 +2420,7 @@ mod tests {
                 "eth0".to_owned(),
                 NodeId::from_raw(100 + i).unwrap(),
                 format!("mac-{i}"),
-                format!("10.0.1.{i}"),
+                format!("169.254.1.{i}"),
                 None,
             )
             .await;
@@ -2318,7 +2463,7 @@ mod tests {
         let ip_route_manager = StdArc::new(FakeIpRouteManager::new());
         mgr.ip_route_manager = ip_route_manager.clone();
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
 
         let cap = mgr.pending_arc_cap();
         for i in 0..(cap as i32 + 1) {
@@ -2326,10 +2471,10 @@ mod tests {
                 "eth0".to_owned(),
                 my_id,
                 "aa:aa".to_owned(),
-                "10.0.0.1".to_owned(),
+                "169.254.0.1".to_owned(),
                 NodeId::from_raw(100 + i).unwrap(),
                 format!("mac-{i}"),
-                format!("10.0.1.{i}"),
+                format!("169.254.1.{i}"),
                 None,
             )
             .await;
@@ -2359,14 +2504,14 @@ mod tests {
         let (mut mgr, _self_rx) = test_manager(my_id, true);
         mgr.max_arcs = 2; // pending_arc_cap() == 8
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         let established_peer = NodeId::from_raw(999).unwrap();
         mgr.arcs.insert(
             "established-mac".to_owned(),
             arc_entry(
                 established_peer,
                 "established-mac",
-                "10.0.9.9",
+                "169.254.9.9",
                 "eth0",
                 ArcState::Established,
                 Some(Cost::Finite(7)),
@@ -2380,7 +2525,7 @@ mod tests {
                 "eth0".to_owned(),
                 NodeId::from_raw(100 + i).unwrap(),
                 format!("mac-{i}"),
-                format!("10.0.1.{i}"),
+                format!("169.254.1.{i}"),
                 None,
             )
             .await;
@@ -2408,14 +2553,14 @@ mod tests {
         let (mut mgr, mut self_rx) = test_manager(my_id, true);
         mgr.max_arcs = 8; // pending_arc_cap() == 32
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         for i in 0..5i32 {
             mgr.arcs.insert(
                 format!("other-{i}"),
                 arc_entry(
                     NodeId::from_raw(200 + i).unwrap(),
                     &format!("other-{i}"),
-                    &format!("10.0.2.{i}"),
+                    &format!("169.254.2.{i}"),
                     "eth0",
                     ArcState::Discovered,
                     None,
@@ -2428,10 +2573,10 @@ mod tests {
             "eth0".to_owned(),
             my_id,
             "aa:aa".to_owned(),
-            "10.0.0.1".to_owned(),
+            "169.254.0.1".to_owned(),
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             None,
         )
         .await;
@@ -2457,7 +2602,7 @@ mod tests {
         let (mut mgr, _self_rx) = test_manager(my_id, true);
         mgr.max_arcs = 1; // pending_arc_cap() == 4
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
 
         let cap = mgr.pending_arc_cap();
         for i in 0..(cap as i32) {
@@ -2465,7 +2610,7 @@ mod tests {
                 "eth0".to_owned(),
                 NodeId::from_raw(100 + i).unwrap(),
                 format!("mac-{i}"),
-                format!("10.0.1.{i}"),
+                format!("169.254.1.{i}"),
                 None,
             )
             .await;
@@ -2481,7 +2626,7 @@ mod tests {
             "eth0".to_owned(),
             NodeId::from_raw(999).unwrap(),
             "late-comer".to_owned(),
-            "10.0.9.9".to_owned(),
+            "169.254.9.9".to_owned(),
             None,
         )
         .await;
@@ -2497,7 +2642,7 @@ mod tests {
             "eth0".to_owned(),
             NodeId::from_raw(999).unwrap(),
             "late-comer".to_owned(),
-            "10.0.9.9".to_owned(),
+            "169.254.9.9".to_owned(),
             None,
         )
         .await;
@@ -2522,17 +2667,17 @@ mod tests {
         let my_id = NodeId::from_raw(1).unwrap();
         let (mut mgr, mut self_rx) = test_manager(my_id, true);
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         let peer_id = NodeId::from_raw(2).unwrap();
 
         mgr.handle_request_arc(
             "eth0".to_owned(),
             my_id,
             "aa:aa".to_owned(),
-            "10.0.0.1".to_owned(),
+            "169.254.0.1".to_owned(),
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             None,
         )
         .await;
@@ -2557,7 +2702,7 @@ mod tests {
         let my_id = NodeId::from_raw(1).unwrap();
         let (mut mgr, mut self_rx) = test_manager(my_id, true);
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         let peer_id = NodeId::from_raw(2).unwrap();
         let mut events = mgr.events_tx.subscribe();
 
@@ -2568,10 +2713,10 @@ mod tests {
             "eth0".to_owned(),
             my_id,
             "aa:aa".to_owned(),
-            "10.0.0.1".to_owned(),
+            "169.254.0.1".to_owned(),
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             None,
         )
         .await;
@@ -2588,7 +2733,7 @@ mod tests {
             .handle_can_you_export(
                 peer_id,
                 "bb:bb".to_owned(),
-                "10.0.0.2".to_owned(),
+                "169.254.0.2".to_owned(),
                 true,
                 None,
             )
@@ -2650,17 +2795,17 @@ mod tests {
         let my_id = NodeId::from_raw(1).unwrap();
         let (mut mgr, _self_rx) = test_manager(my_id, true);
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         let peer_id = NodeId::from_raw(2).unwrap();
 
         mgr.handle_request_arc(
             "eth0".to_owned(),
             my_id,
             "aa:aa".to_owned(),
-            "10.0.0.1".to_owned(),
+            "169.254.0.1".to_owned(),
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             None,
         )
         .await;
@@ -2671,7 +2816,7 @@ mod tests {
         mgr.handle_can_you_export(
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             true,
             None,
         )
@@ -2695,17 +2840,17 @@ mod tests {
         let my_id = NodeId::from_raw(1).unwrap();
         let (mut mgr, _self_rx) = test_manager(my_id, true);
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
 
         // dest_id does not match this node -> the message is not for us.
         mgr.handle_request_arc(
             "eth0".to_owned(),
             NodeId::from_raw(99).unwrap(),
             "cc:cc".to_owned(),
-            "10.0.0.9".to_owned(),
+            "169.254.0.9".to_owned(),
             NodeId::from_raw(2).unwrap(),
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             None,
         )
         .await;
@@ -2718,14 +2863,14 @@ mod tests {
         let my_id = NodeId::from_raw(1).unwrap();
         let (mut mgr, _self_rx) = test_manager(my_id, true);
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         let peer_id = NodeId::from_raw(2).unwrap();
         mgr.arcs.insert(
             "bb:bb".to_owned(),
             arc_entry(
                 peer_id,
                 "bb:bb",
-                "10.0.0.2",
+                "169.254.0.2",
                 "eth0",
                 ArcState::Established,
                 Some(Cost::Finite(5)),
@@ -2736,10 +2881,10 @@ mod tests {
             "eth0".to_owned(),
             my_id,
             "aa:aa".to_owned(),
-            "10.0.0.1".to_owned(),
+            "169.254.0.1".to_owned(),
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             None,
         )
         .await;
@@ -2756,7 +2901,7 @@ mod tests {
         let result = mgr.handle_can_you_export(
             NodeId::from_raw(5).unwrap(),
             "zz:zz".to_owned(),
-            "10.0.0.9".to_owned(),
+            "169.254.0.9".to_owned(),
             true,
             None,
         );
@@ -2772,7 +2917,7 @@ mod tests {
             arc_entry(
                 real_peer,
                 "bb:bb",
-                "10.0.0.2",
+                "169.254.0.2",
                 "eth0",
                 ArcState::Discovered,
                 None,
@@ -2783,7 +2928,7 @@ mod tests {
         let result = mgr.handle_can_you_export(
             NodeId::from_raw(99).unwrap(),
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             true,
             None,
         );
@@ -2799,7 +2944,7 @@ mod tests {
             arc_entry(
                 peer_id,
                 "bb:bb",
-                "10.0.0.2",
+                "169.254.0.2",
                 "eth0",
                 ArcState::Established,
                 Some(Cost::Finite(1)),
@@ -2809,7 +2954,7 @@ mod tests {
             .handle_can_you_export(
                 peer_id,
                 "bb:bb".to_owned(),
-                "10.0.0.2".to_owned(),
+                "169.254.0.2".to_owned(),
                 false,
                 None,
             )
@@ -2828,13 +2973,13 @@ mod tests {
     async fn remove_my_arc_drops_entry_and_emits_event_only_if_announced() {
         let (mut mgr, _self_rx) = test_manager(NodeId::from_raw(1).unwrap(), true);
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         mgr.arcs.insert(
             "never-announced".to_owned(),
             arc_entry(
                 NodeId::from_raw(2).unwrap(),
                 "never-announced",
-                "10.0.0.2",
+                "169.254.0.2",
                 "eth0",
                 ArcState::Discovered,
                 None,
@@ -2853,7 +2998,7 @@ mod tests {
             arc_entry(
                 NodeId::from_raw(3).unwrap(),
                 "announced",
-                "10.0.0.3",
+                "169.254.0.3",
                 "eth0",
                 ArcState::Established,
                 Some(Cost::Finite(7)),
@@ -2982,7 +3127,7 @@ mod tests {
             "eth0".to_owned(),
             NicState {
                 mac: "aa:aa".to_owned(),
-                local_address: "10.0.0.1".to_owned(),
+                local_address: "169.254.0.1".to_owned(),
                 radar_cancel: eth0_radar.clone(),
             },
         );
@@ -2991,7 +3136,7 @@ mod tests {
             "eth1".to_owned(),
             NicState {
                 mac: "cc:cc".to_owned(),
-                local_address: "10.0.0.5".to_owned(),
+                local_address: "169.254.0.5".to_owned(),
                 radar_cancel: eth1_radar.clone(),
             },
         );
@@ -3000,7 +3145,7 @@ mod tests {
             arc_entry(
                 NodeId::from_raw(2).unwrap(),
                 "bb:bb",
-                "10.0.0.2",
+                "169.254.0.2",
                 "eth0",
                 ArcState::Established,
                 Some(Cost::Finite(10)),
@@ -3011,7 +3156,7 @@ mod tests {
             arc_entry(
                 NodeId::from_raw(3).unwrap(),
                 "dd:dd",
-                "10.0.0.3",
+                "169.254.0.3",
                 "eth1",
                 ArcState::Established,
                 Some(Cost::Finite(20)),
@@ -3062,7 +3207,7 @@ mod tests {
     async fn here_i_am_is_dropped_while_its_device_is_mid_stop() {
         let (mut mgr, _self_rx) = test_manager(NodeId::from_raw(1).unwrap(), true);
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         // Construct the mid-stop state deliberately: the actor processes one command at a
         // time, so `stop_monitor` and an inbound `here_i_am` never genuinely race in
         // production -- but `handle_here_i_am`'s own guard must still honour `disabling`
@@ -3073,7 +3218,7 @@ mod tests {
             "eth0".to_owned(),
             NodeId::from_raw(2).unwrap(),
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             None,
         )
         .await;
@@ -3088,7 +3233,7 @@ mod tests {
     async fn stop_monitor_clears_its_disabling_entry_so_it_does_not_leak() {
         let (mut mgr, _self_rx) = test_manager(NodeId::from_raw(1).unwrap(), true);
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
 
         mgr.stop_monitor("eth0").await;
 
@@ -3099,12 +3244,12 @@ mod tests {
 
         // A subsequent here_i_am on a freshly re-monitored device is no longer dropped.
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         mgr.handle_here_i_am(
             "eth0".to_owned(),
             NodeId::from_raw(2).unwrap(),
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             None,
         )
         .await;
@@ -3136,11 +3281,11 @@ mod tests {
         let ip_route_manager = StdArc::new(FakeIpRouteManager::new());
         mgr.ip_route_manager = ip_route_manager.clone();
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         mgr.nics
-            .insert("eth1".to_owned(), nic_state("bb:bb", "10.0.0.2"));
+            .insert("eth1".to_owned(), nic_state("bb:bb", "169.254.0.2"));
         mgr.nics
-            .insert("eth2".to_owned(), nic_state("cc:cc", "10.0.0.3"));
+            .insert("eth2".to_owned(), nic_state("cc:cc", "169.254.0.3"));
 
         let mut stopped = mgr.sync_interfaces().await;
         stopped.sort();
@@ -3185,7 +3330,7 @@ mod tests {
             ip_route_manager: ip_route_manager.clone(),
             rtt_probe: StdArc::new(FixedRttProbe(Some(10))),
             timing: fast_timing(),
-            new_linklocal_address: Box::new(|| "10.0.0.1".to_owned()),
+            new_linklocal_address: Box::new(|| "169.254.0.1".to_owned()),
             nics: HashMap::new(),
             disabling: HashSet::new(),
             arcs: HashMap::new(),
@@ -3199,9 +3344,9 @@ mod tests {
             require_auth: false,
         };
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         mgr.nics
-            .insert("eth1".to_owned(), nic_state("bb:bb", "10.0.0.2"));
+            .insert("eth1".to_owned(), nic_state("bb:bb", "169.254.0.2"));
 
         let stopped = mgr.sync_interfaces().await;
 
@@ -3231,7 +3376,7 @@ mod tests {
             arc_entry(
                 NodeId::from_raw(2).unwrap(),
                 "bb:bb",
-                "10.0.0.2",
+                "169.254.0.2",
                 "eth0",
                 ArcState::Established,
                 None,
@@ -3249,6 +3394,42 @@ mod tests {
         assert!(matches!(event, Event::ArcAdded(arc) if arc.cost == Some(Cost::Finite(42))));
     }
 
+    #[tokio::test]
+    async fn first_sample_after_no_rtt_fallback_is_a_cost_update_not_a_second_arc_added() {
+        let (mut mgr, _self_rx) = test_manager(NodeId::from_raw(1).unwrap(), true);
+        mgr.arcs.insert(
+            "bb:bb".to_owned(),
+            arc_entry(
+                NodeId::from_raw(2).unwrap(),
+                "bb:bb",
+                "169.254.0.2",
+                "eth0",
+                ArcState::Established,
+                None,
+            ),
+        );
+        let mut events = mgr.events_tx.subscribe();
+        for _ in 0..NO_RTT_FALLBACK_THRESHOLD {
+            mgr.handle_monitor_result("bb:bb".to_owned(), MonitorOutcome::NoRtt)
+                .await;
+        }
+        assert!(matches!(events.try_recv(), Ok(Event::ArcAdded(_))));
+
+        mgr.handle_monitor_result("bb:bb".to_owned(), MonitorOutcome::FirstSample(10))
+            .await;
+
+        match events.try_recv() {
+            Ok(Event::ArcCostChanged(arc)) => {
+                assert_eq!(arc.cost, Some(Cost::Finite(10)));
+            }
+            other => panic!("expected ArcCostChanged, got {other:?}"),
+        }
+        assert!(
+            events.try_recv().is_err(),
+            "a second ArcAdded would register a duplicate qspn arc"
+        );
+    }
+
     /// Pins the *integration*, not the pure hysteresis math -- `cost_model.rs`'s own
     /// `hysteresis_table`/`hysteresis_suppresses_sub_threshold_drift` tests already cover the
     /// boundary of [`cost::exceeds_hysteresis`] itself. This checks that
@@ -3262,7 +3443,7 @@ mod tests {
             arc_entry(
                 NodeId::from_raw(2).unwrap(),
                 "bb:bb",
-                "10.0.0.2",
+                "169.254.0.2",
                 "eth0",
                 ArcState::Established,
                 Some(Cost::Finite(1000)),
@@ -3303,7 +3484,7 @@ mod tests {
             arc_entry(
                 NodeId::from_raw(2).unwrap(),
                 "bb:bb",
-                "10.0.0.2",
+                "169.254.0.2",
                 "eth0",
                 ArcState::Established,
                 Some(Cost::Finite(1000)),
@@ -3329,7 +3510,7 @@ mod tests {
             arc_entry(
                 NodeId::from_raw(2).unwrap(),
                 "bb:bb",
-                "10.0.0.2",
+                "169.254.0.2",
                 "eth0",
                 ArcState::Established,
                 None,
@@ -3361,7 +3542,7 @@ mod tests {
             arc_entry(
                 NodeId::from_raw(2).unwrap(),
                 "bb:bb",
-                "10.0.0.2",
+                "169.254.0.2",
                 "eth0",
                 ArcState::Established,
                 None,
@@ -3486,7 +3667,7 @@ mod tests {
             ip_route_manager: StdArc::new(FakeIpRouteManager::new()),
             rtt_probe: StdArc::new(FixedRttProbe(Some(20))),
             timing: timing.clone(),
-            new_linklocal_address: Box::new(|| "10.0.0.1".to_owned()),
+            new_linklocal_address: Box::new(|| "169.254.0.1".to_owned()),
             signing_key: None,
             require_auth: false,
         };
@@ -3506,7 +3687,7 @@ mod tests {
             ip_route_manager: StdArc::new(FakeIpRouteManager::new()),
             rtt_probe: StdArc::new(FixedRttProbe(Some(15))),
             timing: timing.clone(),
-            new_linklocal_address: Box::new(|| "10.0.0.2".to_owned()),
+            new_linklocal_address: Box::new(|| "169.254.0.2".to_owned()),
             signing_key: None,
             require_auth: false,
         };
@@ -3601,7 +3782,7 @@ mod tests {
             ip_route_manager: StdArc::new(FakeIpRouteManager::new()),
             rtt_probe: StdArc::new(FixedRttProbe(Some(20))),
             timing: timing.clone(),
-            new_linklocal_address: Box::new(|| "10.0.2.1".to_owned()),
+            new_linklocal_address: Box::new(|| "169.254.2.1".to_owned()),
             signing_key: None,
             require_auth: false,
         };
@@ -3621,7 +3802,7 @@ mod tests {
             ip_route_manager: StdArc::new(FakeIpRouteManager::new()),
             rtt_probe: StdArc::new(FixedRttProbe(Some(15))),
             timing: timing.clone(),
-            new_linklocal_address: Box::new(|| "10.0.2.2".to_owned()),
+            new_linklocal_address: Box::new(|| "169.254.2.2".to_owned()),
             signing_key: None,
             require_auth: false,
         };
@@ -3751,7 +3932,7 @@ mod tests {
         let arc = NeighborArc {
             neighbour_id: NodeId::from_raw(9).unwrap(),
             neighbour_mac: "cc:cc".to_owned(),
-            neighbour_nic_addr: "10.9.9.9".to_owned(),
+            neighbour_nic_addr: "169.254.9.9".to_owned(),
             my_dev: "eth0".to_owned(),
             state: ArcState::Established,
             cost: Some(Cost::Finite(10)),
@@ -3764,7 +3945,7 @@ mod tests {
             stub_factory,
             caller_nic: NicRef {
                 mac: "aa:aa".to_owned(),
-                nic_addr: "10.0.0.1".to_owned(),
+                nic_addr: "169.254.0.1".to_owned(),
             },
             my_id: NodeId::from_raw(1).unwrap(),
             timing: fast_timing(),
@@ -3811,7 +3992,7 @@ mod tests {
             NodeId::from_raw(1).unwrap(),
             &NicRef {
                 mac: "aa:aa".to_owned(),
-                nic_addr: "10.0.0.1".to_owned(),
+                nic_addr: "169.254.0.1".to_owned(),
             },
         );
         let recovered = client
@@ -3826,6 +4007,82 @@ mod tests {
         assert!(
             recovered.is_ok(),
             "the injected fault must not outlive its scripted single call: {recovered:?}"
+        );
+    }
+
+    #[test]
+    fn initial_sequence_is_seeded_from_wall_clock_not_zero() {
+        // 2020-01-01 in micros; any restarted process is far past this.
+        assert!(initial_sequence() > 1_577_836_800_000_000);
+    }
+
+    #[tokio::test]
+    async fn run_arc_confirmation_cancelled_mid_call_reports_nothing() {
+        #[derive(Debug)]
+        struct UnicastOnlyStubFactory {
+            client: FakeRpcClient,
+        }
+        impl NeighborhoodStubFactory for UnicastOnlyStubFactory {
+            fn broadcast(&self, _dev: &str) -> StdArc<dyn RpcClient> {
+                unreachable!("run_arc_confirmation never broadcasts")
+            }
+            fn unicast(&self, _arc: &NeighborArc) -> StdArc<dyn RpcClient> {
+                StdArc::new(self.client.clone())
+            }
+        }
+
+        let cancel = CancellationToken::new();
+        let handler_cancel = cancel.clone();
+        let client = FakeRpcClient::new(StdArc::new(FnHandler(
+            move |_caller: CallerContext,
+                  _uid: TypedValue,
+                  _call: MethodCall,
+                  _auth: Option<Auth>| {
+                let handler_cancel = handler_cancel.clone();
+                async move {
+                    // The arc is torn down (monitor cancelled) while this nop is in flight,
+                    // and the call then fails: its result must not reach the manager, whose
+                    // key may by now belong to a fresh arc.
+                    handler_cancel.cancel();
+                    Err::<ResponsePayload, _>(wire::malformed("dead peer"))
+                }
+            },
+        )));
+        let stub_factory: StdArc<dyn NeighborhoodStubFactory> =
+            StdArc::new(UnicastOnlyStubFactory { client });
+        let arc = NeighborArc {
+            neighbour_id: NodeId::from_raw(9).unwrap(),
+            neighbour_mac: "cc:cc".to_owned(),
+            neighbour_nic_addr: "169.254.9.9".to_owned(),
+            my_dev: "eth0".to_owned(),
+            state: ArcState::Established,
+            cost: Some(Cost::Finite(10)),
+        };
+        let (commands, mut rx) = mpsc::unbounded_channel();
+        let ctx = ArcMonitorContext {
+            key: arc.key().to_owned(),
+            arc,
+            rtt_probe: StdArc::new(FixedRttProbe(Some(10))),
+            stub_factory,
+            caller_nic: NicRef {
+                mac: "aa:aa".to_owned(),
+                nic_addr: "169.254.0.1".to_owned(),
+            },
+            my_id: NodeId::from_raw(1).unwrap(),
+            timing: fast_timing(),
+            commands,
+            signing_key: None,
+            sequence_counter: StdArc::new(AtomicU64::new(0)),
+        };
+        let task = tokio::spawn(run_arc_confirmation(ctx, cancel));
+
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("task must exit")
+            .expect("task panicked");
+        assert!(
+            rx.recv().await.is_none(),
+            "a cancelled monitor must not report a stale result"
         );
     }
 
@@ -3900,7 +4157,7 @@ mod tests {
             ip_route_manager: StdArc::new(FakeIpRouteManager::new()),
             rtt_probe: StdArc::new(FixedRttProbe(Some(10))),
             timing: fast_timing(),
-            new_linklocal_address: Box::new(|| "10.0.0.1".to_owned()),
+            new_linklocal_address: Box::new(|| "169.254.0.1".to_owned()),
             signing_key: None,
             require_auth: false,
         };
@@ -3924,10 +4181,10 @@ mod tests {
                     "eth0".to_owned(),
                     my_id,
                     "aa:aa".to_owned(),
-                    "10.0.0.1".to_owned(),
+                    "169.254.0.1".to_owned(),
                     NodeId::from_raw(2).unwrap(),
                     "peer-a".to_owned(),
-                    "10.0.0.2".to_owned(),
+                    "169.254.0.2".to_owned(),
                     None,
                 )
                 .await
@@ -3943,7 +4200,7 @@ mod tests {
                 "eth0".to_owned(),
                 NodeId::from_raw(3).unwrap(),
                 "peer-b".to_owned(),
-                "10.0.0.3".to_owned(),
+                "169.254.0.3".to_owned(),
                 None,
             )
             .await
@@ -3979,7 +4236,7 @@ mod tests {
     async fn here_i_am_with_verified_auth_pins_the_signers_key() {
         let (mut mgr, _self_rx) = test_manager(NodeId::from_raw(1).unwrap(), true);
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         let peer_id = NodeId::from_raw(2).unwrap();
         let verifying_key = auth_key(9).verifying_key();
 
@@ -3987,7 +4244,7 @@ mod tests {
             "eth0".to_owned(),
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             Some((verifying_key, 1)),
         )
         .await;
@@ -4004,7 +4261,7 @@ mod tests {
             arc_entry(
                 peer_id,
                 "bb:bb",
-                "10.0.0.2",
+                "169.254.0.2",
                 "eth0",
                 ArcState::Discovered,
                 None,
@@ -4018,7 +4275,7 @@ mod tests {
         let result = mgr.handle_can_you_export(
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             false,
             Some((key2, 1)),
         );
@@ -4040,7 +4297,7 @@ mod tests {
             arc_entry(
                 peer_id,
                 "bb:bb",
-                "10.0.0.2",
+                "169.254.0.2",
                 "eth0",
                 ArcState::Discovered,
                 None,
@@ -4054,7 +4311,7 @@ mod tests {
         let result = mgr.handle_can_you_export(
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             false,
             None,
         );
@@ -4071,7 +4328,7 @@ mod tests {
             arc_entry(
                 peer_id,
                 "bb:bb",
-                "10.0.0.2",
+                "169.254.0.2",
                 "eth0",
                 ArcState::Discovered,
                 None,
@@ -4083,7 +4340,7 @@ mod tests {
         let result = mgr.handle_can_you_export(
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             false,
             Some((key, 1)),
         );
@@ -4100,7 +4357,7 @@ mod tests {
             arc_entry(
                 peer_id,
                 "bb:bb",
-                "10.0.0.2",
+                "169.254.0.2",
                 "eth0",
                 ArcState::Discovered,
                 None,
@@ -4111,7 +4368,7 @@ mod tests {
         mgr.handle_can_you_export(
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             false,
             Some((key, 5)),
         )
@@ -4120,7 +4377,7 @@ mod tests {
         let replayed = mgr.handle_can_you_export(
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             false,
             Some((key, 5)),
         );
@@ -4135,14 +4392,14 @@ mod tests {
         let (mut mgr, _self_rx) = test_manager(NodeId::from_raw(1).unwrap(), true);
         mgr.require_auth = true;
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         let peer_id = NodeId::from_raw(2).unwrap();
 
         mgr.handle_here_i_am(
             "eth0".to_owned(),
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             None,
         )
         .await;
@@ -4158,7 +4415,7 @@ mod tests {
         let (mut mgr, _self_rx) = test_manager(NodeId::from_raw(1).unwrap(), true);
         mgr.require_auth = true;
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         let peer_id = NodeId::from_raw(2).unwrap();
         let verifying_key = auth_key(6).verifying_key();
 
@@ -4166,7 +4423,7 @@ mod tests {
             "eth0".to_owned(),
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             Some((verifying_key, 1)),
         )
         .await;
@@ -4190,14 +4447,14 @@ mod tests {
         assert!(mgr.signing_key.is_none());
         assert!(!mgr.require_auth);
         mgr.nics
-            .insert("eth0".to_owned(), nic_state("aa:aa", "10.0.0.1"));
+            .insert("eth0".to_owned(), nic_state("aa:aa", "169.254.0.1"));
         let peer_id = NodeId::from_raw(2).unwrap();
 
         mgr.handle_here_i_am(
             "eth0".to_owned(),
             peer_id,
             "bb:bb".to_owned(),
-            "10.0.0.2".to_owned(),
+            "169.254.0.2".to_owned(),
             None,
         )
         .await;
