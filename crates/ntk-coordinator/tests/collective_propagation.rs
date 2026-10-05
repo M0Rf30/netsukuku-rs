@@ -288,11 +288,23 @@ fn spawn_node(
     Arc<GrowableStubFactory>,
     mpsc::UnboundedReceiver<&'static str>,
 ) {
+    spawn_node_with_map(label, Topology::new([1]).unwrap(), Arc::new(TestMap))
+}
+
+fn spawn_node_with_map(
+    label: &'static str,
+    topology: Topology,
+    map: Arc<dyn CoordinatorMap>,
+) -> (
+    Handle,
+    Arc<GrowableStubFactory>,
+    mpsc::UnboundedReceiver<&'static str>,
+) {
     let (tx, rx) = mpsc::unbounded_channel();
     let factory = Arc::new(GrowableStubFactory::default());
     let (manager, handle) = Manager::new(
-        Topology::new([1]).unwrap(),
-        Arc::new(TestMap),
+        topology,
+        map,
         factory.clone() as Arc<dyn CoordinatorStubFactory>,
         Arc::new(RecordingPropagationHandler { label, tx }),
         noop_enter_handlers(),
@@ -345,6 +357,58 @@ async fn a_member_that_joins_after_an_earlier_flood_is_reached_by_a_later_one() 
         late_rx.recv().await,
         Some("late"),
         "the late-joined member is reached by the later flood, via mid's own re-flood"
+    );
+}
+
+/// Two members each send their *first* propagation to the same receiver: the dedup window is
+/// shared across originators, so their ids must differ or the later flood is silently dropped.
+#[tokio::test]
+async fn first_propagations_of_two_originators_do_not_collide_at_a_shared_receiver() {
+    let topology = || Topology::new([8, 8]).unwrap();
+    let at = |pos: u32| -> Arc<dyn CoordinatorMap> {
+        Arc::new(LevelMap {
+            pos: vec![pos, 0],
+            fp: vec![0, 99],
+        })
+    };
+    let (origin_a, factory_a, _rx_a) = spawn_node_with_map("a", topology(), at(1));
+    let (origin_b, factory_b, _rx_b) = spawn_node_with_map("b", topology(), at(2));
+    let (receiver, _factory_c, mut rx_c) = spawn_node_with_map("c", topology(), at(3));
+    factory_a.add(direct_stub(receiver.clone()));
+    factory_b.add(direct_stub(receiver.clone()));
+
+    origin_a
+        .prepare_enter(1, TypedValue::new("test.PrepareEnter", b"a".to_vec()))
+        .await;
+    origin_b
+        .prepare_enter(1, TypedValue::new("test.PrepareEnter", b"b".to_vec()))
+        .await;
+
+    assert_eq!(rx_c.recv().await, Some("c"));
+    assert_eq!(
+        rx_c.recv().await,
+        Some("c"),
+        "the second originator's first propagation must not be deduped away"
+    );
+}
+
+/// The originator records its own propagation id, so the flood echoing back is not applied twice.
+#[tokio::test]
+async fn an_originator_does_not_reapply_its_own_echoed_propagation() {
+    let (origin, factory_origin, mut rx_origin) = spawn_node("origin");
+    let (peer, factory_peer, mut rx_peer) = spawn_node("peer");
+    factory_origin.add(direct_stub(peer.clone()));
+    factory_peer.add(direct_stub(origin.clone()));
+
+    origin
+        .prepare_enter(0, TypedValue::new("test.PrepareEnter", b"x".to_vec()))
+        .await;
+
+    assert_eq!(rx_peer.recv().await, Some("peer"));
+    assert_eq!(rx_origin.recv().await, Some("origin"));
+    assert!(
+        rx_origin.try_recv().is_err(),
+        "the echo of my own propagation must be dropped"
     );
 }
 

@@ -492,6 +492,38 @@ async fn membership_change_invalidates_the_n_nodes_cache_before_the_ttl_expires(
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn polling_faster_than_the_ttl_does_not_keep_a_stale_n_nodes_alive() {
+    let topology = Topology::new([4]).unwrap();
+    let (peers, _peers_cancel) = single_node_peers(topology);
+    let map = Arc::new(MutableNNodesMap(AtomicU64::new(1)));
+    let (_handle, service, _cancel) = build_coordinator(
+        peers.clone(),
+        map.clone() as Arc<dyn CoordinatorMap>,
+        Arc::new(NoopPropagationHandler),
+    );
+    peers.register(Arc::new(service)).await;
+    let config = Config::default();
+    let ttl = config.n_nodes_cache_ttl;
+    let client = CoordinatorClient::new(peers, config);
+
+    assert_eq!(client.get_n_nodes(&[]).await.unwrap(), 1);
+    map.0.store(2, Ordering::SeqCst);
+
+    // Poll at half the TTL: the second hit lands exactly at the TTL boundary, the third
+    // after it. A sliding expiry would keep answering 1 for as long as polling continues.
+    let step = ttl / 2;
+    let mut last = 0;
+    for _ in 0..4 {
+        tokio::time::advance(step).await;
+        last = client.get_n_nodes(&[]).await.unwrap();
+    }
+    assert_eq!(
+        last, 2,
+        "the cache must refresh once its original TTL elapses"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Propagation anti-replay (coord.vala:424-440, 200s retention window)
 // ---------------------------------------------------------------------------

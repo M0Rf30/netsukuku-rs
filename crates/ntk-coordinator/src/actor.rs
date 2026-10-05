@@ -67,6 +67,7 @@ enum Cmd {
         propagation_id: i32,
     },
     NextPropagationId {
+        node_key: u64,
         reply: oneshot::Sender<i32>,
     },
     HandOff {
@@ -185,10 +186,14 @@ impl State {
             .memory
             .get_mut(&top)
             .expect("every top in 1..=levels is pre-populated at construction");
-        let n = match mem.n_nodes {
-            Some((n, expiry)) if expiry > now => n,
-            _ => map.n_nodes(),
-        };
+        // A cache hit must not extend the expiry: polling faster than the TTL
+        // would otherwise keep a stale count alive forever.
+        if let Some((n, expiry)) = mem.n_nodes
+            && expiry > now
+        {
+            return n;
+        }
+        let n = map.n_nodes();
         mem.n_nodes = Some((n, now + cache_ttl));
         self.publish_snapshot();
         n
@@ -339,9 +344,13 @@ impl State {
             Cmd::ExpirePropagation { propagation_id } => {
                 self.recent_propagations.remove(&propagation_id);
             }
-            Cmd::NextPropagationId { reply } => {
-                let id = self.next_propagation_id;
+            Cmd::NextPropagationId { node_key, reply } => {
+                let counter = self.next_propagation_id;
                 self.next_propagation_id = self.next_propagation_id.wrapping_add(1);
+                let id = mix_propagation_id(node_key, counter);
+                // The originator is a flood participant too: remember my own id so an
+                // echo of my propagation is not re-accepted and re-applied.
+                self.recent_propagations.insert(id);
                 let _ = reply.send(id);
             }
             Cmd::HandOff { reply } => {
@@ -352,6 +361,21 @@ impl State {
             }
         }
     }
+}
+
+fn fnv_step(h: u64, v: u64) -> u64 {
+    (h ^ v).wrapping_mul(0x0000_0100_0000_01b3).rotate_left(29)
+}
+
+/// Mixes the node-unique key with the per-actor counter into a 32-bit propagation id.
+fn mix_propagation_id(node_key: u64, counter: i32) -> i32 {
+    let mut x = node_key ^ u64::from(counter as u32).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^= x >> 31;
+    (x >> 32) as i32
 }
 
 /// The single-owner actor. Spawn with [`Manager::run`]; interact only through the [`Handle`] it
@@ -628,8 +652,9 @@ impl Handle {
     // -- propagation --
 
     /// `None` if the actor already shut down.
-    async fn next_propagation_id(&self) -> Option<i32> {
-        self.call(|reply| Cmd::NextPropagationId { reply }).await
+    async fn next_propagation_id(&self, node_key: u64) -> Option<i32> {
+        self.call(|reply| Cmd::NextPropagationId { node_key, reply })
+            .await
     }
 
     /// Actor shutdown and "not a live propagation" both collapse to `false` — either way the
@@ -671,18 +696,31 @@ impl Handle {
 
     /// Builds a fresh propagation envelope for `level` (`CoordinatorManager.prepare_propagation`,
     /// `coord.vala:229-237`). Deviates from upstream's random `propagation_id`
-    /// (`PRNGen.int_range`) with a per-actor monotonic counter: dedup only needs uniqueness
-    /// among *my own* concurrently-live propagations, which a counter guarantees deterministically
-    /// without an RNG dependency (this crate's dependency list has none).
+    /// (`PRNGen.int_range`): receivers dedup on the bare id across *all* originators, so the id
+    /// is derived from a node-unique key (my positions at every level plus my fingerprints)
+    /// mixed with a per-actor counter — deterministic, no RNG dependency, and two members'
+    /// first propagations no longer collide.
     ///
     /// `None` if the actor already shut down — every caller below gives up cleanly rather than
     /// fan out a propagation nothing will ever locally apply.
+    /// A key unique to this node within the network: its position at every level plus the
+    /// fingerprint ids above it.
+    fn node_key(&self) -> u64 {
+        let levels = self.topology.levels();
+        let mut h = 0xcbf2_9ce4_8422_2325_u64;
+        for l in 0..levels {
+            h = fnv_step(h, u64::from(self.map.my_pos(l)));
+            h = fnv_step(h, self.map.fp_id(l) as u64);
+        }
+        h
+    }
+
     async fn prepare_propagation(&self, level: usize, data: TypedValue) -> Option<PropagationArgs> {
         let positions = (level..self.topology.levels())
             .map(|l| self.map.my_pos(l))
             .collect();
         let fp_id = self.map.fp_id(level);
-        let propagation_id = self.next_propagation_id().await?;
+        let propagation_id = self.next_propagation_id(self.node_key()).await?;
         Some(PropagationArgs {
             positions,
             fp_id,
