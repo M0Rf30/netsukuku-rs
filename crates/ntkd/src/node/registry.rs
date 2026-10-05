@@ -206,12 +206,16 @@ impl LinkRegistry {
     #[must_use]
     pub fn link_for_caller(&self, tv: &ntk_proto::v1::TypedValue) -> Option<LinkId> {
         let id = decode_caller_id(tv)?;
+        // A neighbour reachable over two NICs has two entries with one `neighbour_id`, and
+        // `src_nic` carries only that id. Iterating the `HashMap` would pick an arbitrary
+        // one per call; the lowest `LinkId` (the oldest arc) is at least stable.
         self.by_mac
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .values()
-            .find(|e| e.neighbour_id == id)
+            .filter(|e| e.neighbour_id == id)
             .map(|e| e.id)
+            .min()
     }
 
     /// Records the [`ntk_qspn::ArcId`] `QspnHandle::add_arc` returned for `link`.
@@ -232,16 +236,21 @@ impl LinkRegistry {
     /// `Multipath` naming the identical gateway twice, and a real triangle topology's node
     /// admitting four `ArcId`s for two physical neighbours).
     pub fn set_qspn_arc(&self, link: LinkId, arc: ntk_qspn::ArcId) {
-        if let Some(mac) = self
+        // Copy the mac out in its own statement so the `by_id` guard is released before
+        // `by_mac` is taken: `link_for_neighbour` takes them in the opposite order, and holding
+        // both here would be an AB/BA deadlock between the neighborhood and steady-state tasks.
+        let mac = self
             .by_id
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&link)
+            .cloned();
+        if let Some(mac) = mac
             && let Some(entry) = self
                 .by_mac
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .get_mut(mac)
+                .get_mut(&mac)
         {
             entry.qspn_arc = Some(arc);
         }
@@ -337,6 +346,59 @@ impl LinkRegistry {
                 last.insert(link, now);
                 true
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{LinkRegistry, encode_caller_id};
+    use ntk_neighborhood::NodeId;
+
+    /// `set_qspn_arc` and `link_for_neighbour` used to lock `by_id`/`by_mac` in opposite
+    /// orders; hammering both from two threads must finish instead of deadlocking.
+    #[test]
+    fn concurrent_set_qspn_arc_and_link_for_neighbour_do_not_deadlock() {
+        let registry = Arc::new(LinkRegistry::new());
+        let link = registry.link_for_neighbour(NodeId::from_raw(1).unwrap(), "aa:00", "eth0");
+        let (tx, rx) = std::sync::mpsc::channel();
+        for worker in 0..2 {
+            let registry = registry.clone();
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                for i in 0..20_000u32 {
+                    if worker == 0 {
+                        registry.set_qspn_arc(link, ntk_qspn::ArcId::from(i));
+                    } else {
+                        let _ = registry.link_for_neighbour(
+                            NodeId::from_raw(1).unwrap(),
+                            &format!("bb:{}", i % 7),
+                            "eth0",
+                        );
+                    }
+                }
+                tx.send(()).unwrap();
+            });
+        }
+        for _ in 0..2 {
+            rx.recv_timeout(std::time::Duration::from_secs(30))
+                .expect("registry workers deadlocked");
+        }
+    }
+
+    /// Two NICs to one neighbour share a `neighbour_id`; the inbound lookup must not flip
+    /// between them from call to call.
+    #[test]
+    fn caller_lookup_with_two_arcs_to_one_neighbour_is_stable_and_picks_the_oldest() {
+        let registry = LinkRegistry::new();
+        let neighbour = NodeId::from_raw(9).unwrap();
+        let first = registry.link_for_neighbour(neighbour, "aa:01", "eth0");
+        let _second = registry.link_for_neighbour(neighbour, "aa:02", "eth1");
+        let caller = encode_caller_id(neighbour);
+        for _ in 0..50 {
+            assert_eq!(registry.link_for_caller(&caller), Some(first));
         }
     }
 }
