@@ -5,7 +5,7 @@
 //! slot; a mislevelled one is rejected before it can reach the intrinsic
 //! path built by `revise_etp`.
 
-use ntk_common::{Fingerprint, Naddr, Topology};
+use ntk_common::{Cost, Fingerprint, HCoord, Naddr, Topology};
 use ntk_qspn::{ArcId, EtpMessage, check_incoming_message, revise_etp};
 
 fn message(sender_fps: Vec<Fingerprint<Vec<u8>>>, my: &Naddr) -> EtpMessage {
@@ -52,4 +52,29 @@ fn revise_etp_errors_instead_of_building_a_mislevelled_intrinsic_path() {
     fps[1] = fps[0].clone();
     let result = revise_etp(&my, message(fps, &my), ArcId::from(1), None, false, &[]);
     assert!(result.is_err());
+}
+
+#[test]
+fn revise_etp_withdraws_the_real_old_coordinate_when_the_divergence_level_changed() {
+    let (my, fps) = setup();
+    // Peer used to be my level-0 sibling at [1, 0]; it is now at [0, 1],
+    // which diverges from me at level 1.
+    let old = Naddr::new(my.topology().clone(), vec![1u32, 0]).expect("valid old address");
+    let revised = revise_etp(
+        &my,
+        message(fps, &my),
+        ArcId::from(1),
+        Some(&old),
+        false,
+        &[],
+    )
+    .expect("well-formed ETP");
+    assert!(
+        revised
+            .paths
+            .iter()
+            .any(|p| p.path.cost == Cost::Dead && p.path.hops == vec![HCoord::new(0, 1)]),
+        "the old level-0 coordinate must be withdrawn: {:?}",
+        revised.paths
+    );
 }

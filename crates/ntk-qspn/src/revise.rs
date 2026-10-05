@@ -66,8 +66,11 @@ pub fn revise_etp(
         .map_err(QspnError::Common)?
         .ok_or(QspnError::EtpFromSelf)?;
 
-    let peer_naddr_changed =
-        old_peer_naddr.is_some_and(|old| old.pos(v.level) != m.node_address.pos(v.level));
+    // The coordinate the peer's *old* address occupied relative to me; it
+    // may sit at a different level than `v` if the peer moved across g-nodes.
+    let old_coord: Option<HCoord> = old_peer_naddr
+        .and_then(|old| my_naddr.hcoord(old).ok().flatten())
+        .filter(|old_v| *old_v != v);
 
     // Grouping rule on m.hops (qspn.vala:1090-1094): drop leading hops this
     // node's level doesn't need to see, then prepend the sender's own coord.
@@ -114,19 +117,16 @@ pub fn revise_etp(
         ignore_outside: vec![false; levels],
     });
 
-    // If the peer's address at this level moved since the last ETP (identity
-    // migrated on the other end), also withdraw the *old* position
-    // (qspn.vala:1166-1181).
-    if peer_naddr_changed {
-        let old_pos = old_peer_naddr
-            .and_then(|old| old.pos(v.level))
-            .expect("peer_naddr_changed is only true when old_peer_naddr is Some");
+    // If the peer's address moved since the last ETP (identity migrated on
+    // the other end), also withdraw the coordinate it *used* to occupy
+    // relative to me (qspn.vala:1166-1181).
+    if let Some(old_v) = old_coord {
         m.paths.push(EtpPath {
-            hops: vec![HCoord::new(v.level, old_pos)],
+            hops: vec![old_v],
             arcs: vec![arc],
             cost: Cost::Dead,
-            fingerprint: sender_fp,
-            nodes_inside: sender_nn,
+            fingerprint: m.fingerprints[old_v.level].clone(),
+            nodes_inside: m.nodes_inside[old_v.level],
             ignore_outside: vec![false; levels],
         });
     }
