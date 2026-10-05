@@ -359,10 +359,14 @@ async fn far_side_timeout_settles_into_a_well_defined_failed_state() {
         "a single failed arc must not falsely report hooked"
     );
 
-    // The actor keeps serving other commands after an arc fails — not
-    // wedged: the naturally-completed arc handler already cleaned up its
-    // own tracking, so a subsequent remove_arc is a prompt, well-defined
-    // UnknownArc rather than a hang or a stale success.
+    // The actor keeps serving other commands after an arc fails. The naturally-completed
+    // arc handler dropped its cancel token but its phase is still in the snapshot, so the
+    // first remove_arc prunes that entry (Ok); a second one is a well-defined UnknownArc.
+    assert_eq!(handle.remove_arc(arc).await, Ok(()));
+    assert!(
+        !handle.snapshot().arcs.contains_key(&arc),
+        "removing a finished arc must prune its snapshot entry"
+    );
     assert_eq!(
         handle.remove_arc(arc).await,
         Err(ntk_hooking::HookingError::UnknownArc)

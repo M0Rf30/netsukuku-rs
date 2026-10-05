@@ -349,6 +349,12 @@ impl Actor {
 
     fn handle_remove_arc(&mut self, arc: ArcId) -> Result<(), HookingError> {
         let Some(cancel) = self.arc_cancels.remove(&arc) else {
+            // A finished arc handler has already dropped its cancel token but its phase stays
+            // in the snapshot; removal must still prune it rather than report `UnknownArc`.
+            if self.snapshot.arcs.remove(&arc).is_some() {
+                self.publish();
+                return Ok(());
+            }
             return Err(HookingError::UnknownArc);
         };
         cancel.cancel();
