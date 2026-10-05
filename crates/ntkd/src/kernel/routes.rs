@@ -57,6 +57,8 @@ pub struct RouteInstaller<K> {
     applied: BTreeMap<HCoord, RouteSpec>,
     /// This identity's own address, once [`RouteInstaller::install_identity`] has added it.
     identity_address: Option<Ipv4Net>,
+    /// Whether this identity's catch-all rule is (as far as this installer knows) in the kernel.
+    rule_installed: bool,
 }
 
 impl<K> RouteInstaller<K> {
@@ -66,7 +68,7 @@ impl<K> RouteInstaller<K> {
     /// before anything was ever installed). [`release_generation_table`] uses this to refuse
     /// releasing a still-installed generation's table back to a [`ntk_netlink::TableAllocator`].
     pub fn is_installed(&self) -> bool {
-        self.identity_address.is_some() || !self.applied.is_empty()
+        self.identity_address.is_some() || self.rule_installed || !self.applied.is_empty()
     }
 
     /// Test-only accessor to the underlying kernel handle, so integration tests can assert on
@@ -89,6 +91,7 @@ impl<K: Netlink> RouteInstaller<K> {
             arc_endpoints: BTreeMap::new(),
             applied: BTreeMap::new(),
             identity_address: None,
+            rule_installed: false,
         }
     }
 
@@ -138,17 +141,33 @@ impl<K: Netlink> RouteInstaller<K> {
             return Ok(());
         }
         let address = addressing::host_address(&self.my_naddr)?;
-        self.kernel
+        match self
+            .kernel
             .add_address(&Interface::name(IDENTITY_ADDRESS_INTERFACE), address)
-            .await?;
-        self.kernel
+            .await
+        {
+            Ok(()) => {}
+            // Left by an earlier, interrupted install of this same identity: adopt it.
+            Err(error) if error.is_already_exists() => {}
+            Err(error) => return Err(error.into()),
+        }
+        // Recorded immediately, so a failing add_rule below still leaves the address owned
+        // (and removed by `teardown`) instead of orphaned on `lo`.
+        self.identity_address = Some(address);
+        match self
+            .kernel
             .add_rule(&RuleSpec {
                 table: self.table,
                 priority: self.rule_priority,
                 selector: RuleSelector::Any,
             })
-            .await?;
-        self.identity_address = Some(address);
+            .await
+        {
+            Ok(()) => {}
+            Err(error) if error.is_already_exists() => {}
+            Err(error) => return Err(error.into()),
+        }
+        self.rule_installed = true;
         Ok(())
     }
 
@@ -282,7 +301,10 @@ impl<K: Netlink> RouteInstaller<K> {
     /// # Errors
     /// [`RouteError::Netlink`] if a kernel mutation fails.
     pub async fn teardown(&mut self) -> Result<(), RouteError> {
-        for (_, spec) in std::mem::take(&mut self.applied) {
+        // Best effort: a failure on one entry must not skip the rest, so every step is
+        // attempted, failed entries stay recorded for a retry, and the first error is returned.
+        let mut first_error: Option<ntk_netlink::NetlinkError> = None;
+        for (destination, spec) in std::mem::take(&mut self.applied) {
             match self
                 .kernel
                 .remove_route(RouteKey {
@@ -293,22 +315,43 @@ impl<K: Netlink> RouteInstaller<K> {
             {
                 Ok(()) => {}
                 Err(error) if error.is_not_found() => {}
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    self.applied.insert(destination, spec);
+                }
             }
         }
-        if let Some(address) = self.identity_address.take() {
-            self.kernel
-                .remove_rule(&RuleSpec {
-                    table: self.table,
-                    priority: self.rule_priority,
-                    selector: RuleSelector::Any,
-                })
-                .await?;
-            self.kernel
-                .remove_address(&Interface::name(IDENTITY_ADDRESS_INTERFACE), address)
-                .await?;
+        if self.rule_installed {
+            let rule = RuleSpec {
+                table: self.table,
+                priority: self.rule_priority,
+                selector: RuleSelector::Any,
+            };
+            match self.kernel.remove_rule(&rule).await {
+                Ok(()) => self.rule_installed = false,
+                Err(error) if error.is_not_found() => self.rule_installed = false,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
         }
-        Ok(())
+        if let Some(address) = self.identity_address {
+            match self
+                .kernel
+                .remove_address(&Interface::name(IDENTITY_ADDRESS_INTERFACE), address)
+                .await
+            {
+                Ok(()) => self.identity_address = None,
+                Err(error) if error.is_not_found() => self.identity_address = None,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error.into()),
+            None => Ok(()),
+        }
     }
 }
 
@@ -940,7 +983,7 @@ mod tests {
 #[cfg(test)]
 mod resilience_tests {
     use super::*;
-    use ntk_netlink::{FakeNetlink, LinkInfo, RouteTable};
+    use ntk_netlink::{FakeNetlink, LinkInfo, RouteTable, RuleTable};
     use ntk_qspn::RouteEntry;
 
     pub(super) fn links() -> Vec<LinkInfo> {
@@ -1020,6 +1063,51 @@ mod resilience_tests {
             })
             .await
             .unwrap();
+        installer.teardown().await.unwrap();
+        assert!(!installer.is_installed());
+    }
+
+    #[tokio::test]
+    async fn install_identity_adopts_leftover_address_and_rule_from_an_interrupted_run() {
+        let mut installer = installer();
+        installer.install_identity().await.unwrap();
+        // A second install over the very same kernel state (crash-and-resume) must succeed.
+        installer.install_identity().await.unwrap();
+        installer.teardown().await.unwrap();
+        assert!(!installer.is_installed());
+        assert!(
+            installer
+                .kernel_ref()
+                .list_rules()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn teardown_removes_rule_and_address_even_when_a_route_removal_fails() {
+        let mut installer = installer();
+        installer.install_identity().await.unwrap();
+        let dest = HCoord::new(0, 2);
+        installer.apply(&snapshot(&[(dest, 1)])).await.unwrap();
+        let prefix = installer.applied[&dest].destination;
+        installer.kernel_ref().arm_route_failure(
+            prefix,
+            ntk_netlink::NetlinkError::PermissionDenied("denied".into()),
+        );
+        assert!(installer.teardown().await.is_err());
+        assert!(
+            installer
+                .kernel_ref()
+                .list_rules()
+                .await
+                .unwrap()
+                .is_empty(),
+            "the rule must still be removed after a route failure"
+        );
+        assert!(installer.identity_address.is_none());
+        assert!(installer.is_installed(), "the failed route stays tracked");
         installer.teardown().await.unwrap();
         assert!(!installer.is_installed());
     }
