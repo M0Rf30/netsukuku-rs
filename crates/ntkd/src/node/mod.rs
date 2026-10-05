@@ -46,12 +46,62 @@ pub fn main() {
         }
     });
     if let Err(err) = result {
-        // Every error type in this workspace already embeds its own cause's `Display` text in
-        // its own message (`#[error("context: {0}")]` + `#[from]`, this codebase's established
-        // convention — see e.g. `crate::kernel::config::ConfigError`) — so plain `{err}` already
-        // shows the full, readable chain once. Anyhow's alternate `{:#}` additionally walks
-        // `Error::source()`, which re-prints the same already-embedded text a second time.
-        eprintln!("ntkd: error: {err}");
+        eprintln!("ntkd: error: {}", render_error_chain(&err));
         std::process::exit(1);
+    }
+}
+
+/// Renders `err` and its whole cause chain on one line (`outer: cause: root`).
+///
+/// Plain `{err}` prints only the outermost layer, which for an `anyhow::Context` wrapper is a
+/// bare "connecting to the socket /run/ntkd.sock" with the actual `ENOENT`/`EACCES` dropped;
+/// anyhow's `{err:#}` prints every layer, but several error types in this workspace
+/// (`ConfigError`'s `#[error("...: {source}")]`) already embed their cause's text *and* expose
+/// it through `source()`, so `{err:#}` would print that text twice. A cause whose text the
+/// message so far already contains is therefore skipped.
+pub(crate) fn render_error_chain(err: &anyhow::Error) -> String {
+    let mut rendered = err.to_string();
+    for cause in err.chain().skip(1) {
+        let text = cause.to_string();
+        if !rendered.contains(&text) {
+            rendered.push_str(": ");
+            rendered.push_str(&text);
+        }
+    }
+    rendered
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Context as _;
+
+    use super::render_error_chain;
+
+    #[test]
+    fn error_chain_shows_the_io_cause_under_a_context_message() {
+        let err = std::fs::metadata("/nonexistent/ntkd.sock")
+            .context("connecting to the ntkd status socket /nonexistent/ntkd.sock")
+            .unwrap_err();
+        let rendered = render_error_chain(&err);
+        assert!(
+            rendered.starts_with("connecting to the ntkd status socket /nonexistent/ntkd.sock: "),
+            "{rendered}"
+        );
+        assert!(rendered.contains("No such file or directory"), "{rendered}");
+    }
+
+    #[test]
+    fn error_chain_does_not_repeat_a_cause_the_message_already_embeds() {
+        let missing =
+            crate::kernel::config::NtkdConfig::load(std::path::Path::new("/nonexistent/ntkd.toml"))
+                .unwrap_err();
+        let err = anyhow::Error::from(missing);
+        let rendered = render_error_chain(&err);
+        assert_eq!(
+            rendered.matches("No such file or directory").count(),
+            1,
+            "{rendered}"
+        );
+        assert!(rendered.contains("/nonexistent/ntkd.toml"), "{rendered}");
     }
 }

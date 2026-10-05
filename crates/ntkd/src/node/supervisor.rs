@@ -148,6 +148,13 @@ pub async fn run(
     } else {
         cli_nics
     };
+    if nics.is_empty() {
+        tracing::warn!(
+            config = %config_path.display(),
+            "no network interfaces configured (empty `nics` in the config and no --nic given): \
+             this node will never discover a neighbour"
+        );
+    }
 
     let root_cancel = CancellationToken::new();
     let mut tasks = JoinSet::new();
@@ -188,7 +195,10 @@ pub async fn run(
         )
         .await
         {
-            tracing::warn!(%err, "status server exited");
+            tracing::warn!(
+                err = %crate::node::render_error_chain(&err),
+                "status server exited"
+            );
         }
     });
 
