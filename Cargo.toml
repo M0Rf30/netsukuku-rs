@@ -35,8 +35,8 @@ futures = "0.3"
 bytes = "1"
 socket2 = "0.6"
 nix = "0.31"
-rtnetlink = "0.23"
-netlink-packet-route = "0.33"
+rtnetlink = "0.24"
+netlink-packet-route = "0.34"
 prost = "0.14"
 prost-build = "0.14"
 protox = "0.10"
@@ -58,7 +58,7 @@ rand = "0.10"
 # Wireless (nl80211) — test fixtures only, so the `mac80211_hwsim` rung configures radios over
 # netlink like the veth fixture does, rather than shelling out to `iw`. Same rust-netlink family
 # and release train as `rtnetlink`/`netlink-packet-route` above.
-wl-nl80211 = "0.8"
+wl-nl80211 = "0.9"
 netlink-packet-core = "0.9"
 
 [workspace.lints.rust]
